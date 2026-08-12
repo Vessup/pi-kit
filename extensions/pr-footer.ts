@@ -2,9 +2,12 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
+export type CheckStatus = "failure" | "pending" | "success";
+
 type PullRequest = {
 	number: number;
 	url: string;
+	checkStatus: CheckStatus;
 };
 
 type UsageTotals = {
@@ -17,6 +20,18 @@ type UsageTotals = {
 
 const OSC_8_OPEN = "\x1b]8;;";
 const OSC_8_CLOSE = "\x1b]8;;\x1b\\";
+const REFRESH_INTERVAL_MS = 30_000;
+const FAILING_CHECK_STATES = new Set([
+	"ACTION_REQUIRED",
+	"CANCELLED",
+	"ERROR",
+	"FAILURE",
+	"STALE",
+	"STARTUP_FAILURE",
+	"TIMED_OUT",
+]);
+const PENDING_CHECK_STATES = new Set(["EXPECTED", "IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"]);
+const SUCCESSFUL_CHECK_STATES = new Set(["COMPLETED", "NEUTRAL", "SKIPPED", "SUCCESS"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
@@ -24,6 +39,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numeric(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function aggregateCheckStatus(value: unknown): CheckStatus {
+	if (!Array.isArray(value) || value.length === 0) return "pending";
+
+	let pending = false;
+	for (const check of value) {
+		if (!isRecord(check)) {
+			pending = true;
+			continue;
+		}
+
+		const states = [check.conclusion, check.state, check.status]
+			.filter((state): state is string => typeof state === "string")
+			.map((state) => state.toUpperCase());
+
+		if (states.some((state) => FAILING_CHECK_STATES.has(state))) return "failure";
+		if (states.length === 0 || states.some((state) => PENDING_CHECK_STATES.has(state))) pending = true;
+		if (states.some((state) => !FAILING_CHECK_STATES.has(state) && !SUCCESSFUL_CHECK_STATES.has(state))) pending = true;
+	}
+
+	return pending ? "pending" : "success";
 }
 
 export function parsePullRequest(value: string): PullRequest | null {
@@ -35,7 +72,11 @@ export function parsePullRequest(value: string): PullRequest | null {
 		const url = new URL(parsed.url);
 		if (url.protocol !== "https:" && url.protocol !== "http:") return null;
 
-		return { number: numeric(parsed.number), url: url.toString() };
+		return {
+			number: numeric(parsed.number),
+			url: url.toString(),
+			checkStatus: aggregateCheckStatus(parsed.statusCheckRollup),
+		};
 	} catch {
 		return null;
 	}
@@ -95,7 +136,7 @@ export function alignSides(left: string, right: string, width: number): string {
 }
 
 async function findPullRequest(pi: ExtensionAPI, cwd: string): Promise<PullRequest | null> {
-	const result = await pi.exec("gh", ["pr", "view", "--json", "number,url"], {
+	const result = await pi.exec("gh", ["pr", "view", "--json", "number,url,statusCheckRollup"], {
 		cwd,
 		timeout: 10_000,
 	});
@@ -107,7 +148,7 @@ export default function prFooter(pi: ExtensionAPI): void {
 	let refreshCurrent: (() => Promise<PullRequest | null>) | undefined;
 
 	pi.registerCommand("pr-refresh", {
-		description: "Refresh the pull request link in the footer",
+		description: "Refresh the pull request link and check status in the footer",
 		handler: async (_args, ctx) => {
 			if (!refreshCurrent || ctx.mode !== "tui") {
 				ctx.ui.notify("The PR footer is only available in TUI mode", "warning");
@@ -126,14 +167,24 @@ export default function prFooter(pi: ExtensionAPI): void {
 			let pullRequest: PullRequest | null = null;
 			let disposed = false;
 			let refreshGeneration = 0;
+			let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 			const refresh = async (): Promise<PullRequest | null> => {
+				if (refreshTimer) {
+					clearTimeout(refreshTimer);
+					refreshTimer = undefined;
+				}
+
 				const generation = ++refreshGeneration;
 				const next = await findPullRequest(pi, ctx.cwd);
 				if (disposed || generation !== refreshGeneration) return next;
 
 				pullRequest = next;
 				tui.requestRender();
+				refreshTimer = setTimeout(() => {
+					refreshTimer = undefined;
+					void refresh();
+				}, REFRESH_INTERVAL_MS);
 				return next;
 			};
 
@@ -151,6 +202,7 @@ export default function prFooter(pi: ExtensionAPI): void {
 				dispose() {
 					disposed = true;
 					refreshGeneration++;
+					if (refreshTimer) clearTimeout(refreshTimer);
 					unsubscribeBranch();
 					if (refreshCurrent === refresh) refreshCurrent = undefined;
 				},
@@ -199,8 +251,14 @@ export default function prFooter(pi: ExtensionAPI): void {
 					const lines: string[] = [];
 
 					if (pullRequest) {
-						const label = `PR #${pullRequest.number}`;
-						const link = hyperlink(pullRequest.url, theme.fg("accent", label));
+						const statusColor =
+							pullRequest.checkStatus === "failure"
+								? "error"
+								: pullRequest.checkStatus === "pending"
+									? "warning"
+									: "success";
+						const label = `${theme.fg("accent", `PR #${pullRequest.number}`)} ${theme.fg(statusColor, "•")}`;
+						const link = hyperlink(pullRequest.url, label);
 						lines.push(visibleWidth(link) <= width ? alignSides(cwdLine, link, width) : cwdLine);
 					} else {
 						lines.push(cwdLine);

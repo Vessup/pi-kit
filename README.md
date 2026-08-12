@@ -4,9 +4,13 @@ Reusable extensions for the [Pi coding agent](https://github.com/earendil-works/
 
 ## PR footer
 
-`extensions/pr-footer.ts` keeps Pi's normal footer information and adds the current GitHub pull request as a right-aligned, clickable `PR #123` link on the directory/branch line above the model information.
+`extensions/pr-footer.ts` keeps Pi's normal footer information and adds the current GitHub pull request as a right-aligned, clickable `PR #123` link on the directory/branch line above the model information. A colored dot shows the aggregate check status:
 
-It uses the GitHub CLI to resolve the pull request for the checked-out branch. If `gh` is unavailable, unauthenticated, or the branch has no pull request, the link is hidden. Run `/pr-refresh` after creating a pull request without changing branches.
+- Green: checks passed
+- Yellow: checks are pending or in progress
+- Red: at least one check failed or was cancelled
+
+It uses the GitHub CLI to resolve the pull request and check status for the checked-out branch, refreshing every 30 seconds. If `gh` is unavailable, unauthenticated, or the branch has no pull request, the link is hidden. Run `/pr-refresh` to refresh immediately.
 
 ### Requirements
 
