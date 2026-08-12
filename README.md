@@ -4,7 +4,7 @@ Reusable extensions for the [Pi coding agent](https://github.com/earendil-works/
 
 ## PR footer
 
-`extensions/pr-footer.ts` keeps Pi's normal footer information and adds the current GitHub pull request as a right-aligned, clickable `PR #123` link on the directory/branch line above the model information. A colored dot shows the aggregate check status:
+`extensions/pr-footer.ts` keeps Pi's normal footer information and adds the current GitHub pull request as a right-aligned, clickable ` #123` link on the directory/branch line above the model information. A small gray separator precedes a larger colored circle showing the aggregate check status:
 
 - Green: checks passed
 - Yellow: checks are pending or in progress
@@ -17,6 +17,7 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 - Pi
 - GitHub CLI (`gh`), authenticated with `gh auth login`
 - A terminal that supports OSC 8 hyperlinks for clickable links
+- A Nerd Font for the branch icon
 
 ## Install
 

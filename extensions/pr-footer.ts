@@ -20,6 +20,7 @@ type UsageTotals = {
 
 const OSC_8_OPEN = "\x1b]8;;";
 const OSC_8_CLOSE = "\x1b]8;;\x1b\\";
+const NERD_FONT_BRANCH_ICON = "\uf418";
 const REFRESH_INTERVAL_MS = 30_000;
 const FAILING_CHECK_STATES = new Set([
 	"ACTION_REQUIRED",
@@ -257,9 +258,12 @@ export default function prFooter(pi: ExtensionAPI): void {
 								: pullRequest.checkStatus === "pending"
 									? "warning"
 									: "success";
-						const label = `${theme.fg("accent", `PR #${pullRequest.number}`)} ${theme.fg(statusColor, "•")}`;
-						const link = hyperlink(pullRequest.url, label);
-						lines.push(visibleWidth(link) <= width ? alignSides(cwdLine, link, width) : cwdLine);
+						const link = hyperlink(
+							pullRequest.url,
+							theme.fg("accent", `${NERD_FONT_BRANCH_ICON} #${pullRequest.number}`),
+						);
+						const prStatus = `${link} ${theme.fg("dim", "•")} ${theme.fg(statusColor, "●")}`;
+						lines.push(visibleWidth(prStatus) <= width ? alignSides(cwdLine, prStatus, width) : cwdLine);
 					} else {
 						lines.push(cwdLine);
 					}
