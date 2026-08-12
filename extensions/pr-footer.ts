@@ -33,6 +33,11 @@ const FAILING_CHECK_STATES = new Set([
 ]);
 const PENDING_CHECK_STATES = new Set(["EXPECTED", "IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"]);
 const SUCCESSFUL_CHECK_STATES = new Set(["COMPLETED", "NEUTRAL", "SKIPPED", "SUCCESS"]);
+const CHECK_STATUS_COLORS = {
+	failure: { rgb: [239, 68, 68], ansi256: 203 },
+	pending: { rgb: [245, 158, 11], ansi256: 214 },
+	success: { rgb: [34, 197, 94], ansi256: 41 },
+} as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
@@ -121,6 +126,13 @@ function hyperlink(url: string, label: string): string {
 
 function sanitizeStatus(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
+export function checkStatusCircle(status: CheckStatus, colorMode: "truecolor" | "256color"): string {
+	const color = CHECK_STATUS_COLORS[status];
+	const foreground =
+		colorMode === "truecolor" ? `\x1b[38;2;${color.rgb.join(";")}m` : `\x1b[38;5;${color.ansi256}m`;
+	return `${foreground}●\x1b[39m`;
 }
 
 /** Align text on both sides, preserving ANSI and OSC 8 escape sequences. */
@@ -252,17 +264,11 @@ export default function prFooter(pi: ExtensionAPI): void {
 					const lines: string[] = [];
 
 					if (pullRequest) {
-						const statusColor =
-							pullRequest.checkStatus === "failure"
-								? "error"
-								: pullRequest.checkStatus === "pending"
-									? "warning"
-									: "success";
 						const link = hyperlink(
 							pullRequest.url,
 							theme.fg("accent", `${NERD_FONT_BRANCH_ICON} #${pullRequest.number}`),
 						);
-						const prStatus = `${link} ${theme.fg(statusColor, "●")}`;
+						const prStatus = `${link} ${checkStatusCircle(pullRequest.checkStatus, theme.getColorMode())}`;
 						lines.push(visibleWidth(prStatus) <= width ? alignSides(cwdLine, prStatus, width) : cwdLine);
 					} else {
 						lines.push(cwdLine);
