@@ -262,7 +262,7 @@ export default function prFooter(pi: ExtensionAPI): void {
 							pullRequest.url,
 							theme.fg("accent", `${NERD_FONT_BRANCH_ICON} #${pullRequest.number}`),
 						);
-						const prStatus = `${link} ${theme.fg("dim", "•")} ${theme.fg(statusColor, "●")}`;
+						const prStatus = `${link} ${theme.fg(statusColor, "●")}`;
 						lines.push(visibleWidth(prStatus) <= width ? alignSides(cwdLine, prStatus, width) : cwdLine);
 					} else {
 						lines.push(cwdLine);
