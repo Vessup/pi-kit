@@ -195,22 +195,25 @@ export default function prFooter(pi: ExtensionAPI): void {
 					}
 					if (ctx.model && footerData.getAvailableProviderCount() > 1) model = `(${ctx.model.provider}) ${model}`;
 
-					const lines = [truncateToWidth(theme.fg("dim", cwd), width, theme.fg("dim", "..."))];
+					const cwdLine = truncateToWidth(theme.fg("dim", cwd), width, theme.fg("dim", "..."));
+					const lines: string[] = [];
+
+					if (pullRequest) {
+						const label = `PR #${pullRequest.number}`;
+						const link = hyperlink(pullRequest.url, theme.fg("accent", label));
+						lines.push(visibleWidth(link) <= width ? alignSides(cwdLine, link, width) : cwdLine);
+					} else {
+						lines.push(cwdLine);
+					}
+
+					lines.push(alignSides(theme.fg("dim", stats.join(" ")), theme.fg("dim", model), width));
 
 					const statuses = Array.from(footerData.getExtensionStatuses().entries())
 						.sort(([a], [b]) => a.localeCompare(b))
 						.map(([, text]) => sanitizeStatus(text))
 						.join(" ");
+					if (statuses) lines.push(truncateToWidth(statuses, width, theme.fg("dim", "...")));
 
-					if (pullRequest) {
-						const label = `PR #${pullRequest.number}`;
-						const link = hyperlink(pullRequest.url, theme.fg("accent", label));
-						if (visibleWidth(link) <= width) lines.push(alignSides(statuses, link, width));
-					} else if (statuses) {
-						lines.push(truncateToWidth(statuses, width, theme.fg("dim", "...")));
-					}
-
-					lines.push(alignSides(theme.fg("dim", stats.join(" ")), theme.fg("dim", model), width));
 					return lines;
 				},
 			};
