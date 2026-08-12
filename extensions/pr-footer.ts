@@ -195,10 +195,7 @@ export default function prFooter(pi: ExtensionAPI): void {
 					}
 					if (ctx.model && footerData.getAvailableProviderCount() > 1) model = `(${ctx.model.provider}) ${model}`;
 
-					const lines = [
-						truncateToWidth(theme.fg("dim", cwd), width, theme.fg("dim", "...")),
-						alignSides(theme.fg("dim", stats.join(" ")), theme.fg("dim", model), width),
-					];
+					const lines = [truncateToWidth(theme.fg("dim", cwd), width, theme.fg("dim", "..."))];
 
 					const statuses = Array.from(footerData.getExtensionStatuses().entries())
 						.sort(([a], [b]) => a.localeCompare(b))
@@ -213,6 +210,7 @@ export default function prFooter(pi: ExtensionAPI): void {
 						lines.push(truncateToWidth(statuses, width, theme.fg("dim", "...")));
 					}
 
+					lines.push(alignSides(theme.fg("dim", stats.join(" ")), theme.fg("dim", model), width));
 					return lines;
 				},
 			};

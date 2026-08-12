@@ -4,7 +4,7 @@ Reusable extensions for the [Pi coding agent](https://github.com/earendil-works/
 
 ## PR footer
 
-`extensions/pr-footer.ts` keeps Pi's normal footer information and adds the current GitHub pull request as a clickable `PR #123` link in the bottom-right corner.
+`extensions/pr-footer.ts` keeps Pi's normal footer information and adds the current GitHub pull request as a right-aligned, clickable `PR #123` link above the model information.
 
 It uses the GitHub CLI to resolve the pull request for the checked-out branch. If `gh` is unavailable, unauthenticated, or the branch has no pull request, the link is hidden. Run `/pr-refresh` after creating a pull request without changing branches.
 
