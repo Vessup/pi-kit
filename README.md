@@ -1,4 +1,4 @@
-# @vessup/pi
+# @vessup/pi-kit
 
 Reusable extensions for the [Pi coding agent](https://github.com/earendil-works/pi).
 
@@ -40,15 +40,15 @@ The subagent extension independently contributes its token use and status to `ex
 From this checkout:
 
 ```sh
-pi install ~/vessup/pi
+pi install ~/vessup/pi-kit
 ```
 
 After pushing this repository to GitHub, install it on another machine with either SSH or HTTPS:
 
 ```sh
-pi install git:git@github.com:Vessup/pi.git
+pi install git:git@github.com:Vessup/pi-kit.git
 # or
-pi install git:github.com/Vessup/pi
+pi install git:github.com/Vessup/pi-kit
 ```
 
 Use `/reload` in a running Pi session after installing. Update a Git installation later with:
