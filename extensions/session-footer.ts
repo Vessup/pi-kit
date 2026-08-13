@@ -106,11 +106,34 @@ export default function sessionFooter(pi: ExtensionAPI): void {
 					if (requestRender === rerender) requestRender = undefined;
 				},
 				render(width: number): string[] {
+					const identityPrefix = Array.from(contributions.entries())
+						.sort(([a], [b]) => a.localeCompare(b))
+						.flatMap(([, contribution]) => {
+							try {
+								const rendered = contribution.identityPrefix?.(theme);
+								return rendered ? [rendered] : [];
+							} catch {
+								return [];
+							}
+						})
+						.join(" ");
 					let cwd = formatCwd(ctx.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
 					const branch = footerData.getGitBranch();
 					if (branch) cwd += ` (${branch})`;
 					const sessionName = ctx.sessionManager.getSessionName();
 					if (sessionName) cwd += ` • ${sessionName}`;
+					const identitySuffix = Array.from(contributions.entries())
+						.sort(([a], [b]) => a.localeCompare(b))
+						.flatMap(([, contribution]) => {
+							try {
+								const rendered = contribution.identitySuffix?.(theme);
+								return rendered ? [rendered] : [];
+							} catch {
+								return [];
+							}
+						})
+						.join(" ");
+					if (identitySuffix) cwd += ` ${identitySuffix}`;
 
 					const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 					for (const entry of ctx.sessionManager.getEntries()) {
@@ -157,7 +180,9 @@ export default function sessionFooter(pi: ExtensionAPI): void {
 							}
 						})
 						.join(" ");
-					const cwdLine = theme.fg("dim", cwd);
+					const cwdLine = identityPrefix
+						? `${identityPrefix} ${theme.fg("dim", cwd)}`
+						: theme.fg("dim", cwd);
 					const lines = [
 						topRight
 							? alignSides(cwdLine, topRight, width)

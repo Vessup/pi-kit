@@ -1,0 +1,1032 @@
+{
+  "slug": "f3565058ce4e73db39e20dd3feb065c8fd799e9e..WT",
+  "base": {
+    "kind": "commit",
+    "ref": "f3565058ce4e73db39e20dd3feb065c8fd799e9e",
+    "label": "main"
+  },
+  "head": {
+    "kind": "working-tree"
+  },
+  "comments": [
+    {
+      "id": "0c58b096-d11f-4906-b671-71028621ee7d",
+      "threadId": "0c58b096-d11f-4906-b671-71028621ee7d",
+      "file": "extensions/web-sessions.ts",
+      "line": 460,
+      "side": "new",
+      "body": "The native bridge responds successfully immediately after enqueueing `/web-clone` or `/web-fork`, before the asynchronous fork completes. The browser refreshes too early and failures are hidden. Execute and await the fork directly, then return the replacement session identity only after completion (`extensions/web-sessions.ts:460`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:30:04.912Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Fork and clone now respond only after completion.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:38.275Z"
+      }
+    },
+    {
+      "id": "bfe7036a-f728-4c4a-81f5-d1a04252e9f7",
+      "threadId": "bfe7036a-f728-4c4a-81f5-d1a04252e9f7",
+      "file": "web/client/app.tsx",
+      "line": 994,
+      "endLine": 995,
+      "side": "new",
+      "body": "These asynchronous option requests update shared `sessionOptions` without checking that their session is still selected. A slow prior-session response can overwrite the new session model, effort, and slash commands. Guard results with the requested session ID or cancellation (`web/client/app.tsx:994`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:30:04.958Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Stale session-option responses are ignored.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:38.361Z"
+      }
+    },
+    {
+      "id": "ea2a80c1-abd7-4b6d-8608-931bda90470c",
+      "threadId": "ea2a80c1-abd7-4b6d-8608-931bda90470c",
+      "file": "web/server/index.ts",
+      "line": 1458,
+      "endLine": 1462,
+      "side": "new",
+      "body": "When clone/fork changes a managed session ID, the in-memory session map is rekeyed but `persistedQueues` is not. A later write leaves old and new durable entries, allowing duplicate prompt restoration/delivery after restart. Atomically migrate/delete the old queue key with the session ID (`web/server/index.ts:1458`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:30:05.003Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Persisted queues migrate with managed session IDs.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:38.449Z"
+      }
+    },
+    {
+      "id": "533067fe-2d1c-4012-9927-563c06498496",
+      "threadId": "533067fe-2d1c-4012-9927-563c06498496",
+      "file": "web/server/index.ts",
+      "line": 2140,
+      "endLine": 2143,
+      "side": "new",
+      "body": "The lexical containment check plus final-component `lstatSync` does not reject symlinked ancestors. A path under the sessions directory can resolve outside it and later be deleted through the API. Canonicalize the full path and sessions root with `realpathSync`, verify containment, and use only the canonical path (`web/server/index.ts:2140`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:30:05.047Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Session file operations now enforce canonical containment.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:38.535Z"
+      }
+    },
+    {
+      "id": "81e168fc-f7a6-4f9f-918d-e17aafd60ce8",
+      "threadId": "81e168fc-f7a6-4f9f-918d-e17aafd60ce8",
+      "file": "extensions/web-settings.ts",
+      "line": 57,
+      "side": "new",
+      "body": "Writing shared `settings.json` directly can truncate or partially replace all Pi settings on interruption or failure. Write a mode-0600 temporary file in the same directory and atomically rename it over the target (`extensions/web-settings.ts:57`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:30:05.092Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Settings persistence is now atomic.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:38.620Z"
+      }
+    },
+    {
+      "id": "84b246de-eacc-4054-b9cf-92a9c204a5ae",
+      "threadId": "84b246de-eacc-4054-b9cf-92a9c204a5ae",
+      "file": "extensions/web-sessions.ts",
+      "line": 393,
+      "side": "new",
+      "body": "`get_session_options` exposes only `ctx.scopedModels`, but `set_model` resolves against the full registry, so a crafted web command can select an excluded model. Enforce the same provider/id allowlist before `pi.setModel` and test rejection (`extensions/web-sessions.ts:393`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:30:05.136Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Model changes now honor session scope.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:46.865Z"
+      }
+    },
+    {
+      "id": "88789a81-5ddc-4a2f-9493-82989ce5b274",
+      "threadId": "88789a81-5ddc-4a2f-9493-82989ce5b274",
+      "file": "web/server/index.ts",
+      "line": 1646,
+      "side": "new",
+      "body": "`client.subscribe` adds a socket to the new session without removing it from its previous session. The socket continues receiving both sessions while close cleanup removes only the latest membership. Remove the previous subscription first or reject re-subscription, with coverage (`web/server/index.ts:1646`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:30:05.180Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Client re-subscription removes prior membership.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:46.953Z"
+      }
+    },
+    {
+      "id": "72751eda-94f2-4f49-b78b-59a85d6e653a",
+      "threadId": "72751eda-94f2-4f49-b78b-59a85d6e653a",
+      "file": "web/client/app.tsx",
+      "line": 748,
+      "side": "new",
+      "body": "Every browser polls `/api/sessions` every five seconds even while connected, and the endpoint synchronously traverses/stats all saved sessions. Large histories can repeatedly block Bun and delay live events. Poll only while disconnected or use incremental/background refresh (`web/client/app.tsx:748`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:30:05.223Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Session polling is disabled while connected.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:47.038Z"
+      }
+    },
+    {
+      "id": "d7d76b11-3ff3-4551-8c32-6c2f54b41975",
+      "threadId": "d7d76b11-3ff3-4551-8c32-6c2f54b41975",
+      "file": "extensions/session-footer.ts",
+      "line": 180,
+      "endLine": 216,
+      "side": "new",
+      "body": "No production code emits the isolated viewport events, leaving this path coupled to private TUI fields and `doRender` internals without a caller. Remove the viewport event/state manipulation or add and document its supported consumer (`extensions/session-footer.ts:180`).",
+      "author": "GPT-5.6",
+      "priority": "P3",
+      "createdAt": "2026-08-13T21:30:05.267Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Removed dead viewport rendering path.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:37:47.135Z"
+      }
+    },
+    {
+      "id": "c45a586f-e115-4a14-b713-1440d7a17a0b",
+      "threadId": "0c58b096-d11f-4906-b671-71028621ee7d",
+      "parentId": "0c58b096-d11f-4906-b671-71028621ee7d",
+      "body": "Changed the bridge to await the command-context fork/clone operation and capture the replacement session ID before sending the RPC success response. Fork errors now reject the pending browser request.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:38.231Z"
+    },
+    {
+      "id": "a413b415-0dd7-4d74-82e9-34539669a36c",
+      "threadId": "bfe7036a-f728-4c4a-81f5-d1a04252e9f7",
+      "parentId": "bfe7036a-f728-4c4a-81f5-d1a04252e9f7",
+      "body": "Guarded both asynchronous options and commands responses (including their failure paths) against the requested session ID, so stale responses cannot mutate the newly selected session.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:38.318Z"
+    },
+    {
+      "id": "d3bbf1ef-e851-4602-a30c-107a5242f65c",
+      "threadId": "ea2a80c1-abd7-4b6d-8608-931bda90470c",
+      "parentId": "ea2a80c1-abd7-4b6d-8608-931bda90470c",
+      "body": "Added durable queue-key migration before rekeying a managed session. The old key is deleted, the current queue is written under the replacement ID, and in-memory keys/record identity roll back if persistence fails.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:38.406Z"
+    },
+    {
+      "id": "2bc4eb51-4aec-439a-ab36-7bd8b348efb5",
+      "threadId": "533067fe-2d1c-4012-9927-563c06498496",
+      "parentId": "533067fe-2d1c-4012-9927-563c06498496",
+      "body": "Resume and delete now resolve both the sessions root and candidate through realpath, enforce containment on canonical paths, require a regular file, and operate only on the canonical result.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:38.492Z"
+    },
+    {
+      "id": "059835e7-3137-4942-998f-a766bf3e8903",
+      "threadId": "81e168fc-f7a6-4f9f-918d-e17aafd60ce8",
+      "parentId": "81e168fc-f7a6-4f9f-918d-e17aafd60ce8",
+      "body": "Settings writes now create an exclusive mode-0600 temporary file in the settings directory, atomically rename it over settings.json, and clean up the temporary path on failure.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:38.578Z"
+    },
+    {
+      "id": "b4d23fb7-f9dd-493c-8015-fbc3393e8136",
+      "threadId": "84b246de-eacc-4054-b9cf-92a9c204a5ae",
+      "parentId": "84b246de-eacc-4054-b9cf-92a9c204a5ae",
+      "body": "Enforced the same scoped-model provider/ID allowlist used to expose options before resolving and applying set_model, and added focused rejection coverage.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:46.819Z"
+    },
+    {
+      "id": "ca297085-5897-4300-936e-15dfb12f9d7f",
+      "threadId": "88789a81-5ddc-4a2f-9493-82989ce5b274",
+      "parentId": "88789a81-5ddc-4a2f-9493-82989ce5b274",
+      "body": "A client re-subscription now removes the socket from its previous session before adding it to the new record, so delivery and close cleanup track exactly one membership.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:46.910Z"
+    },
+    {
+      "id": "23820fc7-dd9c-44b5-97f2-f9f6c567116b",
+      "threadId": "72751eda-94f2-4f49-b78b-59a85d6e653a",
+      "parentId": "72751eda-94f2-4f49-b78b-59a85d6e653a",
+      "body": "Changed session-list polling to run only while the live socket is disconnected; connected clients continue receiving incremental WebSocket snapshots and updates.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:46.997Z"
+    },
+    {
+      "id": "deacd5a1-ef89-41d8-9697-5603b37184e3",
+      "threadId": "d7d76b11-3ff3-4551-8c32-6c2f54b41975",
+      "parentId": "d7d76b11-3ff3-4551-8c32-6c2f54b41975",
+      "body": "Removed the unused force-render/viewport event path and restored the footer to the supported public requestRender API only.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:37:47.091Z"
+    },
+    {
+      "id": "4e934f06-2a89-494b-9813-7329692afd11",
+      "threadId": "4e934f06-2a89-494b-9813-7329692afd11",
+      "file": "extensions/web-sessions.ts",
+      "line": 478,
+      "endLine": 481,
+      "side": "new",
+      "body": "The pending clone/fork promise has no timeout, dispatch-rejection handling, or shutdown cleanup. If command injection fails or the session closes before the command resolves it, the API hangs and `pendingForks` leaks. Add bounded cancellation and clean up all paths (`extensions/web-sessions.ts:478`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.574Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Pending forks are bounded and cleaned up.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.355Z"
+      }
+    },
+    {
+      "id": "60a1b39c-d1ac-404d-a100-cc5600db40b2",
+      "threadId": "60a1b39c-d1ac-404d-a100-cc5600db40b2",
+      "file": "web/client/app.tsx",
+      "line": 971,
+      "endLine": 978,
+      "side": "new",
+      "body": "The stale-response guard checks only session ID. If that same session becomes offline while options are pending, the offline clear runs first and the late response repopulates controls. Use a lifecycle/request generation and accept only the current generation (`web/client/app.tsx:971`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.624Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Option requests now use lifecycle generations.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.442Z"
+      }
+    },
+    {
+      "id": "5628b7de-3de3-48bc-9730-ccf53f358bab",
+      "threadId": "5628b7de-3de3-48bc-9730-ccf53f358bab",
+      "file": "extensions/web-settings.ts",
+      "line": 41,
+      "endLine": 62,
+      "side": "new",
+      "body": "Atomic rename prevents torn files but not lost updates: concurrent Pi processes can both read the same settings and the later rename discards unrelated keys from the first. Use the shared cross-process settings lock and re-read while holding it (`extensions/web-settings.ts:41`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.671Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Settings writes now share Pi cross-process locking.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.529Z"
+      }
+    },
+    {
+      "id": "7e1b48ac-aa0b-4551-8e07-13c82462cd6c",
+      "threadId": "7e1b48ac-aa0b-4551-8e07-13c82462cd6c",
+      "file": "web/client/app.tsx",
+      "line": 1117,
+      "endLine": 1131,
+      "side": "new",
+      "body": "The bridge now returns `{ cancelled, sessionId }`, but clone still expects `result.session` and fork discards the result. Successful operations therefore fail to select the replacement and cancellation is mishandled. Consume the actual contract and test both actions (`web/client/app.tsx:1117`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.716Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Client consumes the bridge fork result contract.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.616Z"
+      }
+    },
+    {
+      "id": "9f26b6f4-4ca8-41c5-8131-48f859b1b271",
+      "threadId": "9f26b6f4-4ca8-41c5-8131-48f859b1b271",
+      "file": "web/server/index.ts",
+      "line": 1483,
+      "endLine": 1501,
+      "side": "new",
+      "body": "Session rekeying updates the map but not subscribed sockets’ `data.sessionId`. Later re-subscription cannot remove those sockets from the rekeyed record, leaking replacement-session events after switching. Update subscription bookkeeping during rekey and test the switch (`web/server/index.ts:1483`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.761Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Rekey updates socket subscription bookkeeping.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.701Z"
+      }
+    },
+    {
+      "id": "da480dbe-fa58-4da9-9e16-06a7a0b0802a",
+      "threadId": "da480dbe-fa58-4da9-9e16-06a7a0b0802a",
+      "file": "web/client/app.tsx",
+      "line": 748,
+      "side": "new",
+      "body": "Stopping polling while connected makes unrelated/new sessions undiscoverable because the socket receives events only for its selected record. Add global session-list events or retain a low-frequency nonblocking refresh (`web/client/app.tsx:748`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.806Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Connected clients retain global session discovery.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.787Z"
+      }
+    },
+    {
+      "id": "7a711c05-4957-4fc9-9188-bdc35dcaa147",
+      "threadId": "7a711c05-4957-4fc9-9188-bdc35dcaa147",
+      "file": "web/server/index.ts",
+      "line": 1975,
+      "side": "new",
+      "body": "Every native `message_end` synchronously reparses the entire growing JSONL history, producing repeated O(history) work on Bun’s event loop. Update history/metadata incrementally and reserve full parsing for initial load or reconciliation (`web/server/index.ts:1975`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:41:17.852Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Native messages no longer reparse full history.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:44:43.873Z"
+      }
+    },
+    {
+      "id": "33b1c17c-5447-4fca-8a7c-bca6ab8b8cd3",
+      "threadId": "4e934f06-2a89-494b-9813-7329692afd11",
+      "parentId": "4e934f06-2a89-494b-9813-7329692afd11",
+      "body": "Added a 30-second timeout, dispatch-failure cleanup, and session-change/shutdown cancellation for pending fork and clone operations.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.311Z"
+    },
+    {
+      "id": "e6db9df1-3c7b-4aca-96a6-bb5ac46ee487",
+      "threadId": "60a1b39c-d1ac-404d-a100-cc5600db40b2",
+      "parentId": "60a1b39c-d1ac-404d-a100-cc5600db40b2",
+      "body": "Added a lifecycle generation for selected-session status transitions; option and command responses now require the current generation.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.399Z"
+    },
+    {
+      "id": "12283d8e-8fde-4427-b4f9-ff3be33d8fbb",
+      "threadId": "5628b7de-3de3-48bc-9730-ccf53f358bab",
+      "parentId": "5628b7de-3de3-48bc-9730-ccf53f358bab",
+      "body": "Wrapped settings read-modify-rename in Pi FileSettingsStorage compatible proper-lockfile locking with realpath:false and bounded retries.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.486Z"
+    },
+    {
+      "id": "a6852bcf-6299-494a-acc7-1a434fb6681a",
+      "threadId": "7e1b48ac-aa0b-4551-8e07-13c82462cd6c",
+      "parentId": "7e1b48ac-aa0b-4551-8e07-13c82462cd6c",
+      "body": "Clone and fork now honor cancelled and select/hash the returned sessionId after refreshing discovery.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.573Z"
+    },
+    {
+      "id": "7e25dc73-3597-4234-89ba-5a3706e4b27c",
+      "threadId": "9f26b6f4-4ca8-41c5-8131-48f859b1b271",
+      "parentId": "9f26b6f4-4ca8-41c5-8131-48f859b1b271",
+      "body": "Managed rekey now updates every subscribed socket data.sessionId before later switching or close cleanup.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.659Z"
+    },
+    {
+      "id": "af492173-ae34-4565-a098-56e946e2b1e1",
+      "threadId": "da480dbe-fa58-4da9-9e16-06a7a0b0802a",
+      "parentId": "da480dbe-fa58-4da9-9e16-06a7a0b0802a",
+      "body": "Added low-frequency connected refresh while retaining fast disconnected discovery.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.744Z"
+    },
+    {
+      "id": "805c4ac4-27df-44dd-ac40-a386ab6c21cb",
+      "threadId": "7a711c05-4957-4fc9-9188-bdc35dcaa147",
+      "parentId": "7a711c05-4957-4fc9-9188-bdc35dcaa147",
+      "body": "Native message_end now appends bounded history and updates count/preview incrementally; full parsing remains on initial/reconciliation paths.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:44:43.829Z"
+    },
+    {
+      "id": "749c6604-7eab-42b0-b8dd-aff200fa4a3f",
+      "threadId": "749c6604-7eab-42b0-b8dd-aff200fa4a3f",
+      "file": "extensions/web-sessions.ts",
+      "line": 780,
+      "side": "new",
+      "body": "`ctx.fork()` emits `session_start` before the pending request resolves, so the replacement lifecycle rejects every successful clone/fork. Transfer the operation to the replacement bridge or avoid rejecting it during its expected replacement; reject only unrelated replacement, timeout, shutdown, or actual failure (`extensions/web-sessions.ts:780`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:47:32.659Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Expected replacement preserves the pending fork lifecycle.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:49:58.460Z"
+      }
+    },
+    {
+      "id": "9f754f06-5c3e-4ceb-808f-a3a531d82410",
+      "threadId": "9f754f06-5c3e-4ceb-808f-a3a531d82410",
+      "file": "web/server/index.ts",
+      "line": 1488,
+      "side": "new",
+      "body": "Queue migration runs after `updateRecordFromState` mutates ID and file, but failure restores only the ID and skips `sessionsByFile` reconciliation. Stale aliases can make old-path operations target the replacement. Restore all identity/map fields or defer all identity mutation until migration succeeds (`web/server/index.ts:1488`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:47:32.706Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Identity and maps now change only after queue migration.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:49:58.550Z"
+      }
+    },
+    {
+      "id": "ca079a21-b532-46e3-ae55-ccb1e3994216",
+      "threadId": "ca079a21-b532-46e3-ae55-ccb1e3994216",
+      "file": "web/server/index.ts",
+      "line": 1735,
+      "endLine": 1737,
+      "side": "new",
+      "body": "Managed clone/fork wraps the RPC payload as `{ result, session }`, while the client consumes top-level `{ cancelled, sessionId }`. Successful managed operations cannot select the replacement. Return the same contract as the native bridge and add decoding coverage (`web/server/index.ts:1735`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:47:32.752Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Managed clone/fork now returns the shared response contract.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:49:58.643Z"
+      }
+    },
+    {
+      "id": "11cfa7eb-c313-43cd-8980-65a28ec0da8e",
+      "threadId": "11cfa7eb-c313-43cd-8980-65a28ec0da8e",
+      "file": "web/server/index.ts",
+      "line": 1975,
+      "endLine": 1989,
+      "side": "new",
+      "body": "Incremental native `message_end` updates only `messageCount`; it misses usage accumulation, current preview updates, and session metadata broadcasting. Apply the existing usage/text helpers incrementally and broadcast the updated session (`web/server/index.ts:1975`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:47:32.797Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Native incremental telemetry and global metadata broadcasts are complete.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:49:58.728Z"
+      }
+    },
+    {
+      "id": "7ee925b1-9e72-45b3-9ca9-c6551e734bd2",
+      "threadId": "749c6604-7eab-42b0-b8dd-aff200fa4a3f",
+      "parentId": "749c6604-7eab-42b0-b8dd-aff200fa4a3f",
+      "body": "Transferred expected in-flight fork/clone ownership to the replacement bridge during session_start before rejecting unrelated pending operations, so the lifecycle emitted by ctx.fork no longer cancels its own request.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:49:58.414Z"
+    },
+    {
+      "id": "b3e86fd3-1914-4513-a302-2fa69ccfd205",
+      "threadId": "9f754f06-5c3e-4ceb-808f-a3a531d82410",
+      "parentId": "9f754f06-5c3e-4ceb-808f-a3a531d82410",
+      "body": "Deferred all managed identity mutation until durable queue migration succeeds. State refresh now strips the new ID, applies non-identity fields, then atomically rekeys the record/maps/socket bookkeeping only after persistence completes.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:49:58.506Z"
+    },
+    {
+      "id": "42bac17a-2532-4c9a-aef5-2b5c87b61762",
+      "threadId": "ca079a21-b532-46e3-ae55-ccb1e3994216",
+      "parentId": "ca079a21-b532-46e3-ae55-ccb1e3994216",
+      "body": "Normalized managed clone/fork responses to the native top-level contract `{ cancelled, sessionId }` after refresh/rekey, while preserving ordinary command response payloads.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:49:58.597Z"
+    },
+    {
+      "id": "cd1e6354-b3f4-46c8-a6e4-d3f02d28eddb",
+      "threadId": "11cfa7eb-c313-43cd-8980-65a28ec0da8e",
+      "parentId": "11cfa7eb-c313-43cd-8980-65a28ec0da8e",
+      "body": "Native message_end now incrementally accumulates assistant/tool usage, updates the latest user/assistant text preview, and broadcasts refreshed session metadata globally so all connected sidebars stay current.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:49:58.686Z"
+    },
+    {
+      "id": "9df91cf4-2ee1-40e1-afd4-4ce14efa2e63",
+      "threadId": "9df91cf4-2ee1-40e1-afd4-4ce14efa2e63",
+      "file": "web/server/index.ts",
+      "line": 1503,
+      "endLine": 1505,
+      "side": "new",
+      "body": "`refreshManagedSession` catches identity migration/get-state failures, so command-triggered clone/fork still returns success and may advertise a replacement ID that the server did not commit. Propagate errors for command refreshes (while background refresh may log/suppress) and respond only after rekey succeeds (`web/server/index.ts:1503`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:52:36.547Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Foreground refresh failures propagate; background suppression is explicit and tested.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:55:34.288Z"
+      }
+    },
+    {
+      "id": "80e9b819-f6a9-4219-932a-af912c6eccc3",
+      "threadId": "80e9b819-f6a9-4219-932a-af912c6eccc3",
+      "file": "web/server/index.ts",
+      "line": 1245,
+      "endLine": 1260,
+      "side": "new",
+      "body": "Queue migration writes the new key while an existing dirty worker still persists with `record.id` equal to the old identity. An interleaving retry can recreate the old durable key after migration. Quiesce serialized mutations and dirty persistence before migrating, then commit key and record identity together (`web/server/index.ts:1245`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:52:36.596Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Queue mutation and dirty persistence are quiesced before durable identity migration.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T21:55:34.380Z"
+      }
+    },
+    {
+      "id": "2cfb9b56-e9f8-4df6-96bd-48145e0d8d73",
+      "threadId": "9df91cf4-2ee1-40e1-afd4-4ce14efa2e63",
+      "parentId": "9df91cf4-2ee1-40e1-afd4-4ce14efa2e63",
+      "body": "Command-triggered managed refresh now propagates get-state and identity-migration failures through the RPC response. Only the agent-settled background call explicitly suppresses and logs refresh failures; deterministic policy tests cover both modes.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:55:34.241Z"
+    },
+    {
+      "id": "9b42f158-ef93-4134-9067-983a9041eaa6",
+      "threadId": "80e9b819-f6a9-4219-932a-af912c6eccc3",
+      "parentId": "80e9b819-f6a9-4219-932a-af912c6eccc3",
+      "body": "Identity migration now closes queue intake, drains the serialized mutation tail, cancels and drains any dirty snapshot write, then migrates the durable key before committing record/map/socket identity. Intake resumes only after commit (or rollback), preventing an old worker from recreating the old key. Added deterministic drain/interleaving coverage without changing bounded shutdown flushing.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T21:55:34.334Z"
+    },
+    {
+      "id": "f1a9cdd0-0ec5-4903-8b5e-6f138d90bc2b",
+      "threadId": "f1a9cdd0-0ec5-4903-8b5e-6f138d90bc2b",
+      "file": "web/server/index.ts",
+      "line": 1471,
+      "endLine": 1482,
+      "side": "new",
+      "body": "`refreshManagedSession` is not serialized per record. Foreground clone/fork refresh and background `agent_settled` refresh can overlap identity migration, rollback, and quiesce release, corrupting durable queue identity or reopening intake early. Serialize the complete refresh/rekey transaction and test overlap (`web/server/index.ts:1471`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T21:58:45.862Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Managed refresh/rekey is serialized per record with foreground/background semantics preserved.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:01:09.953Z"
+      }
+    },
+    {
+      "id": "1f91a098-9d20-41d5-8196-8f602aff2e70",
+      "threadId": "1f91a098-9d20-41d5-8196-8f602aff2e70",
+      "file": "web/server/index.ts",
+      "line": 1247,
+      "side": "new",
+      "body": "Queue migration leaves `queueRetryTimer` armed. If it fires during quiescence, it clears itself, `flushWebQueue` rejects, and no retry remains, potentially stalling the queue. Preserve/cancel pending retry state and trigger or reschedule delivery after migration resumes (`web/server/index.ts:1247`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T21:58:45.909Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Armed queue retries survive migration and resume after intake reopens.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:01:10.039Z"
+      }
+    },
+    {
+      "id": "ba9707c7-65cc-4f52-8e17-4899135e4f1a",
+      "threadId": "f1a9cdd0-0ec5-4903-8b5e-6f138d90bc2b",
+      "parentId": "f1a9cdd0-0ec5-4903-8b5e-6f138d90bc2b",
+      "body": "Serialized the complete managed get-state, queue migration, state refresh, and rekey transaction per record. Foreground callers still receive failures, explicitly background refreshes still suppress/log them, and deterministic overlap plus failed-tail recovery tests cover both ordering and policy.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:01:09.907Z"
+    },
+    {
+      "id": "963f1543-76f1-4b1f-a883-47e0731c476b",
+      "threadId": "1f91a098-9d20-41d5-8196-8f602aff2e70",
+      "parentId": "1f91a098-9d20-41d5-8196-8f602aff2e70",
+      "body": "Queue identity migration now records and cancels an armed retry before quiescing, reopens mutation intake on both success and failure, and schedules a normal serialized flush only afterward. Deterministic armed/unarmed timer tests verify cancellation and resume ordering.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:01:09.996Z"
+    },
+    {
+      "id": "4134c6ce-2b89-4119-99a2-9d304614dd1f",
+      "threadId": "4134c6ce-2b89-4119-99a2-9d304614dd1f",
+      "file": "web/server/index.ts",
+      "line": 1589,
+      "side": "new",
+      "body": "`createManagedSession` replaces the saved `SessionRecord` without transferring its `clientSockets`; when the selected offline session resumes with the same ID, React does not reconnect, so its socket remains attached to the orphaned record and receives no live history or events. Reuse the existing record or transfer its subscriptions and send refreshed state/history before replacing the map entry (`web/server/index.ts:1589`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:28:05.918Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Resume now preserves subscribed clients and refreshes their state/history.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.376Z"
+      }
+    },
+    {
+      "id": "42c6e8f3-c927-456f-a265-010cba97572d",
+      "threadId": "42c6e8f3-c927-456f-a265-010cba97572d",
+      "file": "web/client/api.ts",
+      "line": 18,
+      "side": "new",
+      "body": "`sessionCommandTimeout` gives clone and fork only 15 seconds, while the native bridge and server allow them 30 seconds; a slow successful fork therefore appears failed, closes the response socket, and can create duplicate sessions when retried. Give clone/fork a timeout longer than the server bound or add cancellation/idempotent request handling (`web/client/api.ts:18`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:28:05.968Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Clone/fork client timeout now exceeds the server bound.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.462Z"
+      }
+    },
+    {
+      "id": "f7908e75-e6c9-4870-b009-2dceaf017d29",
+      "threadId": "f7908e75-e6c9-4870-b009-2dceaf017d29",
+      "file": "web/server/queue-store.ts",
+      "line": 87,
+      "side": "new",
+      "body": "Queue mutations are serialized only per session, but this writer snapshots the shared `persistedQueues` before persistence completes; if session A’s write fails while session B captures a newer snapshot, A rolls back in memory while B can still durably write A’s rejected draft. Serialize the complete shared-map mutation, snapshot, write, and rollback globally (`web/server/queue-store.ts:87`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:28:06.016Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Shared queue-map transactions are globally serialized and rollback-safe.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.549Z"
+      }
+    },
+    {
+      "id": "d9b453a0-bfdc-4a7a-b495-377d12b8dcfd",
+      "threadId": "d9b453a0-bfdc-4a7a-b495-377d12b8dcfd",
+      "file": "package.json",
+      "line": 71,
+      "side": "new",
+      "body": "`vite@7.3.1` has high-severity dev-server file-read and `server.fs.deny` bypass advisories, while `web/vite.config.ts` exposes that server on `0.0.0.0`. Upgrade beyond the affected `<=7.3.4` range and regenerate `bun.lock`, or bind development to localhost (`package.json:71`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:28:06.063Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Vite and the Bun lockfile are updated past the affected range.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.634Z"
+      }
+    },
+    {
+      "id": "624d16e7-047d-477a-b2ee-bafc60b664a3",
+      "threadId": "624d16e7-047d-477a-b2ee-bafc60b664a3",
+      "file": "web/server/index.ts",
+      "line": 2152,
+      "side": "new",
+      "body": "Changing `serviceName` configures only the new Tailscale Service and never removes the previous named or node-level Serve route, so identities authorized under the old grant can continue reaching the tokenless server. Remove the obsolete route transactionally and clean up replacements after failed reachability checks (`web/server/index.ts:2152`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:28:06.108Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Tailscale service identity changes now replace routes transactionally.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.723Z"
+      }
+    },
+    {
+      "id": "d75b5cb2-eee2-4a21-aea5-a52bd948e359",
+      "threadId": "d75b5cb2-eee2-4a21-aea5-a52bd948e359",
+      "file": "package.json",
+      "line": 74,
+      "side": "new",
+      "body": "`extensions/web-settings.ts` directly loads `proper-lockfile`, but this package does not declare it. A clean production install omits the optional Pi peer and leaves the module unresolved, disabling the extension. Add `\"proper-lockfile\": \"4.1.2\"` to runtime dependencies and regenerate `bun.lock` (`package.json:74`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:28:06.153Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "proper-lockfile is now an explicit runtime dependency.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.809Z"
+      }
+    },
+    {
+      "id": "5662f5da-1dcb-4318-b0ac-8037dcd8cd39",
+      "threadId": "5662f5da-1dcb-4318-b0ac-8037dcd8cd39",
+      "file": "web/server/worktrees.ts",
+      "line": 67,
+      "endLine": 73,
+      "side": "new",
+      "body": "Setup failure force-removes the new worktree and branch, contradicting `skills/worktree/SKILL.md`, which requires retaining a failed worktree for inspection. Preserve the checkout and diagnostics after setup failure, or reconcile the shared contract explicitly (`web/server/worktrees.ts:67`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T22:28:06.197Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Failed setup now retains the worktree and branch for inspection.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.895Z"
+      }
+    },
+    {
+      "id": "e285dc48-dfe4-4d74-97b1-fbde5fa8f576",
+      "threadId": "e285dc48-dfe4-4d74-97b1-fbde5fa8f576",
+      "file": "web/server/index.ts",
+      "line": 902,
+      "side": "new",
+      "body": "Every managed RPC text delta clones and concatenates the growing assistant message into `streamingMessage`, but that field is never consumed before being cleared. Long responses therefore do quadratic string copying for no output. Remove the unused reconstruction or introduce a real bounded consumer (`web/server/index.ts:902`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T22:28:06.242Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Removed unused quadratic managed-stream reconstruction.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:29.988Z"
+      }
+    },
+    {
+      "id": "62b2fb78-174a-4d99-9ad4-2cfd861c873c",
+      "threadId": "62b2fb78-174a-4d99-9ad4-2cfd861c873c",
+      "file": "web/server/index.ts",
+      "line": 646,
+      "side": "new",
+      "body": "`broadcastToAll` serializes the identical message once per saved session record. Since `sessions` includes the full saved catalog, live metadata events repeat serialization unnecessarily. Serialize once before iterating and share the payload (`web/server/index.ts:646`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T22:28:06.285Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Global broadcasts now serialize once per message.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:30.082Z"
+      }
+    },
+    {
+      "id": "1ae7086c-afcf-4cf9-8985-3700aa75455e",
+      "threadId": "1ae7086c-afcf-4cf9-8985-3700aa75455e",
+      "file": "web/server/queue-mutation.ts",
+      "line": 4,
+      "endLine": 16,
+      "side": "new",
+      "body": "`preserveRetryAroundQuiescence` is used only by tests while production migration independently reimplements that lifecycle in `web/server/index.ts`. The focused tests can stay green while real behavior drifts. Integrate the helper or delete it and test the production transaction directly (`web/server/queue-mutation.ts:4`).",
+      "author": "GPT-5.6",
+      "priority": "P3",
+      "createdAt": "2026-08-13T22:28:06.330Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Production queue migration now uses the tested quiescence helper.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:30.174Z"
+      }
+    },
+    {
+      "id": "33aaaea0-0132-4b4a-8dc8-b60552e50161",
+      "threadId": "33aaaea0-0132-4b4a-8dc8-b60552e50161",
+      "file": "README.md",
+      "line": 105,
+      "side": "new",
+      "body": "The README says this package has no production npm dependencies, while `package.json` declares several and `web-settings.ts` directly requires another. Correct the installation contract after fixing dependency classification (`README.md:105`).",
+      "author": "GPT-5.6",
+      "priority": "P3",
+      "createdAt": "2026-08-13T22:28:06.375Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "README now accurately describes runtime dependencies and Bun locking.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:41:30.262Z"
+      }
+    },
+    {
+      "id": "699fd1b8-377e-4f08-9f6a-3fecc9a08c23",
+      "threadId": "4134c6ce-2b89-4119-99a2-9d304614dd1f",
+      "parentId": "4134c6ce-2b89-4119-99a2-9d304614dd1f",
+      "body": "Transferred the saved record's client subscription set into the resumed managed record, refreshed each socket with authoritative state and managed history, and restored the saved record on startup failure. Added an end-to-end regression test that resumes the currently selected offline session without reconnecting.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.327Z"
+    },
+    {
+      "id": "9e10f689-a7ca-40da-bafe-63286a635406",
+      "threadId": "42c6e8f3-c927-456f-a265-010cba97572d",
+      "parentId": "42c6e8f3-c927-456f-a265-010cba97572d",
+      "body": "Assigned clone and fork a 35-second client timeout, exceeding the server/native bridge's 30-second bound, while retaining the existing defaults for ordinary and long-running commands. Added focused timeout coverage.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.419Z"
+    },
+    {
+      "id": "558c354a-f83c-4549-9629-94a8c2e0b49e",
+      "threadId": "f7908e75-e6c9-4870-b009-2dceaf017d29",
+      "parentId": "f7908e75-e6c9-4870-b009-2dceaf017d29",
+      "body": "Moved every persisted queue-map update behind one writer-level transaction lock that covers mutation, snapshotting, persistence, and whole-map rollback. Added a deterministic cross-session failure test proving a later durable snapshot cannot contain another session's rejected draft.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.505Z"
+    },
+    {
+      "id": "2aa94b33-109a-4ef4-93bb-70eb0317579d",
+      "threadId": "d9b453a0-bfdc-4a7a-b495-377d12b8dcfd",
+      "parentId": "d9b453a0-bfdc-4a7a-b495-377d12b8dcfd",
+      "body": "Upgraded Vite from 7.3.1 to 7.3.6, beyond the affected <=7.3.4 range, regenerated bun.lock, and rebuilt the checked-in production assets successfully.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.592Z"
+    },
+    {
+      "id": "eb9de7e9-e786-4eea-bb96-9d9c5d5dbb5d",
+      "threadId": "624d16e7-047d-477a-b2ee-bafc60b664a3",
+      "parentId": "624d16e7-047d-477a-b2ee-bafc60b664a3",
+      "body": "Added transactional Tailscale route replacement: configure and probe the new service identity first, remove the prior named/node route only after success, and remove a failed or rollback replacement. Added tests for successful identity replacement and unreachable replacement cleanup.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.679Z"
+    },
+    {
+      "id": "ad3a29e1-3b09-4214-9d13-29fb1fe4c2c0",
+      "threadId": "d75b5cb2-eee2-4a21-aea5-a52bd948e359",
+      "parentId": "d75b5cb2-eee2-4a21-aea5-a52bd948e359",
+      "body": "Declared proper-lockfile 4.1.2 as a direct runtime dependency and regenerated bun.lock, so clean production installs can load web-settings without relying on the optional Pi peer's transitive tree.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.766Z"
+    },
+    {
+      "id": "5bb5392c-aadc-4438-9d19-6d4425f8c7e6",
+      "threadId": "5662f5da-1dcb-4318-b0ac-8037dcd8cd39",
+      "parentId": "5662f5da-1dcb-4318-b0ac-8037dcd8cd39",
+      "body": "Changed setup probing and execution failures to report that the worktree was retained instead of force-removing its checkout and branch. Updated regression coverage to verify the failed worktree and branch remain available for inspection.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.852Z"
+    },
+    {
+      "id": "5aa08c14-e0c6-459f-9d4a-781b69e4c21d",
+      "threadId": "e285dc48-dfe4-4d74-97b1-fbde5fa8f576",
+      "parentId": "e285dc48-dfe4-4d74-97b1-fbde5fa8f576",
+      "body": "Removed the unused server-side streamingMessage reconstruction and delta concatenation. Managed RPC provider events are still forwarded unchanged for the browser's actual streaming consumer.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:29.940Z"
+    },
+    {
+      "id": "c8f0798c-f1a7-4f4f-b2eb-4df8711e66ba",
+      "threadId": "62b2fb78-174a-4d99-9ad4-2cfd861c873c",
+      "parentId": "62b2fb78-174a-4d99-9ad4-2cfd861c873c",
+      "body": "Moved JSON serialization outside the saved-session iteration so broadcastToAll creates one payload and shares it across every subscribed socket.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:30.034Z"
+    },
+    {
+      "id": "bd79b9a3-d57d-4ff5-b7c0-5316dff1697a",
+      "threadId": "1ae7086c-afcf-4cf9-8985-3700aa75455e",
+      "parentId": "1ae7086c-afcf-4cf9-8985-3700aa75455e",
+      "body": "Integrated preserveRetryAroundQuiescence into the production managed-session identity migration. The helper now owns retry cancellation, intake reopening, and post-migration rescheduling on both success and failure, while the focused lifecycle tests exercise the same implementation used by production.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:30.129Z"
+    },
+    {
+      "id": "d8a709ad-3b0d-47e7-9376-f325cc79aaa4",
+      "threadId": "33aaaea0-0132-4b4a-8dc8-b60552e50161",
+      "parentId": "33aaaea0-0132-4b4a-8dc8-b60552e50161",
+      "body": "Corrected the development/install contract to state that runtime dependencies are declared in package.json and bun.lock is the checked-in source of truth, without claiming the package has no production npm dependencies.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:41:30.218Z"
+    },
+    {
+      "id": "3eb9879a-febe-4ab1-ae0c-0b0000045ac8",
+      "threadId": "3eb9879a-febe-4ab1-ae0c-0b0000045ac8",
+      "file": "web/server/index.ts",
+      "line": 2041,
+      "side": "new",
+      "body": "`deleteSessionRecord` removes the record before durable queue deletion. If persistence rejects, only `persistedQueues` rolls back: the session stays absent, sockets remain open, and its file may already be gone. Persist first or make the complete maps/file/socket deletion transactional (`web/server/index.ts:2041`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:44:44.770Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Session deletion now persists first and remains retryable on failure.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:56:58.114Z"
+      }
+    },
+    {
+      "id": "ec8172e1-a6f3-45c8-a785-80a41010f1b9",
+      "threadId": "ec8172e1-a6f3-45c8-a785-80a41010f1b9",
+      "file": "web/server/index.ts",
+      "line": 2189,
+      "side": "new",
+      "body": "After worktree setup succeeds, any managed-session startup error forcefully rolls back the checkout and branch, deleting setup-generated files. Preserve the initialized worktree on startup failure and report its path (`web/server/index.ts:2189`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T22:44:44.819Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Managed startup failures now retain initialized worktrees.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:56:58.210Z"
+      }
+    },
+    {
+      "id": "094727c7-0100-4800-84ff-1b9ace03e2eb",
+      "threadId": "094727c7-0100-4800-84ff-1b9ace03e2eb",
+      "file": "extensions/web-settings.ts",
+      "line": 46,
+      "endLine": 75,
+      "side": "new",
+      "body": "The failure-sensitive cross-process lock and atomic settings update have no focused regression coverage. Add injectable-path/lock tests for unrelated-key preservation, concurrent updates, malformed files, write/rename failure cleanup, and lock release (`extensions/web-settings.ts:46`).",
+      "author": "GPT-5.6",
+      "priority": "P3",
+      "createdAt": "2026-08-13T22:44:44.867Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Added focused atomic settings and lock lifecycle coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:56:58.300Z"
+      }
+    },
+    {
+      "id": "422d9467-f3d2-4250-9a5f-8695aab3828b",
+      "threadId": "422d9467-f3d2-4250-9a5f-8695aab3828b",
+      "file": "extensions/subagents.ts",
+      "line": 1067,
+      "side": "new",
+      "body": "Each coalesced status publish rebuilds and retransmits every agent’s full retained transcript. During active event bursts this causes sustained CPU, allocation, and WebSocket traffic. Publish transcript deltas or only changed/full-on-subscribe snapshots (`extensions/subagents.ts:1067`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-13T22:44:44.914Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Subagent status now publishes bounded deltas and full-on-subscribe snapshots.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T22:56:58.385Z"
+      }
+    },
+    {
+      "id": "bcb482f3-475a-4117-bd18-af42e8fdb938",
+      "threadId": "3eb9879a-febe-4ab1-ae0c-0b0000045ac8",
+      "parentId": "3eb9879a-febe-4ab1-ae0c-0b0000045ac8",
+      "body": "Reordered deletion into a coherent transaction: queue intake is quiesced and dirty writes drained, the queue-key removal is made durable before the file/maps/sockets are touched, and persistence failure reopens the intact session for retry. File-delete failure restores any non-empty durable queue. Added an end-to-end failure-and-retry regression test.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:56:58.069Z"
+    },
+    {
+      "id": "3db2a0bb-1c9f-4c49-bb24-2a697a978f3c",
+      "threadId": "ec8172e1-a6f3-45c8-a785-80a41010f1b9",
+      "parentId": "ec8172e1-a6f3-45c8-a785-80a41010f1b9",
+      "body": "Removed automatic worktree rollback when managed-session startup fails. The API now reports the retained initialized path, and an end-to-end test verifies the setup-generated file, checkout, and branch all remain available for inspection.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:56:58.157Z"
+    },
+    {
+      "id": "aa071cc8-7b03-4ac4-aeb5-b8055af3e591",
+      "threadId": "094727c7-0100-4800-84ff-1b9ace03e2eb",
+      "parentId": "094727c7-0100-4800-84ff-1b9ace03e2eb",
+      "body": "Extracted an injectable-path/dependency settings writer and added focused tests for unrelated-key preservation, concurrent locked updates, malformed input with subsequent lock reuse, write/rename failure cleanup, and lock release on every failure path.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:56:58.255Z"
+    },
+    {
+      "id": "32f2ac6c-8384-4d57-8b2e-16d1275bc59f",
+      "threadId": "422d9467-f3d2-4250-9a5f-8695aab3828b",
+      "parentId": "422d9467-f3d2-4250-9a5f-8695aab3828b",
+      "body": "Replaced full transcript status publications with a dedicated incremental subagent channel. Transcript and streaming deltas are merged into a bounded server snapshot, full content is sent only when a client subscribes, and ordinary session updates strip transcript payloads. Added merge/reset/removal regression coverage.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T22:56:58.343Z"
+    },
+    {
+      "id": "9ec28405-5319-49f8-9e27-efa2eaeb2a5c",
+      "threadId": "9ec28405-5319-49f8-9e27-efa2eaeb2a5c",
+      "file": "web/server/queue-store.ts",
+      "line": 48,
+      "side": "new",
+      "body": "`readQueueStore` converts every filesystem and JSON failure into an empty map. A malformed, truncated, or temporarily unreadable file therefore makes durable queued prompts disappear, and a later write can overwrite the only recovery copy. Treat only `ENOENT` as empty; propagate or quarantine corruption and block persistence until recovery is explicit (`web/server/queue-store.ts:48`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-13T22:59:34.235Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Queue-store loading now fails closed on filesystem and data corruption, with regression coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-13T23:01:38.239Z"
+      }
+    },
+    {
+      "id": "cd42c69c-5626-40d8-b065-8ecf22d45111",
+      "threadId": "9ec28405-5319-49f8-9e27-efa2eaeb2a5c",
+      "parentId": "9ec28405-5319-49f8-9e27-efa2eaeb2a5c",
+      "body": "Changed readQueueStore to return an empty map only for ENOENT. Other filesystem errors now propagate, malformed JSON throws, and invalid queue schema/items fail closed, aborting startup before persistence can overwrite the recovery copy. Added regression coverage for a missing store, truncated JSON preservation, and malformed queued entries; the full test suite and typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-13T23:01:38.194Z"
+    }
+  ],
+  "createdAt": "2026-08-13T21:25:59.887Z",
+  "updatedAt": "2026-08-13T23:01:38.239Z"
+}

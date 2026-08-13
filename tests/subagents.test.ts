@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	abortRunningSubagentSessions,
+	appendBoundedStreamingText,
 	countsAgainstSubagentLimit,
 	filterModelsToScope,
 	isFailedStopReason,
+	MAX_WEB_STREAMING_CHARS,
 	parsePersistedUsageState,
 } from "../extensions/subagents.ts";
 
@@ -21,6 +24,20 @@ test("creating agents reserve capacity before their session exists", () => {
 	assert.equal(countsAgainstSubagentLimit({ status: "completed", session: {} }), true);
 	assert.equal(countsAgainstSubagentLimit({ status: "failed" }), false);
 	assert.equal(countsAgainstSubagentLimit({ status: "terminated" }), false);
+});
+
+test("aborting the main run aborts every running subagent and leaves completed agents alone", async () => {
+	const aborted: string[] = [];
+	const agents = [
+		{ status: "working" as const, session: { async abort() { aborted.push("working"); } } },
+		{ status: "creating" as const, session: { async abort() { aborted.push("creating"); } } },
+		{ status: "completed" as const, session: { async abort() { aborted.push("completed"); } } },
+		{ status: "failed" as const },
+	];
+	const results = await abortRunningSubagentSessions(agents);
+	assert.deepEqual(aborted.sort(), ["creating", "working"]);
+	assert.equal(results.length, 2);
+	assert.equal(results.every((result) => result.error === undefined), true);
 });
 
 test("terminal provider errors are classified as failures", () => {
@@ -41,6 +58,12 @@ test("available subagent models honor a configured scope", () => {
 		[{ provider: "openai", id: "small" }],
 	);
 	assert.equal(filterModelsToScope(available, []), available);
+});
+
+test("streaming subagent output remains bounded to its newest text", () => {
+	const prefix = "a".repeat(MAX_WEB_STREAMING_CHARS - 2);
+	assert.equal(appendBoundedStreamingText(prefix, "bc"), `${prefix}bc`);
+	assert.equal(appendBoundedStreamingText(prefix, "012345"), `${prefix.slice(4)}012345`);
 });
 
 test("persisted usage checkpoints reject malformed data", () => {

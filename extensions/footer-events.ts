@@ -21,6 +21,10 @@ export type FooterContribution = {
 	sessionId: string;
 	key: string;
 	remove?: boolean;
+	/** Rendered at the far left, immediately before the directory. */
+	identityPrefix?: (theme: Theme) => string | undefined;
+	/** Rendered inline after the branch/session identity on the first footer line. */
+	identitySuffix?: (theme: Theme) => string | undefined;
 	topRight?: (theme: Theme) => string | undefined;
 	status?: {
 		text: string;
@@ -35,6 +39,8 @@ export function parseFooterContribution(value: unknown): FooterContribution | un
 	const event = value as Record<string, unknown>;
 	if (typeof event.sessionId !== "string" || typeof event.key !== "string" || !event.key) return undefined;
 	if (event.remove !== undefined && typeof event.remove !== "boolean") return undefined;
+	if (event.identityPrefix !== undefined && typeof event.identityPrefix !== "function") return undefined;
+	if (event.identitySuffix !== undefined && typeof event.identitySuffix !== "function") return undefined;
 	if (event.topRight !== undefined && typeof event.topRight !== "function") return undefined;
 	if (event.onBranchChange !== undefined && typeof event.onBranchChange !== "function") return undefined;
 	if (event.status !== undefined) {

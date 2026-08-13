@@ -35,12 +35,21 @@ import {
 	type FooterContribution,
 	type FooterUsage,
 } from "./footer-events.js";
+import {
+	SUBAGENT_STATUS_EVENT,
+	type SubagentStatusEvent,
+	type SubagentWebSnapshot,
+	type SubagentWebUpdate,
+} from "./subagent-events.js";
 
 const MAX_SUBAGENTS = 8;
 const MAX_ACTIVITY_ITEMS = 500;
 const MAX_TRANSCRIPT_ITEMS = 500;
 const MAX_TRANSCRIPT_ENTRY_CHARS = 100_000;
 const MAX_TRANSCRIPT_CHARS = 1_000_000;
+const MAX_WEB_TRANSCRIPT_CHARS = 100_000;
+export const MAX_WEB_STREAMING_CHARS = 20_000;
+const WEB_STATUS_PUBLISH_INTERVAL_MS = 1_000;
 const MAX_TOOL_OUTPUT_BYTES = 50 * 1024;
 const DEFAULT_READ_WAIT_SECONDS = 15;
 const DETAIL_VIEW_LINES = 22;
@@ -107,7 +116,7 @@ type AgentSnapshot = {
 };
 
 type ToolDetails = {
-	agents: AgentSnapshot[];
+	agents: SubagentWebSnapshot[];
 };
 
 type Usage = FooterUsage;
@@ -167,6 +176,13 @@ export function parsePersistedUsageState(value: unknown): PersistedUsageState | 
 	const total = parseUsage(value.total);
 	const accounted = parseUsage(value.accounted);
 	return total && accounted ? { total, accounted } : undefined;
+}
+
+export function appendBoundedStreamingText(current: string, delta: string): string {
+	const combined = current + delta;
+	return combined.length <= MAX_WEB_STREAMING_CHARS
+		? combined
+		: combined.slice(-MAX_WEB_STREAMING_CHARS);
 }
 
 function cloneUsage(usage: Usage): Usage {
@@ -328,12 +344,45 @@ function finalAssistantText(agent: ManagedSubagent): string {
 	return agent.streamingText.trim();
 }
 
+function boundedWebTranscript(items: readonly TranscriptItem[]): TranscriptItem[] {
+	const retained: TranscriptItem[] = [];
+	let characters = 0;
+	for (let index = items.length - 1; index >= 0; index--) {
+		const item = items[index];
+		if (!item) continue;
+		const remaining = MAX_WEB_TRANSCRIPT_CHARS - characters;
+		if (remaining <= 0 && retained.length > 0) break;
+		const text = truncateChars(item.text, Math.max(1, remaining));
+		retained.push({ ...item, text });
+		characters += text.length;
+	}
+	return retained.reverse();
+}
+
+function webTranscript(agent: ManagedSubagent): TranscriptItem[] {
+	return boundedWebTranscript(agent.transcript);
+}
+
 export function isFailedStopReason(stopReason: string | undefined): boolean {
 	return stopReason === "error" || stopReason === "aborted";
 }
 
 export function countsAgainstSubagentLimit(agent: { status: SubagentStatus; session?: unknown }): boolean {
 	return agent.status === "creating" || agent.session !== undefined;
+}
+
+export async function abortRunningSubagentSessions<T extends { status: SubagentStatus; session?: { abort(): Promise<unknown> } }>(
+	agents: readonly T[],
+): Promise<Array<{ agent: T; error?: Error }>> {
+	const running = agents.filter((agent) => agent.session && (agent.status === "creating" || agent.status === "working"));
+	return await Promise.all(running.map(async (agent) => {
+		try {
+			await agent.session!.abort();
+			return { agent };
+		} catch (error) {
+			return { agent, error: error instanceof Error ? error : new Error(String(error)) };
+		}
+	}));
 }
 
 export function filterModelsToScope<T extends { provider: string; id: string }>(
@@ -400,6 +449,10 @@ class SubagentManager {
 	private accountedUsage = zeroUsage();
 	private usageDirty = false;
 	private footerSelected = false;
+	private lastWebStatusPublishedAt = 0;
+	private webStatusPublishTimer?: ReturnType<typeof setTimeout>;
+	private webTranscriptCursors = new Map<string, TranscriptItem | undefined>();
+	private webStreamingSnapshots = new Map<string, string>();
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
@@ -409,6 +462,8 @@ class SubagentManager {
 		this.totalUsage = zeroUsage();
 		this.accountedUsage = zeroUsage();
 		this.usageDirty = false;
+		this.webTranscriptCursors.clear();
+		this.webStreamingSnapshots.clear();
 		for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
 			if (entry.type !== "custom" || entry.customType !== USAGE_STATE_ENTRY) continue;
 			const restored = parsePersistedUsageState(entry.data);
@@ -431,13 +486,25 @@ class SubagentManager {
 	}
 
 	clearContext(): void {
+		if (this.webStatusPublishTimer) clearTimeout(this.webStatusPublishTimer);
+		this.webStatusPublishTimer = undefined;
+		this.lastWebStatusPublishedAt = 0;
+		this.webTranscriptCursors.clear();
+		this.webStreamingSnapshots.clear();
 		const ctx = this.currentContext;
 		if (ctx) {
+			const sessionId = ctx.sessionManager.getSessionId();
 			this.pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
-				sessionId: ctx.sessionManager.getSessionId(),
+				sessionId,
 				key: "subagents",
 				remove: true,
 			} satisfies FooterContribution);
+			this.pi.events.emit(SUBAGENT_STATUS_EVENT, {
+				sessionId,
+				agents: [],
+				usage: zeroUsage(),
+				remove: true,
+			} satisfies SubagentStatusEvent);
 		}
 		this.currentContext = undefined;
 		this.footerSelected = false;
@@ -477,6 +544,69 @@ class SubagentManager {
 			currentTool: agent.currentTool,
 			queued: agent.queuedSteering + agent.queuedFollowUp,
 		}));
+	}
+
+	webSnapshots(): SubagentWebSnapshot[] {
+		return this.list().map((agent) => ({
+			id: agent.id,
+			status: agent.status,
+			model: agent.model,
+			effort: agent.effort,
+			turns: agent.turns,
+			currentTool: agent.currentTool,
+			queued: agent.queuedSteering + agent.queuedFollowUp,
+			createdAt: agent.createdAt,
+			updatedAt: agent.updatedAt,
+			completedAt: agent.completedAt,
+			error: agent.error,
+			usage: cloneUsage(agent.usage),
+			transcript: webTranscript(agent),
+			streamingText: agent.streamingText || undefined,
+		}));
+	}
+
+	private webStatusUpdates(): SubagentWebUpdate[] {
+		return this.list().map((agent) => {
+			const update: SubagentWebUpdate = {
+				id: agent.id,
+				status: agent.status,
+				model: agent.model,
+				effort: agent.effort,
+				turns: agent.turns,
+				currentTool: agent.currentTool ?? null,
+				queued: agent.queuedSteering + agent.queuedFollowUp,
+				createdAt: agent.createdAt,
+				updatedAt: agent.updatedAt,
+				completedAt: agent.completedAt ?? null,
+				error: agent.error ?? null,
+				usage: cloneUsage(agent.usage),
+			};
+
+			const hadTranscriptCursor = this.webTranscriptCursors.has(agent.id);
+			const previousTranscriptItem = this.webTranscriptCursors.get(agent.id);
+			const previousIndex = previousTranscriptItem ? agent.transcript.indexOf(previousTranscriptItem) : -1;
+			if (!hadTranscriptCursor || (previousTranscriptItem && previousIndex < 0)) {
+				update.transcriptReset = true;
+				update.transcriptDelta = webTranscript(agent);
+			} else {
+				const firstNewIndex = previousTranscriptItem ? previousIndex + 1 : 0;
+				if (firstNewIndex < agent.transcript.length) {
+					update.transcriptDelta = boundedWebTranscript(agent.transcript.slice(firstNewIndex));
+				}
+			}
+			this.webTranscriptCursors.set(agent.id, agent.transcript.at(-1));
+
+			const hadStreamingSnapshot = this.webStreamingSnapshots.has(agent.id);
+			const previousStreamingText = this.webStreamingSnapshots.get(agent.id) ?? "";
+			if (!hadStreamingSnapshot || !agent.streamingText.startsWith(previousStreamingText)) {
+				update.streamingTextReset = true;
+				update.streamingTextDelta = agent.streamingText;
+			} else if (agent.streamingText.length > previousStreamingText.length) {
+				update.streamingTextDelta = agent.streamingText.slice(previousStreamingText.length);
+			}
+			this.webStreamingSnapshots.set(agent.id, agent.streamingText);
+			return update;
+		});
 	}
 
 	private makeId(requestedName?: string): string {
@@ -607,7 +737,9 @@ class SubagentManager {
 					break;
 				case "message_update": {
 					const update = event.assistantMessageEvent;
-					if (update.type === "text_delta") agent.streamingText += update.delta;
+					if (update.type === "text_delta") {
+						agent.streamingText = appendBoundedStreamingText(agent.streamingText, update.delta);
+					}
 					const now = Date.now();
 					if (agent.streamingText && now - agent.lastStreamActivityAt >= 5_000) {
 						agent.lastStreamActivityAt = now;
@@ -833,6 +965,19 @@ class SubagentManager {
 		return agent;
 	}
 
+	async abortAll(): Promise<number> {
+		const results = await abortRunningSubagentSessions(this.list());
+		for (const { agent, error } of results) {
+			if (error) {
+				agent.error = error.message;
+				this.activity(agent, `abort failed: ${agent.error}`);
+			} else {
+				this.activity(agent, "aborted with the main agent");
+			}
+		}
+		return results.length;
+	}
+
 	async terminate(id: string, remove = false): Promise<ManagedSubagent> {
 		const agent = this.getAgent(id);
 		if (agent.status !== "terminated") {
@@ -861,6 +1006,8 @@ class SubagentManager {
 		}
 		if (remove) {
 			this.agents.delete(id);
+			this.webTranscriptCursors.delete(id);
+			this.webStreamingSnapshots.delete(id);
 			this.footerSelected = false;
 			this.publishFooter();
 		}
@@ -965,17 +1112,45 @@ class SubagentManager {
 		return parts.join(" • ");
 	}
 
+	private publishWebStatus(): void {
+		this.webStatusPublishTimer = undefined;
+		const ctx = this.currentContext;
+		if (!ctx) return;
+		const sessionId = ctx.sessionManager.getSessionId();
+		const usage = asFooterUsage(subtractUsage(this.totalUsage, this.accountedUsage));
+		this.lastWebStatusPublishedAt = Date.now();
+		this.pi.events.emit(SUBAGENT_STATUS_EVENT, {
+			sessionId,
+			agents: this.webStatusUpdates(),
+			usage,
+		} satisfies SubagentStatusEvent);
+	}
+
 	private publishFooter(): void {
 		const ctx = this.currentContext;
 		if (!ctx) return;
+		const sessionId = ctx.sessionManager.getSessionId();
+		const usage = asFooterUsage(subtractUsage(this.totalUsage, this.accountedUsage));
 		const statusText = this.footerText();
 		const contribution: FooterContribution = {
-			sessionId: ctx.sessionManager.getSessionId(),
+			sessionId,
 			key: "subagents",
 			status: statusText ? { text: statusText, selected: this.footerSelected } : undefined,
-			usage: asFooterUsage(subtractUsage(this.totalUsage, this.accountedUsage)),
+			usage,
 		};
 		this.pi.events.emit(FOOTER_CONTRIBUTION_EVENT, contribution);
+
+		// Footer metadata stays immediate, while coalesced web events carry only
+		// transcript/streaming deltas. The server retains a bounded full snapshot
+		// for newly subscribed clients without retransmitting it on every burst.
+		const delay = WEB_STATUS_PUBLISH_INTERVAL_MS - (Date.now() - this.lastWebStatusPublishedAt);
+		if (delay <= 0) {
+			if (this.webStatusPublishTimer) clearTimeout(this.webStatusPublishTimer);
+			this.publishWebStatus();
+		} else if (!this.webStatusPublishTimer) {
+			this.webStatusPublishTimer = setTimeout(() => this.publishWebStatus(), delay);
+			this.webStatusPublishTimer.unref?.();
+		}
 	}
 }
 
@@ -1394,7 +1569,7 @@ function toolResult(manager: SubagentManager, text: string): { content: [{ type:
 	const usage = manager.claimUnaccountedUsage();
 	return {
 		content: [{ type: "text", text }],
-		details: { agents: manager.snapshots() },
+		details: { agents: manager.webSnapshots() },
 		...(usage ? { usage } : {}),
 	};
 }
@@ -1458,6 +1633,8 @@ const TerminateParams = Type.Object({
 export default function subagentsExtension(pi: ExtensionAPI): void {
 	const manager = new SubagentManager(pi);
 	let managerOpen = false;
+	let mainAbortSignal: AbortSignal | undefined;
+	let onMainAbort: (() => void) | undefined;
 
 	const openManager = (ctx: ExtensionContext) => {
 		if (managerOpen) return;
@@ -1617,7 +1794,24 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	});
 
+	pi.on("agent_start", (_event, ctx) => {
+		if (!ctx.signal) return;
+		if (mainAbortSignal && onMainAbort) mainAbortSignal.removeEventListener("abort", onMainAbort);
+		mainAbortSignal = ctx.signal;
+		onMainAbort = () => { void manager.abortAll(); };
+		mainAbortSignal.addEventListener("abort", onMainAbort, { once: true });
+	});
+
+	pi.on("agent_settled", () => {
+		if (mainAbortSignal && onMainAbort) mainAbortSignal.removeEventListener("abort", onMainAbort);
+		mainAbortSignal = undefined;
+		onMainAbort = undefined;
+	});
+
 	pi.on("session_shutdown", async () => {
+		if (mainAbortSignal && onMainAbort) mainAbortSignal.removeEventListener("abort", onMainAbort);
+		mainAbortSignal = undefined;
+		onMainAbort = undefined;
 		manager.setFooterSelected(false);
 		try {
 			await manager.terminateAll(false);

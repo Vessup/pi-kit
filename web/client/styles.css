@@ -1,0 +1,317 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #09090b;
+  color: #fafafa;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top, rgba(56, 189, 248, 0.14), transparent 30%),
+    linear-gradient(180deg, #09090b 0%, #111113 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * viewport-fit=cover is required for edge-to-edge standalone mode, but iOS then
+ * includes the status bar and home indicator in the CSS viewport. Keep all
+ * interactive content inside the device's safe rectangle. The env() values are
+ * zero in ordinary desktop browsers.
+ */
+.pi-web-shell {
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  padding:
+    env(safe-area-inset-top, 0px)
+    env(safe-area-inset-right, 0px)
+    0
+    env(safe-area-inset-left, 0px);
+  overflow: hidden;
+}
+
+.pi-web-sidebar {
+  top: env(safe-area-inset-top, 0px);
+  right: auto;
+  bottom: 0;
+  left: env(safe-area-inset-left, 0px);
+}
+
+@media (min-width: 80rem) {
+  .pi-web-sidebar {
+    top: auto;
+    bottom: auto;
+    left: auto;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(82, 82, 91, 0.8);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.semantic-transcript-loading { display: grid; gap: 1rem; padding-top: 1rem; }
+.semantic-transcript-loading div { height: 7rem; border: 1px solid rgb(39 39 42 / 0.75); border-radius: 1rem; background: linear-gradient(90deg, rgb(24 24 27 / 0.45), rgb(39 39 42 / 0.7), rgb(24 24 27 / 0.45)); background-size: 220% 100%; animation: semantic-loading 1.5s ease-in-out infinite; }
+.semantic-transcript-loading div:nth-child(2) { width: 78%; margin-left: auto; height: 5rem; animation-delay: 120ms; }
+.semantic-transcript-loading div:nth-child(3) { height: 9rem; animation-delay: 240ms; }
+@keyframes semantic-loading { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.semantic-message {
+  border: 1px solid rgb(39 39 42 / 0.9);
+  border-radius: 1rem;
+  padding: 1rem;
+  background: rgb(24 24 27 / 0.72);
+}
+
+.semantic-message-group { width: 100%; }
+.semantic-message-group-user { width: 100%; }
+.semantic-message-group-user > header { text-align: right; }
+
+.semantic-message-user {
+  width: 100%;
+  border-color: rgb(244 244 245 / 0.28);
+  background: rgb(244 244 245 / 0.1);
+}
+
+.semantic-message-assistant {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.25rem 0;
+}
+
+.semantic-message-group > header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  color: rgb(161 161 170);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.semantic-message-group-user > header { justify-content: flex-end; }
+.semantic-message-time { color: rgb(82 82 91); font-size: 0.7rem; font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+.semantic-streaming-dot {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-left: 0.5rem;
+  border-radius: 999px;
+  background: rgb(56 189 248);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.semantic-markdown {
+  color: rgb(228 228 231);
+  font-size: 0.95rem;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.semantic-markdown > :first-child { margin-top: 0; }
+.semantic-markdown > :last-child { margin-bottom: 0; }
+.semantic-markdown p, .semantic-markdown ul, .semantic-markdown ol, .semantic-markdown pre, .semantic-markdown blockquote { margin: 0.75rem 0; }
+.semantic-markdown ul { padding-left: 1.5rem; list-style: disc outside; }
+.semantic-markdown ol { padding-left: 1.5rem; list-style: decimal outside; }
+.semantic-markdown li { padding-left: 0.15rem; }
+.semantic-markdown a { color: rgb(125 211 252); text-decoration: underline; }
+.semantic-markdown code { border-radius: 0.3rem; background: rgb(9 9 11); padding: 0.12rem 0.35rem; font-size: 0.88em; }
+.semantic-markdown pre, .semantic-tool pre, .semantic-tool-call pre {
+  max-height: 32rem;
+  overflow: auto;
+  border: 1px solid rgb(63 63 70 / 0.8);
+  border-radius: 0.75rem;
+  background: rgb(9 9 11);
+  padding: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 0.8rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.semantic-markdown pre code { padding: 0; background: transparent; }
+.semantic-preserve-breaks { white-space: pre-line; }
+.semantic-markdown blockquote { border-left: 3px solid rgb(82 82 91); padding-left: 1rem; color: rgb(161 161 170); }
+.semantic-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.semantic-markdown th, .semantic-markdown td { border: 1px solid rgb(63 63 70); padding: 0.4rem 0.6rem; }
+
+.semantic-tool, .semantic-tool-call {
+  border: 1px solid rgb(63 63 70 / 0.8);
+  border-radius: 0.75rem;
+  background: rgb(9 9 11 / 0.55);
+  padding: 0.75rem;
+}
+
+.semantic-tool summary, .semantic-tool-call summary {
+  display: flex;
+  min-width: 0;
+  cursor: pointer;
+  list-style: none;
+  align-items: center;
+  gap: 0.45rem;
+  color: rgb(161 161 170);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.semantic-tool-icon { display: block; flex: 0 0 1rem; stroke-width: 2; }
+.semantic-tool summary::-webkit-details-marker, .semantic-tool-call summary::-webkit-details-marker { display: none; }
+.semantic-tool-verb { flex: none; color: rgb(212 212 216); text-transform: capitalize; }
+.semantic-tool-subject { min-width: 0; overflow: hidden; color: rgb(161 161 170); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-tool-spacer { min-width: 0; flex: 1 1 auto; }
+.semantic-tool-detail { max-width: 45%; flex: none; overflow: hidden; color: rgb(113 113 122); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-tool-chevron { margin-left: 0; flex: none; transition: transform 150ms ease; }
+details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
+.semantic-tool[open] summary, .semantic-tool-call[open] summary { margin-bottom: 0.75rem; }
+
+.semantic-tool > pre, .semantic-tool-call > pre,
+.semantic-tool > .semantic-data-documents, .semantic-tool-call > .semantic-data-grid,
+.semantic-tool-call > .semantic-edits {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.25rem 0;
+}
+.semantic-command { border: 0 !important; border-radius: 0 !important; background: transparent !important; padding: 0.25rem 0 !important; color: rgb(212 212 216); }
+.semantic-command span { color: rgb(56 189 248); user-select: none; }
+.semantic-terminal-output { margin-top: 0.65rem; border: 0 !important; border-top: 1px solid rgb(63 63 70 / 0.65) !important; border-radius: 0 !important; background: transparent !important; padding: 0.65rem 0 0 !important; color: rgb(212 212 216); }
+.semantic-highlighted-code code { display: block; min-width: max-content; color: rgb(212 212 216); white-space: pre; }
+.semantic-thinking-flat { display: grid; gap: 0.375rem; padding: 0.2rem 0; color: rgb(113 113 122); font-size: 0.88rem; font-weight: 400; line-height: 1.5; }
+.semantic-thinking-flat > span { display: block; margin: 0; padding: 0; }
+.semantic-tool-success { display: flex; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(16 185 129 / 0.08); padding: 0.7rem 0.8rem; color: rgb(110 231 183); font-size: 0.85rem; }
+
+.semantic-activity-label { display: flex; align-items: center; gap: 0.35rem; color: rgb(161 161 170); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.semantic-compaction-status { display: flex; align-items: flex-start; gap: 0.65rem; border: 1px solid rgb(56 189 248 / 0.28); border-radius: 0.75rem; background: rgb(56 189 248 / 0.07); padding: 0.75rem 0.85rem; color: rgb(125 211 252); }
+.semantic-compaction-status > svg { margin-top: 0.1rem; flex: none; }
+.semantic-compaction-status > div { display: grid; gap: 0.15rem; }
+.semantic-compaction-status strong { color: rgb(186 230 253); font-size: 0.84rem; font-weight: 600; }
+.semantic-compaction-status small { color: rgb(113 113 122); font-size: 0.74rem; line-height: 1.45; }
+.semantic-subagent-list { display: grid; gap: 0.4rem; margin-top: 0.65rem; }
+.semantic-subagent-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.6rem; border-top: 1px solid rgb(63 63 70 / 0.5); padding-top: 0.55rem; }
+.semantic-subagent-status { width: 0.55rem; height: 0.55rem; border-radius: 999px; background: rgb(113 113 122); }
+.semantic-subagent-status.is-creating, .semantic-subagent-status.is-working, .semantic-subagent-status.is-terminating { background: rgb(56 189 248); animation: pulse 1.2s ease-in-out infinite; }
+.semantic-subagent-status.is-completed { background: rgb(52 211 153); }
+.semantic-subagent-status.is-failed { background: rgb(248 113 113); }
+.semantic-subagent-main { display: grid; min-width: 0; }
+.semantic-subagent-main strong, .semantic-subagent-main button { overflow: hidden; color: rgb(228 228 231); font-size: 0.8rem; font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-subagent-main button:hover { color: rgb(125 211 252); text-decoration: underline; }
+.semantic-subagent-main small { overflow: hidden; color: rgb(113 113 122); font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-subagent-activity { display: flex; max-width: 42vw; align-items: center; justify-content: flex-end; gap: 0.45rem; overflow: hidden; color: rgb(113 113 122); font-size: 0.7rem; white-space: nowrap; }
+.semantic-subagent-tool { overflow: hidden; color: rgb(125 211 252); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; }
+.semantic-live-subagents { max-height: 12rem; overflow-y: auto; margin-bottom: 0.55rem; border: 1px solid rgb(63 63 70 / 0.7); border-radius: 0.85rem; background: rgb(24 24 27 / 0.75); padding: 0.65rem 0.75rem; }
+.semantic-subagent-dialog-body { max-height: min(70vh, 48rem); overflow-y: auto; }
+.semantic-subagent-error { margin-bottom: 0.75rem; border: 1px solid rgb(248 113 113 / 0.3); border-radius: 0.6rem; background: rgb(248 113 113 / 0.08); padding: 0.7rem; color: rgb(252 165 165); font-size: 0.8rem; }
+.semantic-subagent-transcript-item + .semantic-subagent-transcript-item { margin-top: 1rem; }
+.semantic-subagent-transcript-item > header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem; color: rgb(113 113 122); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.semantic-subagent-transcript-item > header time { margin-left: auto; letter-spacing: 0; text-transform: none; }
+.semantic-subagent-transcript-item > pre { margin: 0; overflow-wrap: anywhere; color: rgb(212 212 216); font: 0.8rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; }
+.semantic-subagent-transcript-item.is-streaming > pre { color: rgb(228 228 231); }
+
+.semantic-data-documents { display: grid; gap: 0.75rem; }
+.semantic-data-documents > .semantic-data-grid + .semantic-data-grid { border-top: 1px solid rgb(63 63 70 / 0.65); padding-top: 0.75rem; }
+.semantic-data-grid { display: grid; grid-template-columns: minmax(6.5rem, auto) minmax(0, 1fr); gap: 0.3rem 0.8rem; font-size: 0.82rem; line-height: 1.5; }
+.semantic-data-grid dt { color: rgb(113 113 122); text-transform: capitalize; }
+.semantic-data-grid dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: rgb(212 212 216); }
+.semantic-data-grid a { color: rgb(125 211 252); text-decoration: underline; }
+.semantic-data-list { display: grid; gap: 0.25rem; }
+.semantic-data-empty { color: rgb(113 113 122); font-style: italic; }
+.semantic-data-bool { display: inline-flex; border-radius: 999px; padding: 0.05rem 0.45rem; font-size: 0.72rem; font-weight: 600; }
+.semantic-data-bool.is-true { background: rgb(16 185 129 / 0.14); color: rgb(110 231 183); }
+.semantic-data-bool.is-false { background: rgb(113 113 122 / 0.14); color: rgb(161 161 170); }
+.semantic-data-number { color: rgb(125 211 252); font-variant-numeric: tabular-nums; }
+
+.semantic-edits { display: grid; gap: 0.65rem; max-height: 32rem; overflow: auto; font: 0.78rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.semantic-edits > div + div { border-top: 1px solid rgb(63 63 70 / 0.65); padding-top: 0.65rem; }
+.semantic-edit-diff { min-width: max-content; overflow: hidden; border-radius: 0.4rem; background: rgb(9 9 11 / 0.7); }
+.semantic-diff-row { display: grid; grid-template-columns: 1.25rem 3.25rem minmax(max-content, 1fr); min-height: 1.5rem; }
+.semantic-diff-row > span { user-select: none; }
+.semantic-diff-sign { display: grid; place-items: center; font-weight: 700; }
+.semantic-diff-number { border-right: 1px solid rgb(63 63 70 / 0.45); padding-right: 0.65rem; color: rgb(113 113 122); text-align: right; font-variant-numeric: tabular-nums; }
+.semantic-diff-row > code { display: block; min-width: 0; padding: 0 0.75rem; color: rgb(212 212 216); white-space: pre; }
+.semantic-diff-row mark { background: transparent; color: inherit; }
+.semantic-diff-removed { background: rgb(127 29 29 / 0.18); }
+.semantic-diff-removed .semantic-diff-sign { color: rgb(248 113 113); }
+.semantic-diff-added { background: rgb(6 78 59 / 0.2); }
+.semantic-diff-added .semantic-diff-sign { color: rgb(52 211 153); }
+.semantic-diff-removed .semantic-diff-changed { background: rgb(220 38 38 / 0.35); border-radius: 0.15rem; }
+.semantic-diff-added .semantic-diff-changed { background: rgb(5 150 105 / 0.42); border-radius: 0.15rem; }
+.semantic-diff-context { background: rgb(24 24 27 / 0.28); }
+.semantic-diff-skip { color: rgb(113 113 122); }
+.semantic-diff-skip > code { padding-left: 0.75rem; }
+
+.semantic-scroll-bottom { position: absolute; left: 50%; bottom: 0.75rem; display: grid; width: 2rem; height: 2rem; transform: translateX(-50%); place-items: center; border: 1px solid rgb(82 82 91 / 0.85); border-radius: 999px; background: rgb(24 24 27 / 0.96); color: rgb(212 212 216); box-shadow: 0 8px 24px rgb(0 0 0 / 0.45); }
+.semantic-scroll-bottom:hover { border-color: rgb(113 113 122); background: rgb(39 39 42); color: white; }
+.semantic-slash-menu { position: absolute; z-index: 50; right: 0; bottom: calc(100% + 0.5rem); left: 0; max-height: min(22rem, 48vh); overflow-y: auto; border: 1px solid rgb(63 63 70); border-radius: 0.85rem; background: rgb(9 9 11 / 0.98); padding: 0.35rem; box-shadow: 0 18px 48px rgb(0 0 0 / 0.55); }
+.semantic-slash-menu > button { display: flex; width: 100%; min-width: 0; align-items: center; gap: 1rem; border-radius: 0.55rem; padding: 0.65rem 0.75rem; color: rgb(212 212 216); text-align: left; }
+.semantic-slash-menu > button:hover, .semantic-slash-menu > button.is-selected { background: rgb(39 39 42); color: white; }
+.semantic-slash-command-main { display: grid; min-width: 0; flex: 1; gap: 0.15rem; }
+.semantic-slash-command-main strong { overflow: hidden; font: 500 0.86rem ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-slash-command-main small { overflow: hidden; color: rgb(161 161 170); font-size: 0.76rem; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-slash-command-source { flex: none; color: rgb(113 113 122); font-size: 0.68rem; text-transform: capitalize; }
+.semantic-skill-invocation { display: flex; align-items: center; gap: 0.45rem; padding: 0.65rem 1rem 0; color: rgb(161 161 170); font-size: 0.72rem; }
+.semantic-skill-invocation > span { border: 1px solid rgb(56 189 248 / 0.35); border-radius: 999px; background: rgb(14 116 144 / 0.14); padding: 0.1rem 0.4rem; color: rgb(125 211 252); font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
+.semantic-skill-invocation > code { color: rgb(228 228 231); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.semantic-skill-invocation > small { color: rgb(113 113 122); }
+.semantic-session-composer { border-top: 0 !important; }
+.semantic-token-inline { display: inline-block; width: clamp(12rem, 35vw, 25rem); margin-left: 0.3rem; overflow: hidden; text-overflow: ellipsis; color: rgb(82 82 91); font: 0.68rem ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.semantic-token-mobile { display: none; }
+.semantic-token-mobile > button { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; border-radius: 0.5rem; color: rgb(113 113 122); }
+.semantic-token-mobile > button:hover { background: rgb(39 39 42); color: rgb(212 212 216); }
+.semantic-token-details { display: grid; min-width: 11rem; gap: 0.3rem; }
+.semantic-token-details > span { display: flex; justify-content: space-between; gap: 1rem; color: rgb(161 161 170); }
+.semantic-token-details strong { color: rgb(228 228 231); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.semantic-composer-control { min-width: 0; overflow: hidden; color: rgb(161 161 170); text-overflow: ellipsis; white-space: nowrap; }
+.semantic-composer-menu button { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 0.75rem; border-radius: 0.4rem; padding: 0.55rem 0.65rem; color: rgb(212 212 216); text-align: left; }
+.semantic-composer-menu button:hover { background: rgb(39 39 42); }
+.semantic-composer-menu button > span { display: grid; min-width: 0; }
+.semantic-composer-menu strong { overflow: hidden; font-size: 0.82rem; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-composer-menu small { overflow: hidden; color: rgb(113 113 122); font: 0.7rem ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-composer-menu-label { padding: 0.45rem 0.65rem 0.3rem; color: rgb(113 113 122); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.semantic-composer-menu-divider { height: 1px; margin: 0.35rem 0.45rem; background: rgb(63 63 70 / 0.75); }
+.semantic-effort-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.semantic-attachment-drop { position: absolute; inset: 0; z-index: 10; display: flex; pointer-events: none; align-items: center; justify-content: center; gap: 0.5rem; border-radius: 1rem; background: rgb(9 9 11 / 0.88); color: rgb(125 211 252); font-size: 0.85rem; font-weight: 600; }
+.semantic-queue { display: grid; margin-bottom: 0.5rem; }
+.semantic-queue-label { margin-bottom: 0.15rem; color: rgb(113 113 122); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.semantic-queue-item { display: flex; min-width: 0; cursor: grab; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(39 39 42 / 0.72); padding: 0.45rem 0.55rem; color: rgb(161 161 170); font-size: 0.8rem; transition: opacity 150ms ease, background-color 150ms ease; }
+.semantic-queue-item:active { cursor: grabbing; }
+.semantic-queue-item.is-uncertain { cursor: default; border: 1px solid rgb(251 191 36 / 0.65); background: rgb(120 53 15 / 0.35); color: rgb(253 230 138); }
+.semantic-queue-item.is-blocked { cursor: not-allowed; opacity: 0.55; }
+.semantic-queue-item.is-sortable-dragging { opacity: 0; }
+.semantic-queue-item.is-overlay { width: min(34rem, calc(100vw - 2rem)); cursor: grabbing; border: 1px solid rgb(255 255 255 / 0.65); background: rgb(39 39 42); box-shadow: 0 18px 50px rgb(0 0 0 / 0.65); opacity: 1; }
+.semantic-queue-grip { flex: none; color: rgb(82 82 91); }
+.semantic-queue-item:hover .semantic-queue-grip { color: rgb(161 161 170); }
+.semantic-queue-item > img { width: 1.75rem; height: 1.75rem; flex: none; border-radius: 0.35rem; object-fit: cover; }
+.semantic-queue-item > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-queue-item > button { display: inline-grid; width: 1.75rem; height: 1.75rem; flex: none; cursor: pointer; place-items: center; border-radius: 0.4rem; color: rgb(161 161 170); }
+.semantic-queue-item > button:hover { background: rgb(63 63 70); color: white; }
+
+@media (max-width: 640px) {
+  .semantic-token-inline { display: none; }
+  .semantic-token-mobile { display: inline-flex; }
+  .semantic-tool summary, .semantic-tool-call summary { gap: 0.35rem; }
+  .semantic-tool-detail { display: block; max-width: 38%; font-size: 0.72rem; }
+  .semantic-subagent-row { grid-template-columns: auto minmax(0, 1fr); }
+  .semantic-subagent-activity { grid-column: 2; max-width: 100%; justify-content: flex-start; }
+  .semantic-data-grid { grid-template-columns: minmax(5.5rem, auto) minmax(0, 1fr); }
+}
