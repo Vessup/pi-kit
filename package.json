@@ -20,6 +20,9 @@
     ],
     "prompts": [
       "./prompts/address-pr.md"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {
