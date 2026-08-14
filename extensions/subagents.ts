@@ -378,6 +378,14 @@ export function isTerminalSubagentStatus(status: SubagentStatus): boolean {
 	return status === "completed" || status === "failed" || status === "terminated";
 }
 
+export function shouldArchiveTerminalSubagent(agent: {
+	status: SubagentStatus;
+	lastReadActivity: number;
+	activity: readonly unknown[];
+}): boolean {
+	return isTerminalSubagentStatus(agent.status) && agent.lastReadActivity < agent.activity.length;
+}
+
 export async function abortRunningSubagentSessions<T extends { status: SubagentStatus; session?: { abort(): Promise<unknown> } }>(
 	agents: readonly T[],
 ): Promise<Array<{ agent: T; error?: Error }>> {
@@ -496,6 +504,7 @@ function asFooterUsage(usage: Usage): FooterUsage {
 
 class SubagentManager {
 	readonly agents = new Map<string, ManagedSubagent>();
+	private archivedAgents = new Map<string, ManagedSubagent>();
 	private nextId = 1;
 	private currentContext?: ExtensionContext;
 	private totalUsage = zeroUsage();
@@ -545,6 +554,7 @@ class SubagentManager {
 		this.lastWebStatusPublishedAt = 0;
 		this.webTranscriptCursors.clear();
 		this.webStreamingSnapshots.clear();
+		this.archivedAgents.clear();
 		const ctx = this.currentContext;
 		if (ctx) {
 			const sessionId = ctx.sessionManager.getSessionId();
@@ -579,7 +589,7 @@ class SubagentManager {
 	}
 
 	getAgent(id: string): ManagedSubagent {
-		const agent = this.agents.get(id);
+		const agent = this.agents.get(id) ?? this.archivedAgents.get(id);
 		if (!agent) throw new Error(`Unknown subagent: ${id}`);
 		return agent;
 	}
@@ -666,9 +676,9 @@ class SubagentManager {
 	private makeId(requestedName?: string): string {
 		const base = requestedName ? sanitizeName(requestedName) : `agent-${this.nextId++}`;
 		if (!base) return this.makeId();
-		if (!this.agents.has(base)) return base;
+		if (!this.agents.has(base) && !this.archivedAgents.has(base)) return base;
 		let suffix = 2;
-		while (this.agents.has(`${base}-${suffix}`)) suffix++;
+		while (this.agents.has(`${base}-${suffix}`) || this.archivedAgents.has(`${base}-${suffix}`)) suffix++;
 		return `${base}-${suffix}`;
 	}
 
@@ -1056,6 +1066,7 @@ class SubagentManager {
 		}
 		if (remove) {
 			this.agents.delete(id);
+			this.archivedAgents.delete(id);
 			this.webTranscriptCursors.delete(id);
 			this.webStreamingSnapshots.delete(id);
 			this.footerSelected = false;
@@ -1066,18 +1077,21 @@ class SubagentManager {
 
 	async terminateAll(remove = false): Promise<void> {
 		await Promise.all(this.list().map(async (agent) => this.terminate(agent.id, remove)));
+		if (remove) this.archivedAgents.clear();
 	}
 
 	async clearTerminalAgents(): Promise<number> {
-		const terminalIds = this.list()
-			.filter((agent) => isTerminalSubagentStatus(agent.status))
-			.map((agent) => agent.id);
-		if (terminalIds.length === 0) return 0;
+		const terminalAgents = this.list().filter((agent) => isTerminalSubagentStatus(agent.status));
+		if (terminalAgents.length === 0) return 0;
 
-		await Promise.all(terminalIds.map(async (id) => this.terminate(id, true)));
+		await Promise.all(terminalAgents.map(async (agent) => {
+			const preserveUnreadOutput = shouldArchiveTerminalSubagent(agent);
+			await this.terminate(agent.id, true);
+			if (preserveUnreadOutput) this.archivedAgents.set(agent.id, agent);
+		}));
 		if (this.webStatusPublishTimer) clearTimeout(this.webStatusPublishTimer);
 		this.publishWebStatus();
-		return terminalIds.length;
+		return terminalAgents.length;
 	}
 
 	private hasUnread(agent: ManagedSubagent): boolean {
@@ -1141,6 +1155,7 @@ class SubagentManager {
 				if (latest) output += `\n\nLatest assistant output:\n${latest}`;
 			}
 			sections.push(output);
+			if (this.archivedAgents.get(agent.id) === agent) this.archivedAgents.delete(agent.id);
 		}
 		return truncateToolOutput(sections.join("\n\n---\n\n"));
 	}

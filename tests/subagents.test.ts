@@ -14,6 +14,7 @@ import {
 	isTerminalSubagentStatus,
 	MAX_WEB_STREAMING_CHARS,
 	parsePersistedUsageState,
+	shouldArchiveTerminalSubagent,
 	subagentModelGuidance,
 	subagentModelRuntime,
 } from "../extensions/subagents.ts";
@@ -55,13 +56,16 @@ test("terminal provider errors are classified as failures", () => {
 	assert.equal(isFailedStopReason(undefined), false);
 });
 
-test("terminal cleanup classification preserves live subagents", () => {
+test("terminal cleanup classification preserves live subagents and archives unread output", () => {
 	assert.equal(isTerminalSubagentStatus("completed"), true);
 	assert.equal(isTerminalSubagentStatus("failed"), true);
 	assert.equal(isTerminalSubagentStatus("terminated"), true);
 	assert.equal(isTerminalSubagentStatus("creating"), false);
 	assert.equal(isTerminalSubagentStatus("working"), false);
 	assert.equal(isTerminalSubagentStatus("terminating"), false);
+	assert.equal(shouldArchiveTerminalSubagent({ status: "completed", lastReadActivity: 1, activity: [{}, {}] }), true);
+	assert.equal(shouldArchiveTerminalSubagent({ status: "failed", lastReadActivity: 2, activity: [{}, {}] }), false);
+	assert.equal(shouldArchiveTerminalSubagent({ status: "working", lastReadActivity: 0, activity: [{}] }), false);
 });
 
 test("available subagent models honor a configured scope", () => {

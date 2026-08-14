@@ -1119,7 +1119,7 @@ test("sessions deleted from the TUI are removed from the live web catalog", asyn
 }, 10_000);
 
 test("transient session-file access errors do not reconcile as deletion", async () => {
-	if (process.platform === "win32") return;
+	if (process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0)) return;
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-session-access-error-test-"));
 	const agentDir = join(tempDir, "pi-agent");
 	const sessionsDir = join(agentDir, "sessions", "project");

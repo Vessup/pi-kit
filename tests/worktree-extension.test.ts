@@ -204,10 +204,16 @@ test("worktree command parses safe quoted repository arguments", () => {
 });
 
 test("quoted relative and root-relative Windows paths preserve separators", () => {
-	expect(parseWorktreeCommandArgs(String.raw`--existing ".\foo\bar"`)).toEqual({ existing: String.raw`.\foo\bar` });
-	expect(parseWorktreeCommandArgs(String.raw`--existing "..\foo\bar"`)).toEqual({ existing: String.raw`..\foo\bar` });
-	expect(parseWorktreeCommandArgs(String.raw`--existing "\foo\bar"`)).toEqual({ existing: String.raw`\foo\bar` });
-	expect(parseWorktreeCommandArgs(String.raw`--existing "project dir\nested"`)).toEqual({ existing: String.raw`project dir\nested` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing '.\foo\bar'`)).toEqual({ existing: String.raw`.\foo\bar` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing '..\foo\bar'`)).toEqual({ existing: String.raw`..\foo\bar` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing '\foo\bar'`)).toEqual({ existing: String.raw`\foo\bar` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing 'project dir\nested'`)).toEqual({ existing: String.raw`project dir\nested` });
+	const jsonQuoted = JSON.stringify(String.raw`project dir\nested`);
+	expect(parseWorktreeCommandArgs(`--existing ${jsonQuoted}`)).toEqual({ existing: String.raw`project dir\nested` });
+});
+
+test("double-quoted JSON control escapes decode after spaces", () => {
+	expect(parseWorktreeCommandArgs(String.raw`--existing "dir with space\nchild"`)).toEqual({ existing: "dir with space\nchild" });
 });
 
 test("formatted branch and start-point values round-trip without command interpolation", () => {
