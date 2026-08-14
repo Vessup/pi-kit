@@ -1,6 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,12 +14,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import worktreeExtension, {
 	clearWorktreeToolRequests,
+	createReplacementSession,
 	inheritedWorktreeOwnership,
 	installWorktreeCommandDispatchCompatibility,
 	queueWorktreeToolRequest,
 	runWorktreeCommand,
 	takeWorktreeToolRequest,
 	withWorktreeOperation,
+	worktreeToolCommandArgs,
 } from "../extensions/worktree.ts";
 import { WORKTREE_SESSION_ENTRY } from "../web/server/worktrees.ts";
 import { parseWorktreeCommandArgs, parseWorktreeInvocation } from "../web/worktree-command.ts";
@@ -84,7 +86,8 @@ test("worktree tool queues a correlated create command and terminates the old ru
 	const { tool, sent } = registeredWorktreeTool();
 	expect(tool.name).toBe("worktree");
 	expect(tool.promptSnippet).toContain("move this conversation");
-	expect(tool.promptGuidelines?.join(" ")).toContain("do not run git worktree directly");
+	expect(tool.promptGuidelines?.join(" ")).toContain("selected checkout's HEAD");
+	expect(tool.promptGuidelines?.join(" ")).toContain("explicitly asks only to create");
 	const result = await tool.execute("call-1", {
 		name: "feature one",
 		repository: "~/Source/my repo",
@@ -182,6 +185,12 @@ test("worktree command parses safe quoted repository arguments", () => {
 	});
 });
 
+test("tool-quoted worktree paths preserve JSON control escapes", () => {
+	const repository = "repo\nwith\ttabs\rand\bcontrols\fplus\u0001unicode-escape";
+	const command = worktreeToolCommandArgs({ name: "feature", repository, continuation: "Continue." });
+	expect(parseWorktreeCommandArgs(command).repository).toBe(repository);
+});
+
 test("worktree command parses existing checkout paths exclusively", () => {
 	expect(parseWorktreeCommandArgs('--existing "../repo worktree"')).toEqual({
 		existing: "../repo worktree",
@@ -192,6 +201,37 @@ test("worktree command parses existing checkout paths exclusively", () => {
 	expect(() => parseWorktreeCommandArgs("--existing")).toThrow("requires a worktree path");
 	expect(() => parseWorktreeCommandArgs("feature --existing /tmp/worktree")).toThrow("Usage");
 	expect(() => parseWorktreeCommandArgs("--existing /tmp/worktree --repo /tmp/repo")).toThrow("Usage");
+});
+
+test("branched replacements keep the durable source as their parent", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-kit-worktree-branch-parent-"));
+	try {
+		const sourceCwd = join(directory, "source");
+		const targetCwd = join(directory, "target");
+		const sourceSessions = join(directory, "source-sessions");
+		const replacementSessions = join(directory, "replacement-sessions");
+		await mkdir(sourceCwd, { recursive: true });
+		await mkdir(targetCwd, { recursive: true });
+		const source = SessionManager.create(sourceCwd, sourceSessions);
+		source.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+		const selectedLeaf = source.appendMessage({ role: "assistant", content: [{ type: "text", text: "first answer" }], api: "test", provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() });
+		source.appendMessage({ role: "user", content: "second", timestamp: Date.now() });
+		source.appendMessage({ role: "assistant", content: [{ type: "text", text: "second answer" }], api: "test", provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() });
+		source.branch(selectedLeaf);
+		const sourceFile = source.getSessionFile()!;
+		const replacement = createReplacementSession(
+			{ sessionManager: source } as unknown as ExtensionCommandContext,
+			{ path: await realpath(targetCwd), repoRoot: sourceCwd, ref: { kind: "branch", value: "feature" } },
+			sourceFile,
+			replacementSessions,
+		);
+		const opened = SessionManager.open(replacement.sessionFile);
+		expect(opened.getHeader()?.parentSession).toBe(sourceFile);
+		expect(opened.getEntries().some((entry) => entry.type === "message" && entry.message.role === "user" && entry.message.content === "second")).toBe(false);
+		expect((await readdir(sourceSessions)).filter((file) => file.endsWith(".jsonl"))).toEqual([sourceFile.split("/").at(-1)]);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
 });
 
 test("existing worktree migration activates the replacement and rollback restores the source", async () => {
@@ -208,6 +248,8 @@ test("existing worktree migration activates the replacement and rollback restore
 		source.appendMessage({ role: "user", content: "retained", timestamp: Date.now() });
 		let activeFile = sourceFile;
 		let rollbackRequested = false;
+		let removeTargetBeforeVerification = false;
+		let latestReplacementFile: string | undefined;
 		const notifications: string[] = [];
 		const continuations: string[] = [];
 		const ctx = {
@@ -222,6 +264,7 @@ test("existing worktree migration activates the replacement and rollback restore
 			switchSession: async (sessionPath: string, options?: { withSession?: (next: ExtensionCommandContext) => Promise<void> }) => {
 				activeFile = sessionPath;
 				const nextManager = SessionManager.open(sessionPath);
+				if (removeTargetBeforeVerification) await rm(targetCwd, { recursive: true, force: true });
 				await options?.withSession?.({
 					...ctx,
 					cwd: nextManager.getCwd(),
@@ -243,7 +286,8 @@ test("existing worktree migration activates the replacement and rollback restore
 				// Keep forked test sessions inside this fixture. Using the production default
 				// writes them into ~/.pi/agent/sessions, where Pi Web discovers them later.
 				const replacement = SessionManager.forkFrom(previousFile, target.path, join(directory, "sessions"));
-				return { sessionId: replacement.getSessionId(), sessionFile: replacement.getSessionFile()! };
+				latestReplacementFile = replacement.getSessionFile()!;
+				return { sessionId: replacement.getSessionId(), sessionFile: latestReplacementFile };
 			},
 		};
 		const result = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, dependencies, "Resume in the verified replacement.");
@@ -260,7 +304,27 @@ test("existing worktree migration activates the replacement and rollback restore
 		expect(activeFile).toBe(sourceFile);
 		expect(rollbackRequested).toBe(true);
 		expect(notifications.at(-1)).toContain("Returning to the original session");
+		expect(existsSync(latestReplacementFile!)).toBe(false);
 		expect(continuations).toEqual(["Resume in the verified replacement."]);
+
+		rollbackRequested = false;
+		removeTargetBeforeVerification = true;
+		await mkdir(targetCwd, { recursive: true });
+		const missingTarget = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, dependencies, "Must not run when CWD disappears.");
+		expect(missingTarget.cancelled).toBe(true);
+		expect(rollbackRequested).toBe(true);
+		expect(notifications.at(-1)).toContain("Replacement CWD verification failed");
+		expect(existsSync(latestReplacementFile!)).toBe(false);
+		expect(continuations).toEqual(["Resume in the verified replacement."]);
+
+		removeTargetBeforeVerification = false;
+		rollbackRequested = false;
+		await mkdir(targetCwd, { recursive: true });
+		dependencies.createWorktree = async () => ({ path: await realpath(targetCwd), repoRoot: sourceCwd, branch: "managed", setupRan: false });
+		const retained = await runWorktreeCommand("managed", ctx, dependencies, "Must not run after managed rollback.");
+		expect(retained.cancelled).toBe(true);
+		expect(rollbackRequested).toBe(true);
+		expect(notifications.at(-1)).toContain(`worktree retained at ${await realpath(targetCwd)}`);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}

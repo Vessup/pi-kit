@@ -11,6 +11,7 @@ import {
 	removeManagedWorktree,
 	rollbackWebWorktree,
 	runWorktreeSetup,
+	validateGitVersion,
 	validateWorktreeName,
 	WORKTREE_SESSION_ENTRY,
 } from "../web/server/worktrees.ts";
@@ -170,7 +171,7 @@ test("managed worktree metadata is parsed and cleanup removes its checkout and b
 		{ type: "custom", customType: WORKTREE_SESSION_ENTRY, data: { managed: false } },
 	])).toBeUndefined();
 	removeManagedWorktree(marker!);
-	expect(stat(created.path)).rejects.toThrow();
+	await expect(stat(created.path)).rejects.toThrow();
 	expect((await Bun.$`git -C ${repository} branch --list cleanup-me`.text()).trim()).toBe("");
 });
 
@@ -200,8 +201,15 @@ test("worktree rollback removes the checkout and its branch", async () => {
 
 	const result = await createWebWorktree(repository, "rollback-me");
 	rollbackWebWorktree(result);
-	expect(stat(result.path)).rejects.toThrow();
+	await expect(stat(result.path)).rejects.toThrow();
 	expect((await Bun.$`git -C ${repository} branch --list rollback-me`.text()).trim()).toBe("");
+});
+
+test("worktree handling requires Git 2.36 or newer", () => {
+	expect(() => validateGitVersion("git version 2.35.9")).toThrow("Git 2.36.0 or newer is required");
+	expect(() => validateGitVersion("git version unknown")).toThrow("Could not determine Git version");
+	expect(() => validateGitVersion("git version 2.36.0")).not.toThrow();
+	expect(() => validateGitVersion("git version 3.0.0")).not.toThrow();
 });
 
 test("web worktree names reject traversal and nested paths", () => {

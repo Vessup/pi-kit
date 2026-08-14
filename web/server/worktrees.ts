@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -17,10 +17,26 @@ export function validateWorktreeName(input: string): string {
 function gitOutput(cwd: string, args: string[]): string {
 	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
 	if (result.status !== 0) {
-		const error = result.stderr.trim() || result.error?.message || `git ${args.join(" ")} failed`;
+		const error = result.stderr?.trim() || result.error?.message || `git ${args.join(" ")} failed`;
 		throw new Error(error);
 	}
-	return result.stdout.trim();
+	return result.stdout?.trim() ?? "";
+}
+
+/** Require the Git features used for absolute paths and NUL-delimited worktree records. */
+export function validateGitVersion(versionOutput: string): void {
+	const match = versionOutput.trim().match(/^git version (\d+)\.(\d+)\.(\d+)(?:\D|$)/);
+	if (!match) throw new Error(`Could not determine Git version from: ${versionOutput.trim() || "empty output"}`);
+	const version = match.slice(1, 4).map(Number);
+	if (version[0]! < 2 || (version[0] === 2 && version[1]! < 36)) {
+		throw new Error(`Git 2.36.0 or newer is required (found ${version.slice(0, 3).join(".")})`);
+	}
+}
+
+function ensureSupportedGit(): void {
+	const result = spawnSync("git", ["--version"], { encoding: "utf8" });
+	if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || "Could not run git --version");
+	validateGitVersion(result.stdout ?? "");
 }
 
 export type WorktreeRef = { kind: "branch" | "detached"; value: string };
@@ -95,11 +111,12 @@ function primaryRepositoryGitDir(cwd: string): string {
 }
 
 function parseRegisteredWorktrees(cwd: string): Array<{ path: string; head?: string; branch?: string; detached: boolean }> {
+	ensureSupportedGit();
 	const records: Array<{ path: string; head?: string; branch?: string; detached: boolean }> = [];
 	let current: { path: string; head?: string; branch?: string; detached: boolean } | undefined;
 	const result = spawnSync("git", ["-C", cwd, "worktree", "list", "--porcelain", "-z"], { encoding: "utf8" });
-	if (result.status !== 0) throw new Error(result.stderr.trim() || result.error?.message || "git worktree list failed");
-	for (const field of result.stdout.split("\0")) {
+	if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || "git worktree list failed");
+	for (const field of (result.stdout ?? "").split("\0")) {
 		if (!field) {
 			if (current) records.push(current);
 			current = undefined;
@@ -121,6 +138,7 @@ function parseRegisteredWorktrees(cwd: string): Array<{ path: string; head?: str
 
 /** Resolve and validate an existing worktree without changing its checkout or branch. */
 export function inspectExistingWorktree(currentCwd: string, requestedPath: string): ExistingWebWorktree {
+	ensureSupportedGit();
 	let path: string;
 	try {
 		path = realpathSync(requestedPath);
@@ -227,6 +245,7 @@ export function hasOtherSessionInWorktree(sessionsRoot: string, currentSessionFi
 }
 
 function verifiedManagedWorktree(worktree: ManagedWorktree): ManagedWorktree {
+	ensureSupportedGit();
 	const name = validateWorktreeName(worktree.branch);
 	if (basename(worktree.path) !== name) throw new Error("Refusing to remove a worktree whose path and branch marker disagree");
 	const repoRoot = realpathSync(worktree.repoRoot);
@@ -266,6 +285,7 @@ export function rollbackWebWorktree(worktree: CreatedWebWorktree): void {
 
 /** Create a new branch/worktree under the primary repository's .pi directory. */
 export async function createWebWorktree(cwd: string, requestedName: string): Promise<CreatedWebWorktree> {
+	ensureSupportedGit();
 	const name = validateWorktreeName(requestedName);
 	const commonDir = resolve(gitOutput(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
 	const startPoint = gitOutput(cwd, ["rev-parse", "HEAD"]);
@@ -291,7 +311,14 @@ export async function createWebWorktree(cwd: string, requestedName: string): Pro
 	}
 	if (setupInfo?.isFile()) {
 		try {
-			const [command, ...args] = (Number(setupInfo.mode) & 0o111) !== 0 ? [setup] : ["sh", setup];
+			let executable = false;
+			try {
+				accessSync(setup, constants.X_OK);
+				executable = true;
+			} catch {
+				// A mode bit alone is insufficient when this process lacks that group.
+			}
+			const [command, ...args] = executable ? [setup] : ["sh", setup];
 			await runWorktreeSetup(command!, args, path);
 			worktree.setupRan = true;
 		} catch (error) {

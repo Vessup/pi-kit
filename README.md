@@ -14,7 +14,8 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 
 ### Requirements
 
-- Pi
+- Pi 0.84.1
+- Git 2.36.0 or newer
 - GitHub CLI (`gh`), authenticated with `gh auth login`
 - A terminal that supports OSC 8 hyperlinks for clickable links
 - A Nerd Font for the branch icon
@@ -35,7 +36,7 @@ The subagent extension independently contributes its token use and status to `ex
 
 Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>` from the current checkout's `HEAD`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the new worktree. Use `/worktree <name> --repo <path>` to select another repository. To enter an already registered worktree in the same primary repository without modifying its checkout or branch, run `/worktree --existing <worktree-path>`. The original session is preserved as the replacement's parent and the switch completes only after the replacement CWD and branch or detached HEAD are verified.
 
-The LLM-callable `worktree` tool provides the same create/existing flows. It queues an internal correlated `/worktree` follow-up, ends the old agent run, verifies the replacement session, and automatically resumes a supplied continuation prompt in the new session. Agents are instructed to use this tool instead of invoking `git worktree` directly or asking the user to type the slash command.
+The LLM-callable `worktree` tool provides the same create/existing flows. It queues an internal correlated `/worktree` follow-up, ends the old agent run, verifies the replacement session, and automatically resumes a supplied continuation prompt in the new session. Its create mode intentionally starts a new branch at the selected checkout's `HEAD`; explicit create-only requests or requests to provision another branch, commit, or detached HEAD remain ordinary Git operations and do not replace the conversation.
 
 ## Web sessions
 

@@ -3,9 +3,17 @@ function parseWords(input: string): string[] {
 	let current = "";
 	let quote: "'" | '"' | undefined;
 	let escaped = false;
-	for (const char of input.trim()) {
+	const source = input.trim();
+	for (let index = 0; index < source.length; index += 1) {
+		const char = source[index]!;
 		if (escaped) {
-			current += char;
+			if (quote === '"' && char === "u" && /^[0-9a-fA-F]{4}$/.test(source.slice(index + 1, index + 5))) {
+				current += String.fromCharCode(Number.parseInt(source.slice(index + 1, index + 5), 16));
+				index += 4;
+			} else {
+				const jsonEscape = quote === '"' ? { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }[char] : undefined;
+				current += jsonEscape ?? char;
+			}
 			escaped = false;
 		} else if (char === "\\" && quote !== "'") {
 			escaped = true;

@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -32,7 +32,12 @@ const TOOL_REQUESTS_KEY = Symbol.for("@vessup/pi-kit/worktree-tool-requests");
 const OPERATIONS_KEY = Symbol.for("@vessup/pi-kit/worktree-operations");
 const COMMAND_DISPATCH_PATCH_KEY = Symbol.for("@vessup/pi-kit/worktree-command-dispatch-patch");
 const INTERNAL_TOOL_OPTION = "--tool-request";
+const TOOL_REQUEST_TOKEN_SOURCE = "[0-9a-f-]{16,}";
+const TOOL_REQUEST_TOKEN_PATTERN = new RegExp(`^${TOOL_REQUEST_TOKEN_SOURCE}$`, "i");
+const INTERNAL_TOOL_MESSAGE_PATTERN = new RegExp(`^/worktree ${INTERNAL_TOOL_OPTION} ${TOOL_REQUEST_TOKEN_SOURCE}$`, "i");
+const INTERNAL_TOOL_ARGUMENT_PATTERN = new RegExp(`^${INTERNAL_TOOL_OPTION}\\s+(${TOOL_REQUEST_TOKEN_SOURCE})$`, "i");
 const TOOL_REQUEST_TTL_MS = 30 * 60_000;
+const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 
 export const WorktreeToolParameters = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: "Safe worktree and branch name to create" })),
@@ -99,7 +104,7 @@ export function installWorktreeCommandDispatchCompatibility(): void {
 	if (scope[COMMAND_DISPATCH_PATCH_KEY]) return;
 	const original = AgentSession.prototype.sendUserMessage;
 	AgentSession.prototype.sendUserMessage = async function (content, options): Promise<void> {
-		if (typeof content === "string" && /^\/worktree --tool-request [0-9a-f-]{16,}$/i.test(content)) {
+		if (typeof content === "string" && INTERNAL_TOOL_MESSAGE_PATTERN.test(content)) {
 			await this.prompt(content, {
 				expandPromptTemplates: true,
 				streamingBehavior: options?.deliverAs,
@@ -129,8 +134,8 @@ function normalizeToolPath(value: string): string {
 /** Build only parser input; values are never interpolated into a shell command. */
 export function worktreeToolCommandArgs(input: WorktreeToolInput): string {
 	const name = input.name?.trim();
-	const repository = input.repository?.trim();
-	const existing = input.existing?.trim();
+	const repository = input.repository?.trim() ? input.repository : undefined;
+	const existing = input.existing?.trim() ? input.existing : undefined;
 	if (!input.continuation.trim()) throw new Error("worktree requires a continuation prompt");
 	if (existing) {
 		if (name || repository) throw new Error("Specify existing by itself, or name with an optional repository");
@@ -150,7 +155,7 @@ export function queueWorktreeToolRequest(options: {
 	const now = options.now ?? Date.now();
 	pruneToolRequests(now);
 	const token = options.token ?? crypto.randomUUID();
-	if (!/^[0-9a-f-]{16,}$/i.test(token) || toolRequests().has(token)) throw new Error("Could not allocate a unique worktree request token");
+	if (!TOOL_REQUEST_TOKEN_PATTERN.test(token) || toolRequests().has(token)) throw new Error("Could not allocate a unique worktree request token");
 	const request: PendingWorktreeToolRequest = {
 		token,
 		sourceSessionId: options.sessionId,
@@ -186,7 +191,7 @@ export function clearWorktreeToolRequests(sessionId?: string): void {
 function internalToolRequestToken(args: string): string | undefined {
 	const trimmed = args.trim();
 	if (!trimmed.startsWith(INTERNAL_TOOL_OPTION)) return undefined;
-	const match = trimmed.match(/^--tool-request\s+([0-9a-f-]{16,})$/i);
+	const match = trimmed.match(INTERNAL_TOOL_ARGUMENT_PATTERN);
 	if (!match) throw new Error("Invalid internal worktree tool request");
 	return match[1];
 }
@@ -241,13 +246,67 @@ async function collectArguments(args: string, ctx: ExtensionCommandContext): Pro
 	return { mode: "create", name, repository: resolveRepository(repository, ctx.cwd) };
 }
 
-function createReplacementSession(
+function writeAll(descriptor: number, buffer: Buffer): void {
+	let offset = 0;
+	while (offset < buffer.length) {
+		const written = writeSync(descriptor, buffer, offset, buffer.length - offset);
+		if (written <= 0) throw new Error("Could not rewrite replacement session header");
+		offset += written;
+	}
+}
+
+/** Repoint a branch snapshot's child at the durable source session without loading its transcript. */
+function rewriteSessionParent(sessionFile: string, parentSessionFile: string): void {
+	const input = openSync(sessionFile, "r");
+	const temporary = `${sessionFile}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	let output: number | undefined;
+	try {
+		const buffer = Buffer.allocUnsafe(MAX_SESSION_HEADER_BYTES);
+		const firstRead = readSync(input, buffer, 0, buffer.length, 0);
+		const newline = buffer.subarray(0, firstRead).indexOf(0x0a);
+		if (newline < 0) throw new Error("Replacement session header is missing or too large");
+		const header = JSON.parse(buffer.subarray(0, newline).toString("utf8")) as Record<string, unknown>;
+		if (header.type !== "session") throw new Error("Replacement session has no valid header");
+		header.parentSession = parentSessionFile;
+		output = openSync(temporary, "wx", 0o600);
+		writeAll(output, Buffer.from(`${JSON.stringify(header)}\n`));
+		writeAll(output, buffer.subarray(newline + 1, firstRead));
+		let position = firstRead;
+		while (true) {
+			const bytesRead = readSync(input, buffer, 0, buffer.length, position);
+			if (bytesRead === 0) break;
+			writeAll(output, buffer.subarray(0, bytesRead));
+			position += bytesRead;
+		}
+		closeSync(output);
+		output = undefined;
+		renameSync(temporary, sessionFile);
+	} finally {
+		closeSync(input);
+		if (output !== undefined) closeSync(output);
+		try { unlinkSync(temporary); } catch { /* renamed or never created */ }
+	}
+}
+
+function removeReplacementSession(sessionFile: string): string | undefined {
+	try {
+		unlinkSync(sessionFile);
+		return undefined;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		return error instanceof Error ? error.message : String(error);
+	}
+}
+
+export function createReplacementSession(
 	ctx: ExtensionCommandContext,
 	target: WorktreeTarget,
 	previousSessionFile: string,
+	sessionDir?: string,
 ): { sessionId: string; sessionFile: string } {
 	let sourceFile = previousSessionFile;
 	let temporaryBranchFile: string | undefined;
+	let replacementSessionFile: string | undefined;
 	const activeLeaf = ctx.sessionManager.getLeafId();
 	try {
 		const diskSession = SessionManager.open(previousSessionFile);
@@ -255,7 +314,11 @@ function createReplacementSession(
 			temporaryBranchFile = diskSession.createBranchedSession(activeLeaf);
 			if (temporaryBranchFile) sourceFile = temporaryBranchFile;
 		}
-		const replacement = SessionManager.forkFrom(sourceFile, target.path);
+		const replacement = SessionManager.forkFrom(sourceFile, target.path, sessionDir);
+		const sessionFile = replacement.getSessionFile();
+		if (!sessionFile || !existsSync(sessionFile)) throw new Error("Pi did not create the replacement session file");
+		replacementSessionFile = sessionFile;
+		if (temporaryBranchFile) rewriteSessionParent(sessionFile, previousSessionFile);
 		const ownership = target.managed ?? inheritedWorktreeOwnership(ctx.sessionManager.getEntries(), target.path);
 		if (ownership) {
 			replacement.appendCustomEntry(WORKTREE_SESSION_ENTRY, {
@@ -269,9 +332,11 @@ function createReplacementSession(
 			// command merely replaces a session inside its current managed worktree.
 			replacement.appendCustomEntry(WORKTREE_SESSION_ENTRY, { managed: false });
 		}
-		const sessionFile = replacement.getSessionFile();
-		if (!sessionFile || !existsSync(sessionFile)) throw new Error("Pi did not create the replacement session file");
 		return { sessionId: replacement.getSessionId(), sessionFile };
+	} catch (error) {
+		const cleanupError = replacementSessionFile ? removeReplacementSession(replacementSessionFile) : undefined;
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(cleanupError ? `${message}; could not remove failed replacement session: ${cleanupError}` : message);
 	} finally {
 		if (temporaryBranchFile) {
 			try { unlinkSync(temporaryBranchFile); } catch { /* best-effort cleanup */ }
@@ -350,15 +415,26 @@ async function runWorktreeCommandUnlocked(
 	let switched = false;
 	try {
 		let verifiedSessionId: string | undefined;
+		let rollbackCompleted = false;
 		const result = await ctx.switchSession(replacement.sessionFile, {
 			withSession: async (next) => {
 				switched = true;
-				const actualCwd = realpathSync(next.cwd);
 				const rollback = async (message: string) => {
 					replacements().delete(replacement.sessionId);
-					next.ui.notify(`${message} Returning to the original session.`, "error");
+					const retained = target.managed ? ` Initialized worktree retained at ${target.path} for inspection.` : "";
+					next.ui.notify(`${message} Returning to the original session.${retained}`, "error");
 					await next.switchSession(previousSessionFile);
+					const cleanupError = removeReplacementSession(replacement.sessionFile);
+					if (cleanupError) next.ui.notify(`Could not remove failed replacement session ${replacement.sessionFile}: ${cleanupError}`, "warning");
+					rollbackCompleted = true;
 				};
+				let actualCwd: string;
+				try {
+					actualCwd = realpathSync(next.cwd);
+				} catch (error) {
+					await rollback(`Replacement CWD verification failed: ${error instanceof Error ? error.message : String(error)}.`);
+					return;
+				}
 				if (actualCwd !== target.path) {
 					await rollback(`Replacement session opened in ${actualCwd}, not ${target.path}.`);
 					return;
@@ -384,6 +460,9 @@ async function runWorktreeCommandUnlocked(
 		});
 		if (result.cancelled || !verifiedSessionId) {
 			replacements().delete(replacement.sessionId);
+			const cleanupError = removeReplacementSession(replacement.sessionFile);
+			if (cleanupError) ctx.ui.notify(`Could not remove cancelled replacement session ${replacement.sessionFile}: ${cleanupError}`, "warning");
+			if (target.managed && !rollbackCompleted) ctx.ui.notify(`Initialized worktree retained at ${target.path} for inspection.`, "warning");
 			return { cancelled: true };
 		}
 		return {
@@ -395,6 +474,8 @@ async function runWorktreeCommandUnlocked(
 	} catch (error) {
 		replacements().delete(replacement.sessionId);
 		if (switched) throw new Error(`${error instanceof Error ? error.message : String(error)}; Pi switched sessions before reporting the failure`);
+		const cleanupError = removeReplacementSession(replacement.sessionFile);
+		if (cleanupError) throw new Error(`${error instanceof Error ? error.message : String(error)}; could not remove failed replacement session: ${cleanupError}`);
 		throw error;
 	}
 }
@@ -418,10 +499,11 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "worktree",
 		label: "Worktree",
-		description: "Create a managed Git worktree or enter an existing registered worktree, replace this Pi session, and automatically continue the task there. Use this instead of running git worktree directly.",
-		promptSnippet: "Create or enter a Git worktree, move this conversation there, and automatically resume the task",
+		description: "Create a managed Git worktree from the selected checkout's HEAD or enter an existing registered worktree, replace this Pi session, and automatically continue the task there.",
+		promptSnippet: "Create or enter a supported Git worktree, move this conversation there, and automatically resume the task",
 		promptGuidelines: [
-			"Use the worktree tool whenever the user asks to create, enter, or switch to a worktree; do not run git worktree directly or ask the user to type /worktree.",
+			"Use the worktree tool when the user asks to create and enter a new worktree from the selected checkout's HEAD, or to enter an existing registered worktree; do not ask the user to type /worktree.",
+			"Do not call this session-switching tool when the user explicitly asks only to create a checkout without entering it, or asks to provision an unregistered worktree at another branch, commit, or detached HEAD; honor those explicit Git requests without replacing the conversation.",
 			"Call the worktree tool as the final tool for the current run and provide a self-contained continuation prompt for the replacement session.",
 		],
 		parameters: WorktreeToolParameters,
