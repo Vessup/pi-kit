@@ -167,13 +167,7 @@ function preserveOptimisticAttachments(
 }
 
 function sessionStatusClasses(session: WebSession): string {
-  switch (displaySessionStatus(session)) {
-    case "working": return "border-emerald-400/25 bg-emerald-400/10 text-emerald-300";
-    case "starting": return "border-amber-400/25 bg-amber-400/10 text-amber-300";
-    case "inactive": return "border-zinc-600/60 bg-zinc-800/70 text-zinc-400";
-    case "error": return "border-red-400/25 bg-red-400/10 text-red-300";
-    case "idle": return "border-sky-400/25 bg-sky-400/10 text-sky-300";
-  }
+  return `semantic-session-status is-${displaySessionStatus(session)}`;
 }
 
 function sessionStatusLabel(session: WebSession): string {

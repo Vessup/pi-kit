@@ -454,6 +454,48 @@ const ComposerTokenInfo = React.memo(function ComposerTokenInfo({ session }: { s
   );
 }, (previous, next) => sameTokenTelemetry(previous.session, next.session));
 
+const ContextProgressCircle = React.memo(function ContextProgressCircle({ session }: { session: WebSession | null }) {
+  const context = session?.contextUsage;
+  const contextTokens = context?.tokens ?? 0;
+  const rawPercent = context?.percent ?? (context?.contextWindow ? (contextTokens / context.contextWindow) * 100 : 0);
+  const percent = Math.max(0, Math.min(100, Number.isFinite(rawPercent) ? rawPercent : 0));
+  const compacting = Boolean(session?.compaction);
+  const radius = 8;
+  const circumference = 2 * Math.PI * radius;
+  const progress = compacting ? 25 : percent;
+  const dash = circumference * progress / 100;
+  const contextText = context?.contextWindow
+    ? `${percent.toFixed(1)}% · ${formatTokenCount(contextTokens)} / ${formatTokenCount(context.contextWindow)}`
+    : "Context unavailable";
+  const label = compacting ? `Compacting context, ${contextText}` : `Context usage ${contextText}`;
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button type="button" className={cn("semantic-context-progress", compacting && "is-compacting", !compacting && percent >= 90 && "is-critical", !compacting && percent >= 70 && percent < 90 && "is-warning")} aria-label={label}>
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle className="semantic-context-progress-track" cx="10" cy="10" r={radius} />
+              <circle className="semantic-context-progress-value" cx="10" cy="10" r={radius} strokeDasharray={`${dash} ${circumference - dash}`} />
+            </svg>
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">
+          <div className="semantic-context-progress-details">
+            <strong>{compacting ? "Compacting context…" : "Context"}</strong>
+            <span>{contextText}</span>
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}, (previous, next) => (
+  previous.session?.id === next.session?.id
+  && previous.session?.contextUsage?.tokens === next.session?.contextUsage?.tokens
+  && previous.session?.contextUsage?.contextWindow === next.session?.contextUsage?.contextWindow
+  && previous.session?.contextUsage?.percent === next.session?.contextUsage?.percent
+  && previous.session?.compaction?.reason === next.session?.compaction?.reason
+));
+
 function SubagentRows({ agents, onSelect }: { agents: WebSubagent[]; onSelect?: (agent: WebSubagent) => void }) {
   if (agents.length === 0) return null;
   return (
@@ -468,7 +510,7 @@ function SubagentRows({ agents, onSelect }: { agents: WebSubagent[]; onSelect?: 
           <div className="semantic-subagent-activity">
             {agent.currentTool && <span className="semantic-subagent-tool">{agent.currentTool}</span>}
             {agent.queued > 0 && <span>{agent.queued} queued</span>}
-            <span className="capitalize">{agent.status}</span>
+            <span className={cn("semantic-subagent-status-label capitalize", `is-${agent.status}`)}>{agent.status}</span>
             {usageSummary(agent.usage) && <span>{usageSummary(agent.usage)}</span>}
           </div>
         </div>
@@ -712,7 +754,7 @@ function ToolCallCard({
       }}
     >
       <summary onClick={(event) => { event.preventDefault(); onExpansionChange(expansionKey, !expanded, true); }}>
-        <Icon className={cn("semantic-tool-icon h-4 w-4", running && "animate-pulse text-sky-400", !running && result && !result.isError && "text-emerald-400", !running && result?.isError && "text-red-300")} />
+        <Icon className={cn("semantic-tool-icon h-4 w-4", running && "animate-pulse text-emerald-400", !running && result && !result.isError && "text-emerald-400", !running && result?.isError && "text-red-300")} />
         <span className="semantic-tool-verb">{presentation.verb}</span>
         {presentation.subject && <span className="semantic-tool-subject">{presentation.subject}</span>}
         <span className="semantic-tool-spacer" />
@@ -1548,7 +1590,7 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
           {session?.subagents && session.subagents.length > 0 && (
             <div className={cn("semantic-live-subagents", subagentsMinimized && "is-minimized")}>
               <div className="semantic-live-subagents-header">
-                <div className="semantic-queue-label">Subagents · {usageSummary(displayedSubagentUsage)}</div>
+                <div className="semantic-queue-label">Subagents · {session.subagents.length} · {usageSummary(displayedSubagentUsage)}</div>
                 <button
                   type="button"
                   className="semantic-subagents-minimize"
@@ -1716,6 +1758,7 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
                   </div>
                 </AnchoredPopover>
                 <ComposerTokenInfo session={session} />
+                <ContextProgressCircle session={session} />
               </div>
               <div className="flex items-center gap-2">
                 {editingQueueId && <Button className="h-9 px-3" variant="ghost" size="sm" onClick={finishQueueEditing}>Cancel</Button>}
