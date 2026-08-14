@@ -155,6 +155,14 @@ function upsertActiveTool(
   return [...tools.filter((tool) => tool.id !== id), next];
 }
 
+async function waitForVisibleBrowserPaint(): Promise<void> {
+  if (document.visibilityState !== "visible") return;
+  await Promise.race([
+    new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+    new Promise<void>((resolve) => window.setTimeout(resolve, 100)),
+  ]);
+}
+
 function preserveOptimisticAttachments(
   confirmed: Record<string, unknown>,
   optimistic: SemanticEntry,
@@ -1275,7 +1283,12 @@ export function App() {
         ],
       },
     };
-    if (!queuedFollowUp) setEntries((previous) => [...previous, optimistic]);
+    if (!queuedFollowUp) {
+      setEntries((previous) => [...previous, optimistic]);
+      // Let React commit and the browser paint the local user bubble before the
+      // native bridge receives the prompt and renders it in the TUI.
+      if (!controlCommand) await waitForVisibleBrowserPaint();
+    }
     let responseData: unknown;
     let promptFrameSent = false;
     try {

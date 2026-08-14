@@ -1472,6 +1472,22 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
         await onReplaceQueue(queuedMessages.map((item) => item.id === editingQueueId ? { ...item, message, images } : item));
         finishQueueEditing();
       } else {
+        const queuesFollowUp = behavior === "followUp" && session.status === "working";
+        if (!queuesFollowUp) {
+          // Sending is an explicit navigation intent: reveal the local bubble
+          // immediately even if passive transcript updates were left unpinned.
+          const target = scrollRef.current;
+          followOutputRef.current = true;
+          scrollIntentRef.current = null;
+          viewportAnchorRef.current = null;
+          lockedScrollHeightRef.current = null;
+          if (scrollSpacerRef.current) scrollSpacerRef.current.style.height = "0px";
+          updateScrollButton(false);
+          if (target) {
+            target.scrollTop = target.scrollHeight;
+            lastScrollTopRef.current = target.scrollTop;
+          }
+        }
         await onSend(message, images, behavior);
         setDraft("");
         setImages([]);
