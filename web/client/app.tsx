@@ -1230,9 +1230,10 @@ export function App() {
       setSessionOptions({ models: [], thinkingLevels: [], commands: [] });
       return;
     }
+    // get_session_options already includes commands; avoid a second connection
+    // and native get_commands process spawn on every session selection.
     void loadSessionOptions(selectedSession.id, generation);
-    void loadSessionCommands(selectedSession.id, generation);
-  }, [loadSessionCommands, loadSessionOptions, selectedSession?.id, selectedSession?.status]);
+  }, [loadSessionOptions, selectedSession?.id, selectedSession?.status]);
 
   const selectModel = React.useCallback(async (provider: string, modelId: string) => {
     const sessionId = selectedIdRef.current;

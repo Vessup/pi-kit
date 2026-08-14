@@ -15,15 +15,24 @@ export function validateWorktreeName(input: string): string {
 }
 
 const GIT_COMMAND_TIMEOUT_MS = 30_000;
+const GIT_WORKTREE_MUTATION_TIMEOUT_MS = 10 * 60_000;
+
+export function gitCommandTimeoutMs(args: readonly string[]): number {
+	const commandIndex = args[0] === "-C" ? 2 : 0;
+	return args[commandIndex] === "worktree" && (args[commandIndex + 1] === "add" || args[commandIndex + 1] === "remove")
+		? GIT_WORKTREE_MUTATION_TIMEOUT_MS
+		: GIT_COMMAND_TIMEOUT_MS;
+}
 
 function spawnGit(args: string[]) {
+	const timeout = gitCommandTimeoutMs(args);
 	const result = spawnSync("git", args, {
 		encoding: "utf8",
-		timeout: GIT_COMMAND_TIMEOUT_MS,
+		timeout,
 		killSignal: "SIGKILL",
 	});
 	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || result.signal) {
-		throw new Error(`git ${args.join(" ")} did not finish within ${GIT_COMMAND_TIMEOUT_MS}ms`);
+		throw new Error(`git ${args.join(" ")} did not finish within ${timeout}ms`);
 	}
 	return result;
 }
@@ -469,20 +478,17 @@ export async function createWebWorktree(
 		gitOutput(repoRoot, ["worktree", "add", path, branch]);
 	} catch (error) {
 		const cleanupErrors: string[] = [];
-		let registered = false;
+		let registered: boolean | undefined;
 		try {
 			registered = parseRegisteredWorktrees(repoRoot).some((entry) => samePath(entry.path, path));
 		} catch (inspectionError) {
 			cleanupErrors.push(`could not inspect partial worktree registration: ${inspectionError instanceof Error ? inspectionError.message : String(inspectionError)}`);
 		}
-		if (registered) {
-			try {
-				gitOutput(repoRoot, ["worktree", "remove", path]);
-			} catch (cleanupError) {
-				cleanupErrors.push(`could not remove partial worktree: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
-			}
-		}
-		if (branchProvisioned) {
+		// A competing Pi process can register the same path after our preflight
+		// checks. A registration observed after a failed add therefore has ambiguous
+		// ownership and must be retained rather than removing another session's worktree.
+		if (registered) cleanupErrors.push(`worktree registration retained because ownership is ambiguous: ${path}`);
+		if (registered === false && branchProvisioned) {
 			try {
 				gitOutput(repoRoot, ["branch", "-D", branch]);
 			} catch (cleanupError) {

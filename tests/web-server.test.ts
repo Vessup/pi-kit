@@ -328,6 +328,15 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 			untrusted.onclose = () => { clearTimeout(timeout); resolve(); };
 		});
 	}
+	await new Promise<void>((resolve, reject) => {
+		const forwarded = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`, {
+			headers: { "X-Forwarded-Host": "pi-web.example.ts.net" },
+		} as unknown as string[]);
+		const timeout = setTimeout(() => reject(new Error("forwarded agent websocket did not close")), 1_000);
+		forwarded.onopen = () => { clearTimeout(timeout); forwarded.close(); reject(new Error("forwarded agent websocket was accepted")); };
+		forwarded.onerror = () => { clearTimeout(timeout); resolve(); };
+		forwarded.onclose = () => { clearTimeout(timeout); resolve(); };
+	});
 
 	const sessionId = `semantic-${crypto.randomUUID()}`;
 	const managedWorktree = { path: join(tempDir, "worktree"), repoRoot: tempDir, name: "worktree", branch: "feature", branchCreated: false };
@@ -1107,6 +1116,40 @@ test("sessions deleted from the TUI are removed from the live web catalog", asyn
 	await expect(readFile(join(worktree.path, "README.md"), "utf8")).rejects.toThrow();
 	expect((await Bun.$`git -C ${repository} branch --list tui-delete`.text()).trim()).toBe("");
 	observer.close();
+}, 10_000);
+
+test("transient session-file access errors do not reconcile as deletion", async () => {
+	if (process.platform === "win32") return;
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-session-access-error-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const queuePath = join(webDir, "queues.json");
+	const sessionId = `access-error-${crypto.randomUUID()}`;
+	const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
+	await mkdir(sessionsDir, { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: tempDir, timestamp: new Date().toISOString() })}\n`);
+	await writeFile(queuePath, `${JSON.stringify({ version: 2, queues: { [sessionId]: [{ id: "retained", message: "keep during access error" }] } })}\n`);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const initial = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(initial.sessions.some((session) => session.id === sessionId)).toBe(true);
+
+	await chmod(sessionsDir, 0o000);
+	try {
+		await Bun.sleep(1_500);
+	} finally {
+		await chmod(sessionsDir, 0o700);
+	}
+	const afterError = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(afterError.sessions.some((session) => session.id === sessionId)).toBe(true);
+	expect(await Bun.file(queuePath).json()).toEqual({ version: 2, queues: { [sessionId]: [{ id: "retained", message: "keep during access error" }] } });
 }, 10_000);
 
 test("saved-session metadata refresh clears hydrated ownership and skips malformed markers", async () => {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
 	createWebWorktree,
 	currentWorktreeRef,
+	gitCommandTimeoutMs,
 	hasOtherSessionInWorktree,
 	inspectExistingWorktree,
 	managedWorktreeFromEntries,
@@ -19,6 +20,13 @@ import {
 
 let directory: string | undefined;
 afterEach(async () => { if (directory) await rm(directory, { recursive: true, force: true }); directory = undefined; });
+
+test("checkout-producing Git commands use the long-running operation bound", () => {
+	expect(gitCommandTimeoutMs(["-C", "/repo", "worktree", "add", "/checkout", "branch"])).toBe(10 * 60_000);
+	expect(gitCommandTimeoutMs(["-C", "/repo", "worktree", "remove", "/checkout"])).toBe(10 * 60_000);
+	expect(gitCommandTimeoutMs(["-C", "/repo", "worktree", "list", "--porcelain"])).toBe(30_000);
+	expect(gitCommandTimeoutMs(["check-ref-format", "--branch", "topic"])).toBe(30_000);
+});
 
 test("web worktrees are created under the primary repository .pi directory", async () => {
 	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-"));
@@ -278,7 +286,8 @@ test("worktree setup force-kills descendants after a timed-out leader exits", as
 	const childPidFile = join(directory, "child.pid");
 	await writeFile(script, "#!/bin/sh\nsh -c 'trap \"\" TERM; while :; do sleep 1; done' &\necho $! > \"$1\"\ntrap 'exit 0' TERM\nwait\n");
 	await chmod(script, 0o755);
-	await expect(runWorktreeSetup(script, [childPidFile], directory, 250)).rejects.toThrow("timed out after 250ms");
+	await expect(runWorktreeSetup(script, [childPidFile], directory, 2_000)).rejects.toThrow("timed out after 2000ms");
+	expect(await Bun.file(childPidFile).exists()).toBe(true);
 	const childPid = Number((await readFile(childPidFile, "utf8")).trim());
 	let alive = true;
 	for (let attempt = 0; attempt < 30 && alive; attempt += 1) {

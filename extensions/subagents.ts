@@ -13,6 +13,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager,
+	type ModelRegistry,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -373,6 +374,10 @@ export function countsAgainstSubagentLimit(agent: { status: SubagentStatus; sess
 	return agent.status === "creating" || agent.session !== undefined;
 }
 
+export function isTerminalSubagentStatus(status: SubagentStatus): boolean {
+	return status === "completed" || status === "failed" || status === "terminated";
+}
+
 export async function abortRunningSubagentSessions<T extends { status: SubagentStatus; session?: { abort(): Promise<unknown> } }>(
 	agents: readonly T[],
 ): Promise<Array<{ agent: T; error?: Error }>> {
@@ -394,6 +399,25 @@ export function filterModelsToScope<T extends { provider: string; id: string }>(
 	if (scoped.length === 0) return available;
 	const allowed = new Set(scoped.map(({ model }) => `${model.provider}/${model.id}`));
 	return available.filter((model) => allowed.has(`${model.provider}/${model.id}`));
+}
+
+export function inheritedSubagentModel<T extends { provider: string; id: string }>(
+	current: T | undefined,
+	runtimeModel: T | undefined,
+): T | undefined {
+	return runtimeModel ?? current;
+}
+
+export function subagentModelRuntime(modelRegistry: ModelRegistry): ModelRuntime {
+	// ModelRegistry is the extension-facing compatibility facade around the
+	// canonical runtime. Sharing that runtime preserves runtime-only keys and
+	// provider-resolved headers/env/base URLs, while leaving stored OAuth in the
+	// credential store so both host and child continue to refresh it normally.
+	const runtime: unknown = Reflect.get(modelRegistry, "runtime");
+	if (!(runtime instanceof ModelRuntime)) {
+		throw new Error("The host model registry does not expose its canonical runtime");
+	}
+	return runtime;
 }
 
 function statusIcon(status: SubagentStatus): string {
@@ -474,7 +498,6 @@ class SubagentManager {
 	readonly agents = new Map<string, ManagedSubagent>();
 	private nextId = 1;
 	private currentContext?: ExtensionContext;
-	private modelRuntimePromise?: Promise<ModelRuntime>;
 	private totalUsage = zeroUsage();
 	private accountedUsage = zeroUsage();
 	private usageDirty = false;
@@ -653,41 +676,29 @@ class SubagentManager {
 		return this.list().filter(countsAgainstSubagentLimit).length;
 	}
 
-	private async getModelRuntime(ctx: ExtensionContext): Promise<ModelRuntime> {
-		if (!this.modelRuntimePromise) {
-			this.modelRuntimePromise = (async () => {
-				const runtime = await ModelRuntime.create();
-				for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-					const native = ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-					if (native) {
-						runtime.registerNativeProvider(native);
-						continue;
-					}
-					const config = ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-					if (config) runtime.registerProvider(providerId, config);
-				}
-				return runtime;
-			})();
-		}
-		return this.modelRuntimePromise;
+	private getModelRuntime(ctx: ExtensionContext): ModelRuntime {
+		return subagentModelRuntime(ctx.modelRegistry);
 	}
 
 	async availableModels(ctx: ExtensionContext): Promise<readonly AgentModel[]> {
-		const available = await (await this.getModelRuntime(ctx)).getAvailable();
+		const available = await this.getModelRuntime(ctx).getAvailable();
 		return filterModelsToScope(available, ctx.scopedModels);
 	}
 
-	private async resolveModel(ctx: ExtensionContext, requested?: string): Promise<AgentModel | undefined> {
-		const available = await this.availableModels(ctx);
+	private async resolveModel(ctx: ExtensionContext, requested?: string, runtime?: ModelRuntime): Promise<AgentModel | undefined> {
 		if (!requested) {
 			if (!ctx.model) return undefined;
-			const current = available.find(
-				(model) => model.provider === ctx.model?.provider && model.id === ctx.model.id,
+			const inheritedRuntime = runtime ?? this.getModelRuntime(ctx);
+			// Omitted model means exact host-session inheritance. Session model scope
+			// applies only to explicit overrides and may intentionally exclude the
+			// separately selected --model value.
+			return inheritedSubagentModel(
+				ctx.model as AgentModel,
+				inheritedRuntime.getModel(ctx.model.provider, ctx.model.id),
 			);
-			if (current) return current;
-			throw new Error(`The current model is unavailable to subagents: ${modelName(ctx.model)}`);
 		}
 
+		const available = await this.availableModels(ctx);
 		const slash = requested.indexOf("/");
 		if (slash > 0) {
 			const provider = requested.slice(0, slash);
@@ -894,7 +905,7 @@ class SubagentManager {
 
 		try {
 			const runtime = await this.getModelRuntime(ctx);
-			const selectedModel = await this.resolveModel(ctx, options.model);
+			const selectedModel = await this.resolveModel(ctx, options.model, runtime);
 			const selectedEffort = options.effort ?? this.scopedEffort(ctx, selectedModel) ?? effort;
 			agent.effort = selectedEffort;
 			const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir());
@@ -1055,6 +1066,18 @@ class SubagentManager {
 
 	async terminateAll(remove = false): Promise<void> {
 		await Promise.all(this.list().map(async (agent) => this.terminate(agent.id, remove)));
+	}
+
+	async clearTerminalAgents(): Promise<number> {
+		const terminalIds = this.list()
+			.filter((agent) => isTerminalSubagentStatus(agent.status))
+			.map((agent) => agent.id);
+		if (terminalIds.length === 0) return 0;
+
+		await Promise.all(terminalIds.map(async (id) => this.terminate(id, true)));
+		if (this.webStatusPublishTimer) clearTimeout(this.webStatusPublishTimer);
+		this.publishWebStatus();
+		return terminalIds.length;
 	}
 
 	private hasUnread(agent: ManagedSubagent): boolean {
@@ -1695,14 +1718,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	};
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("before_agent_start", (event, ctx) => {
 		if (!pi.getActiveTools().includes("subagent_create")) return;
-		let available: readonly { provider: string; id: string }[];
-		try {
-			available = await manager.availableModels(ctx);
-		} catch {
-			available = ctx.model ? [ctx.model] : [];
-		}
+		// Prompt construction must not trigger provider authentication or OAuth
+		// refreshes. The host registry already maintains an authoritative snapshot.
+		const available = filterModelsToScope(ctx.modelRegistry.getAvailable(), ctx.scopedModels);
 		return { systemPrompt: `${event.systemPrompt}\n\n${subagentModelGuidance(ctx.model, available)}` };
 	});
 
@@ -1854,6 +1874,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				new CustomEditor(tui, theme, keybindings)) as AppEditorComponent;
 			return new FooterNavigationEditor(base, keybindings, manager, () => openManager(ctx));
 		});
+	});
+
+	pi.on("input", async () => {
+		await manager.clearTerminalAgents();
+		return { action: "continue" };
 	});
 
 	pi.on("agent_start", (_event, ctx) => {

@@ -49,7 +49,8 @@ import { persistPreDeliveryTransition, queueDeliveryFailureDisposition } from ".
 import { preserveRetryAroundQuiescence, quiesceQueueMutations, serializeQueueMutation, transactionalQueueMutation } from "./queue-mutation.js";
 import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js";
-import { shouldWaitForManagedShutdown } from "./shutdown-policy.js";
+import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
+import { isConfirmedMissingPath } from "./file-presence.js";
 import {
 	disableTailscaleServe,
 	ensureTailscaleServe,
@@ -187,10 +188,6 @@ const RPC_REQUEST_TIMEOUT_MS = Number.isFinite(configuredRpcTimeout) && configur
 	? Math.floor(configuredRpcTimeout)
 	: 30_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 10 * 60_000;
-const configuredShutdownWait = Number(process.env.PI_WEB_SHUTDOWN_WAIT_MS ?? "30000");
-const MANAGED_SHUTDOWN_WAIT_MS = Number.isFinite(configuredShutdownWait) && configuredShutdownWait >= 0
-	? Math.floor(configuredShutdownWait)
-	: 30_000;
 const MISSING_SESSION_RECONCILE_INTERVAL_MS = 1_000;
 // Accept one legacy agent.hello containing a large session until running Pi
 // processes reload the bridge that sends metadata-only hello frames.
@@ -3142,7 +3139,7 @@ function isMissingInactiveSession(record: SessionRecord): boolean {
 		!record.active &&
 		!record.managed &&
 		record.agentSockets.size === 0 &&
-		!existsSync(record.file) &&
+		isConfirmedMissingPath(record.file) &&
 		!hasStagedOrDurableReplacement(record),
 	);
 }
@@ -3535,8 +3532,7 @@ async function cleanupAndExit(code = 0): Promise<void> {
 		.map((record) => record.name ?? record.id);
 	let busy = busyNames();
 	if (busy.length > 0) console.error(`Waiting for active managed sessions before restart: ${busy.join(", ")}`);
-	const shutdownWaitDeadline = Date.now() + MANAGED_SHUTDOWN_WAIT_MS;
-	while (busy.length > 0 && !forceShutdownRequested && Date.now() < shutdownWaitDeadline) {
+	while (shouldContinueManagedShutdownWait(busy.length, forceShutdownRequested)) {
 		await Bun.sleep(100);
 		busy = busyNames();
 	}
@@ -3589,9 +3585,12 @@ async function main(): Promise<void> {
 				return upgraded ? undefined : new Response("Upgrade failed", { status: 400 });
 			}
 			if (url.pathname === "/ws/agent") {
-				// The Pi bridge is a non-browser localhost client and sends no Origin.
-				// Reject every browser-originated attempt, including same-origin pages.
-				if (request.headers.has("origin")) return new Response("Forbidden WebSocket origin", { status: 403 });
+				// The Pi bridge connects directly to localhost without Origin or proxy
+				// headers. Tailscale Serve forwards this route too, so Origin absence alone
+				// must not let a tailnet client impersonate an agent.
+				const forwarded = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]
+					.some((header) => request.headers.has(header));
+				if (request.headers.has("origin") || forwarded) return new Response("Forbidden agent WebSocket", { status: 403 });
 				const upgraded = serverInstance.upgrade(request, { data: { kind: "agent", id: randomUUID(), authed: false } as any });
 				return upgraded ? undefined : new Response("Upgrade failed", { status: 400 });
 			}
