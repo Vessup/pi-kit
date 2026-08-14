@@ -178,9 +178,59 @@ function sessionTitle(session: WebSession): string {
   return session.name?.trim() || session.preview?.trim() || session.file?.split("/").pop() || session.id.slice(0, 8);
 }
 
+function sessionDirectory(session: WebSession): string {
+  return session.cwd.replace(/^\/Users\/[^/]+(?=\/|$)/, "~").replace(/^\/home\/[^/]+(?=\/|$)/, "~");
+}
+
 function sessionSubtitle(session: WebSession): string {
-  const homeRelative = session.cwd.replace(/^\/Users\/[^/]+(?=\/|$)/, "~").replace(/^\/home\/[^/]+(?=\/|$)/, "~");
-  return session.branch ? `${homeRelative} · ${session.branch}` : homeRelative;
+  const directory = sessionDirectory(session);
+  return session.branch ? `${directory} · ${session.branch}` : directory;
+}
+
+function fitBeginningEllipsis(text: string, maxWidth: number, measure: (value: string) => number): string {
+  if (maxWidth <= 0 || measure(text) <= maxWidth) return text;
+  const characters = Array.from(text);
+  let low = 0;
+  let high = characters.length;
+  let visibleCharacters = 0;
+  while (low <= high) {
+    const count = Math.floor((low + high) / 2);
+    const candidate = `…${characters.slice(characters.length - count).join("")}`;
+    if (measure(candidate) <= maxWidth) {
+      visibleCharacters = count;
+      low = count + 1;
+    } else {
+      high = count - 1;
+    }
+  }
+  return `…${characters.slice(characters.length - visibleCharacters).join("")}`;
+}
+
+function SessionLocation({ session }: { session: WebSession }) {
+  const text = sessionSubtitle(session);
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const [visibleText, setVisibleText] = React.useState(text);
+  React.useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const update = () => {
+      const style = getComputedStyle(element);
+      context.font = style.font;
+      const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
+      const measure = (value: string) => context.measureText(value).width + Math.max(0, Array.from(value).length - 1) * letterSpacing;
+      const fitted = fitBeginningEllipsis(text, element.clientWidth, measure);
+      setVisibleText((current) => current === fitted ? current : fitted);
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    update();
+    void document.fonts?.ready.then(update);
+    return () => observer.disconnect();
+  }, [text]);
+  return <div ref={ref} className="session-location text-left text-xs text-zinc-500" dir="ltr" title={text} aria-label={text}>{visibleText}</div>;
 }
 
 function sessionMatches(session: WebSession, query: string): boolean {
@@ -710,7 +760,7 @@ function SessionListItem({
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1">
         <div className="truncate text-sm font-medium text-zinc-100">{sessionTitle(session)}</div>
         <SessionActionsMenu session={session} actions={actions} />
-        <div className="truncate text-left text-xs text-zinc-500" dir="rtl" title={sessionSubtitle(session)}>{sessionSubtitle(session)}</div>
+        <SessionLocation session={session} />
         <span className={cn(
           "inline-flex justify-self-end rounded-full border px-2 py-0.5 text-[10px] font-medium capitalize leading-none",
           sessionStatusClasses(session),

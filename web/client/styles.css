@@ -131,6 +131,7 @@ body {
 .semantic-session-status.is-idle { border-color: rgb(var(--status-idle) / 0.25); background: rgb(var(--status-idle) / 0.1); color: rgb(var(--status-idle-text)); }
 .semantic-session-status.is-error { border-color: rgb(var(--status-error) / 0.25); background: rgb(var(--status-error) / 0.1); color: rgb(var(--status-error-text)); }
 .semantic-session-status.is-inactive { border-color: rgb(var(--status-inactive) / 0.6); background: rgb(39 39 42 / 0.7); color: rgb(var(--status-inactive-text)); }
+.session-location { min-width: 0; overflow: hidden; direction: ltr; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 
 .semantic-streaming-dot {
   display: inline-block;
@@ -329,6 +330,10 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-composer-menu small { overflow: hidden; color: rgb(113 113 122); font: 0.7rem ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-composer-menu-label { padding: 0.45rem 0.65rem 0.3rem; color: rgb(113 113 122); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
 .semantic-composer-menu-divider { height: 1px; margin: 0.35rem 0.45rem; background: rgb(63 63 70 / 0.75); }
+.semantic-model-menu { width: min(38rem, calc(100vw - 1rem)); }
+.semantic-model-menu-sections { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(13rem, 1fr); align-items: start; }
+.semantic-model-menu-section { min-width: 0; }
+.semantic-model-menu-effort { align-self: stretch; border-left: 1px solid rgb(63 63 70 / 0.75); }
 .semantic-effort-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .semantic-attachment-drop { position: absolute; inset: 0; z-index: 10; display: flex; pointer-events: none; align-items: center; justify-content: center; gap: 0.5rem; border-radius: 1rem; background: rgb(9 9 11 / 0.88); color: rgb(125 211 252); font-size: 0.85rem; font-weight: 600; }
 .semantic-queue { display: grid; margin-bottom: 0.5rem; }
@@ -351,6 +356,8 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 
 @media (max-width: 640px) {
   .semantic-token-inline { display: none; }
+  .semantic-model-menu-sections { grid-template-columns: minmax(0, 1fr); }
+  .semantic-model-menu-effort { margin-top: 0.35rem; border-top: 1px solid rgb(63 63 70 / 0.75); border-left: 0; padding-top: 0.35rem; }
   .semantic-token-mobile { display: inline-flex; }
   .semantic-tool summary, .semantic-tool-call summary { gap: 0.35rem; }
   .semantic-tool-detail { display: block; max-width: 38%; font-size: 0.72rem; }

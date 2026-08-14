@@ -1745,20 +1745,25 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
                 <input ref={fileRef} className="hidden" type="file" accept="image/*" multiple onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
                 <Button className="h-9 min-w-9 px-2" variant="ghost" size="icon" title="Attach image" onMouseDown={(event) => event.preventDefault()} onClick={() => fileRef.current?.click()}><Paperclip className="h-4 w-4" /></Button>
                 <Button ref={modelButtonRef} className="semantic-composer-control h-9 max-w-64 px-2" variant="ghost" size="sm" disabled={controlBusy || !connected} onMouseDown={(event) => event.preventDefault()} onClick={() => setModelMenuOpen((open) => !open)}>{modelLabel}<span className="text-zinc-600">·</span><span>{effortLabel}</span><ChevronDown className="h-3.5 w-3.5" /></Button>
-                <AnchoredPopover open={modelMenuOpen} onOpenChange={setModelMenuOpen} anchorRef={modelButtonRef} align="start" className="semantic-composer-menu max-h-[70vh] w-80 overflow-y-auto">
-                  <div className="semantic-composer-menu-label">Model</div>
-                  {availableModels.map((model) => {
-                    const value = `${model.provider}/${model.id}`;
-                    return <button key={value} type="button" onClick={() => void selectModel(model.provider, model.id)}><span><strong>{model.name}</strong><small>{value}</small></span>{session?.model === value && <Check className="h-4 w-4 text-sky-300" />}</button>;
-                  })}
-                  <div className="semantic-composer-menu-divider" />
-                  <div className="semantic-composer-menu-label">Thinking effort</div>
-                  <div className="semantic-effort-grid">
-                    {availableEfforts.map((level) => <button key={level} type="button" onClick={() => void selectEffort(level)}><span><strong>{level}</strong></span>{effortLabel === level && <Check className="h-4 w-4 text-sky-300" />}</button>)}
+                <AnchoredPopover open={modelMenuOpen} onOpenChange={setModelMenuOpen} anchorRef={modelButtonRef} align="start" className="semantic-composer-menu semantic-model-menu max-h-[70vh] overflow-y-auto">
+                  <div className="semantic-model-menu-sections">
+                    <section className="semantic-model-menu-section">
+                      <div className="semantic-composer-menu-label">Model</div>
+                      {availableModels.map((model) => {
+                        const value = `${model.provider}/${model.id}`;
+                        return <button key={value} type="button" onClick={() => void selectModel(model.provider, model.id)}><span><strong>{model.name}</strong><small>{value}</small></span>{session?.model === value && <Check className="h-4 w-4 text-sky-300" />}</button>;
+                      })}
+                    </section>
+                    <section className="semantic-model-menu-section semantic-model-menu-effort">
+                      <div className="semantic-composer-menu-label">Effort</div>
+                      <div className="semantic-effort-grid">
+                        {availableEfforts.map((level) => <button key={level} type="button" onClick={() => void selectEffort(level)}><span><strong>{level}</strong></span>{effortLabel === level && <Check className="h-4 w-4 text-sky-300" />}</button>)}
+                      </div>
+                    </section>
                   </div>
                 </AnchoredPopover>
-                <ComposerTokenInfo session={session} />
                 <ContextProgressCircle session={session} />
+                <ComposerTokenInfo session={session} />
               </div>
               <div className="flex items-center gap-2">
                 {editingQueueId && <Button className="h-9 px-3" variant="ghost" size="sm" onClick={finishQueueEditing}>Cancel</Button>}
