@@ -141,6 +141,8 @@ type SessionFileScan = {
 	history: unknown[];
 	entries: unknown[];
 	header?: Record<string, unknown>;
+	managedWorktreeScanned?: boolean;
+	replacement?: ReturnType<typeof replacementFromEntries>;
 };
 
 type ManagedRpcSessionOptions = {
@@ -184,6 +186,7 @@ const RPC_REQUEST_TIMEOUT_MS = Number.isFinite(configuredRpcTimeout) && configur
 	? Math.floor(configuredRpcTimeout)
 	: 30_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const MISSING_SESSION_RECONCILE_INTERVAL_MS = 1_000;
 // Accept one legacy agent.hello containing a large session until running Pi
 // processes reload the bridge that sends metadata-only hello frames.
 const MAX_WEBSOCKET_PAYLOAD_BYTES = 32 * 1024 * 1024;
@@ -200,8 +203,10 @@ const sessions = new Map<string, SessionRecord>();
 const sessionsByFile = new Map<string, SessionRecord>();
 const savedSessionMetadataCache = new Map<string, { mtimeMs: number; size: number; scan: SessionFileScan }>();
 const managedSessionStarts = new Map<string, Promise<SessionRecord>>();
+const missingSessionReconciliations = new Set<SessionRecord>();
 const slashCommandCache = new Map<string, { loadedAt: number; commands: DiscoveredSlashCommand[] }>();
 let server: Bun.Server<any> | undefined;
+let missingSessionReconcileTimer: ReturnType<typeof setInterval> | undefined;
 let shutdownStarted = false;
 let forceShutdownRequested = false;
 let webState: ServerStateFile;
@@ -444,9 +449,18 @@ function parseSessionFile(file: string): SessionFileScan | undefined {
 			messageCount: meta.messageCount ?? 0,
 			preview: extractPreviewFromHistory(rawEntries),
 			parentSession: typeof header?.parentSession === "string" ? header.parentSession : undefined,
+			managedWorktree: managedWorktreeFromEntries(rawEntries),
 			usage: usageFromEntries(rawEntries),
 		};
-		return { session, file, history: rawEntries, entries: rawEntries, header: header ?? undefined };
+		return {
+			session,
+			file,
+			history: rawEntries,
+			entries: rawEntries,
+			header: header ?? undefined,
+			managedWorktreeScanned: true,
+			replacement: replacementFromEntries(rawEntries),
+		};
 	} catch {
 		return undefined;
 	}
@@ -467,6 +481,7 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 		let thinkingLevel: string | undefined;
 		let messageCount = 0;
 		let preview: string | undefined;
+		const metadataEntries: Record<string, unknown>[] = [];
 		const usage = zeroWebUsage();
 		for (const line of lines.slice(1)) {
 			let entry: Record<string, unknown> | undefined;
@@ -480,6 +495,7 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 			if (entry.type === "session_info" && typeof entry.name === "string") name = entry.name;
 			if (entry.type === "model_change" && typeof entry.modelId === "string") model = entry.modelId;
 			if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") thinkingLevel = entry.thinkingLevel;
+			if (entry.type === "custom") metadataEntries.push(entry);
 			if (entry.type === "message") {
 				messageCount += 1;
 				const message = isRecord(entry.message) ? entry.message : undefined;
@@ -493,6 +509,9 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 		}
 		const id = typeof header?.id === "string" ? header.id : basename(file, ".jsonl");
 		const cwd = typeof header?.cwd === "string" && header.cwd ? header.cwd : dirname(file);
+		// Resolve all markers together so malformed newer entries are skipped while
+		// an explicit `{ managed: false }` still clears earlier ownership.
+		const managedWorktree = managedWorktreeFromEntries(metadataEntries);
 		const session: WebSession = {
 			id,
 			file,
@@ -507,9 +526,18 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 			messageCount,
 			preview,
 			parentSession: typeof header?.parentSession === "string" ? header.parentSession : undefined,
+			managedWorktree,
 			usage,
 		};
-		const scan = { session, file, history: [], entries: [], header: header ?? undefined };
+		const scan: SessionFileScan = {
+			session,
+			file,
+			history: [],
+			entries: [],
+			header: header ?? undefined,
+			managedWorktreeScanned: true,
+			replacement: replacementFromEntries(metadataEntries),
+		};
 		savedSessionMetadataCache.set(file, { mtimeMs: stats.mtimeMs, size: stats.size, scan });
 		return scan;
 	} catch {
@@ -658,7 +686,12 @@ function isTrustedBrowserOrigin(request: Request): boolean {
 	}
 }
 
-function makeSessionRecord(session: WebSession, kind: SessionKind, history: unknown[] = []): SessionRecord {
+function makeSessionRecord(
+	session: WebSession,
+	kind: SessionKind,
+	history: unknown[] = [],
+	managedWorktreeScanned = false,
+): SessionRecord {
 	const record = sessions.get(session.id) ?? {
 		...session,
 		kind,
@@ -674,19 +707,28 @@ function makeSessionRecord(session: WebSession, kind: SessionKind, history: unkn
 	Object.assign(record, session);
 	record.kind = kind;
 	record.history = history.length > 0 ? [...history] : record.history;
-	record.managedWorktree = managedWorktreeFromEntries(record.history);
+	record.managedWorktree = managedWorktreeScanned
+		? session.managedWorktree
+		: managedWorktreeFromEntries(record.history) ?? session.managedWorktree;
 	record.active = kind !== "saved" || record.active;
 	if (kind === "saved") record.active = false;
 	return record;
 }
 
-function upsertSession(session: WebSession, kind: SessionKind, history: unknown[] = []): SessionRecord {
+function upsertSession(
+	session: WebSession,
+	kind: SessionKind,
+	history: unknown[] = [],
+	managedWorktreeScanned = false,
+): SessionRecord {
 	const existing = sessions.get(session.id);
-	const record = existing ?? makeSessionRecord(session, kind, history);
+	const record = existing ?? makeSessionRecord(session, kind, history, managedWorktreeScanned);
 	Object.assign(record, session);
 	record.kind = kind;
 	if (history.length > 0) record.history = [...history];
-	record.managedWorktree = managedWorktreeFromEntries(record.history);
+	record.managedWorktree = managedWorktreeScanned
+		? session.managedWorktree
+		: managedWorktreeFromEntries(record.history) ?? session.managedWorktree;
 	if (kind !== "saved") record.active = true;
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
@@ -720,8 +762,10 @@ function broadcastToAll(message: ServerToClientMessage): void {
 }
 
 function sessionSnapshot(): WebSession[] {
+	void reconcileMissingSessionFiles();
 	const merged = new Map<string, WebSession>();
 	for (const record of sessions.values()) {
+		if (isMissingInactiveSession(record)) continue;
 		const key = record.file ? normalizePath(record.file) : record.id;
 		merged.set(key, sessionToClientPayload(record));
 	}
@@ -795,7 +839,7 @@ function updateRecordFromState(record: SessionRecord, state: unknown): void {
 		if (scan?.session.cwd) record.cwd = scan.session.cwd;
 	}
 	if (typeof s.sessionId === "string") record.id = s.sessionId;
-	if (typeof s.sessionName === "string") record.name = s.sessionName;
+	record.name = typeof s.sessionName === "string" && s.sessionName ? s.sessionName : undefined;
 	if (typeof s.messageCount === "number") record.messageCount = s.messageCount;
 	if (s.isCompacting === true) {
 		record.compaction ??= { reason: "threshold", startedAt: Date.now() };
@@ -1654,9 +1698,26 @@ async function flushWebQueueLocked(record: SessionRecord): Promise<void> {
 	}
 }
 
-function sendSessionRemoved(sessionId: string, replacementSessionId?: string): void {
+function sendSessionRemoved(
+	sessionId: string,
+	replacementSessionId?: string,
+	additionalSockets: Iterable<Bun.ServerWebSocket<ClientSocketData>> = [],
+): void {
 	const payload: ServerSessionRemovedMessage = { type: "server.session_removed", sessionId, replacementSessionId };
-	broadcastToAll(payload);
+	const message = JSON.stringify(payload);
+	const notified = new Set<Bun.ServerWebSocket<ClientSocketData>>();
+	for (const record of sessions.values()) {
+		for (const socket of record.clientSockets) {
+			if (notified.has(socket)) continue;
+			notified.add(socket);
+			try { socket.send(message); } catch { /* ignore */ }
+		}
+	}
+	for (const socket of additionalSockets) {
+		if (notified.has(socket)) continue;
+		notified.add(socket);
+		try { socket.send(message); } catch { /* ignore */ }
+	}
 }
 
 async function completeExternalSessionReplacement(
@@ -2289,7 +2350,7 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 		const record = sessions.get(message.sessionId) ?? (() => {
 			const scan = scanSavedSessions(sessionsDir).find((item) => item.session.id === message.sessionId || (item.file && normalizePath(item.file) === normalizePath(message.sessionId)));
 			if (!scan) return undefined;
-			return upsertSession(scan.session, "saved", scan.history);
+			return upsertSession(scan.session, "saved", scan.history, scan.managedWorktreeScanned);
 		})();
 		if (!record) throw new Error(`Unknown session: ${message.sessionId}`);
 		const previousSessionId = socket.data.sessionId;
@@ -2934,7 +2995,11 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 	}
 }
 
-async function deleteSessionRecord(record: SessionRecord, file?: string): Promise<void> {
+async function deleteSessionRecord(
+	record: SessionRecord,
+	file?: string,
+	shouldCommit: () => boolean = () => true,
+): Promise<boolean> {
 	const finishQueueQuiescence = preserveRetryAroundQuiescence({
 		isArmed: () => record.queueRetryTimer !== undefined,
 		cancel: () => {
@@ -2950,12 +3015,27 @@ async function deleteSessionRecord(record: SessionRecord, file?: string): Promis
 			await record.queueDirtyWorker.cancelAndDrain();
 			record.queueDirtyWorker = undefined;
 		}
+		if (!shouldCommit()) {
+			finishQueueQuiescence();
+			return false;
+		}
 		// Make queue removal durable before deleting the file, maps, or sockets.
 		// A failed store write leaves the complete session available for retry.
 		await queueStoreWriter.mutate(persistedQueues, (queues) => { queues.delete(record.id); });
 	} catch (error) {
 		finishQueueQuiescence();
 		throw error;
+	}
+
+	// Queue persistence yields to the event loop. If an agent reconnected while it
+	// was in flight, restore its queue instead of deleting the newly live record.
+	if (!shouldCommit()) {
+		// The durable delete completed, but the record became live again. Restore
+		// its retained queue through the retrying worker so a transient rollback
+		// write failure cannot leave an active session with no durable snapshot.
+		markWebQueueSnapshotDirty(record);
+		finishQueueQuiescence();
+		return false;
 	}
 
 	if (file) {
@@ -2981,13 +3061,12 @@ async function deleteSessionRecord(record: SessionRecord, file?: string): Promis
 	cancelWebQueueWork(record);
 	sessions.delete(record.id);
 	if (record.file) sessionsByFile.delete(normalizePath(record.file));
-	for (const socket of record.clientSockets) {
-		try {
-			socket.close();
-		} catch {
-			// ignore
-		}
-	}
+	// Notify sockets subscribed only to the removed session; once the record leaves
+	// the maps, a catalog-wide broadcast cannot find them. Keep browser sockets open
+	// so they can subscribe to a surviving session without reconnecting.
+	sendSessionRemoved(record.id, undefined, record.clientSockets);
+	for (const socket of record.clientSockets) socket.data.sessionId = undefined;
+	record.clientSockets.clear();
 	for (const socket of record.agentSockets) {
 		try {
 			socket.close();
@@ -2995,6 +3074,7 @@ async function deleteSessionRecord(record: SessionRecord, file?: string): Promis
 			// ignore
 		}
 	}
+	return true;
 }
 
 async function stopRecord(record: SessionRecord): Promise<void> {
@@ -3006,10 +3086,91 @@ async function stopRecord(record: SessionRecord): Promise<void> {
 	record.status = "offline";
 }
 
+function hasStagedOrDurableReplacement(record: SessionRecord): boolean {
+	const sourceFile = record.file;
+	if (!sourceFile) return false;
+	try {
+		const sourceName = basename(sourceFile);
+		if (readdirSync(dirname(sourceFile)).some((entry) =>
+			entry.startsWith(`${sourceName}.replaced-`) && entry.endsWith(".tmp")
+		)) return true;
+	} catch {
+		// The containing session directory may itself have been removed.
+	}
+	for (const scan of scanSavedSessions(sessionsDir)) {
+		if (sessionFileKey(scan.file) === sessionFileKey(sourceFile)) continue;
+		const replacement = scan.replacement;
+		if (
+			replacement?.previousSessionId === record.id &&
+			sessionFileKey(replacement.previousSessionFile) === sessionFileKey(sourceFile)
+		) return true;
+	}
+	return false;
+}
+
+function isMissingInactiveSession(record: SessionRecord): boolean {
+	return Boolean(
+		record.file &&
+		!record.active &&
+		!record.managed &&
+		record.agentSockets.size === 0 &&
+		!existsSync(record.file) &&
+		!hasStagedOrDurableReplacement(record),
+	);
+}
+
+async function reconcileMissingSessionFiles(): Promise<void> {
+	if (shutdownStarted) return;
+	const candidates = [...sessions.values()].filter((record) =>
+		!missingSessionReconciliations.has(record) && isMissingInactiveSession(record)
+	);
+	await Promise.all(candidates.map(async (record) => {
+		missingSessionReconciliations.add(record);
+		const sessionFile = record.file;
+		try {
+			if (
+				!sessionFile ||
+				sessions.get(record.id) !== record ||
+				!isMissingInactiveSession(record)
+			) return;
+			const managed = isManagedSessionFile(sessionFile);
+			let managedWorktree = record.managedWorktree;
+			if (managedWorktree && hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)) {
+				managedWorktree = undefined;
+			}
+			const deleted = await deleteSessionRecord(record, undefined, () =>
+				sessions.get(record.id) === record && isMissingInactiveSession(record)
+			);
+			if (!deleted) return;
+			if (managed) {
+				try { deleteManagedSessionFile(sessionFile); } catch (error) {
+					console.warn(`Externally deleted session ${record.id} was removed from Pi web, but managed ownership cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+			if (
+				managedWorktree &&
+				existsSync(managedWorktree.path) &&
+				!hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)
+			) {
+				try {
+					const result = removeManagedWorktree(managedWorktree);
+					if (result.branchWarning) console.warn(`Removed externally deleted session worktree ${managedWorktree.path}, but could not delete branch ${managedWorktree.branch}: ${result.branchWarning}`);
+				} catch (error) {
+					console.warn(`Externally deleted session ${record.id} was removed from Pi web, but managed worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		} catch (error) {
+			console.warn(`Could not remove externally deleted session ${record.id} from Pi web: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			missingSessionReconciliations.delete(record);
+		}
+	}));
+}
+
 async function deleteSession(sessionId: string): Promise<void> {
 	let record = sessions.get(sessionId) ?? sessionsByFile.get(normalizePath(sessionId)) ?? (() => {
 		const scan = scanSavedSessions(sessionsDir).find((item) => item.session.id === sessionId || normalizePath(item.file) === normalizePath(sessionId));
-		return scan ? upsertSession(scan.session, "saved", scan.history) : undefined;
+		return scan ? upsertSession(scan.session, "saved", scan.history, scan.managedWorktreeScanned) : undefined;
 	})();
 	if (!record) throw new Error(`Unknown session: ${sessionId}`);
 	if (record.file) {
@@ -3051,9 +3212,8 @@ async function deleteSession(sessionId: string): Promise<void> {
 			console.warn(`Session ${sessionId} was deleted, but managed ownership cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	// Durable deletion is complete. Notify clients before best-effort worktree
-	// cleanup so cleanup failure cannot turn a successful deletion into an error.
-	sendSessionRemoved(sessionId);
+	// Durable deletion and client notification are complete before best-effort
+	// worktree cleanup, so cleanup failure cannot turn deletion into an error.
 	if (managedWorktree) {
 		try {
 			const result = removeManagedWorktree(managedWorktree);
@@ -3114,16 +3274,20 @@ async function handleApi(request: Request): Promise<Response> {
 		return jsonResponse({ tailscale: status });
 	}
 	if (request.method === "GET" && url.pathname === "/api/sessions") {
+		await reconcileMissingSessionFiles();
 		const scans = scanSavedSessions(sessionsDir);
 		for (const scan of scans) {
 			const existing = sessions.get(scan.session.id) ?? sessionsByFile.get(normalizePath(scan.file));
 			if (!existing || !existing.active || existing.status === "offline") {
-				upsertSession(scan.session, "saved", scan.history);
+				upsertSession(scan.session, "saved", scan.history, scan.managedWorktreeScanned);
 			}
 		}
 		const merged = new Map<string, WebSession>();
 		for (const scan of scans) merged.set(scan.session.file ? normalizePath(scan.session.file) : scan.session.id, sessionToClientPayload(scan.session));
-		for (const item of sessions.values()) merged.set(item.file ? normalizePath(item.file) : item.id, sessionToClientPayload(item));
+		for (const item of sessions.values()) {
+			if (isMissingInactiveSession(item)) continue;
+			merged.set(item.file ? normalizePath(item.file) : item.id, sessionToClientPayload(item));
+		}
 		return jsonResponse({ sessions: sortSessions(Array.from(merged.values())) });
 	}
 	if (request.method === "POST" && url.pathname === "/api/sessions") {
@@ -3330,6 +3494,8 @@ async function cleanupAndExit(code = 0): Promise<void> {
 		return;
 	}
 	shutdownStarted = true;
+	if (missingSessionReconcileTimer) clearInterval(missingSessionReconcileTimer);
+	missingSessionReconcileTimer = undefined;
 	const busyNames = () => [...sessions.values()]
 		.filter(shouldWaitForManagedShutdown)
 		.map((record) => record.name ?? record.id);
@@ -3427,6 +3593,8 @@ async function main(): Promise<void> {
 		}
 	});
 	console.log(`pi web server listening on http://${host}:${port}`);
+	missingSessionReconcileTimer = setInterval(() => void reconcileMissingSessionFiles(), MISSING_SESSION_RECONCILE_INTERVAL_MS);
+	missingSessionReconcileTimer.unref?.();
 	// Keep readiness independent from JSONL catalog work, then restore only the
 	// browser-owned sessions that were active before the daemon stopped. Native
 	// bridge sessions reconnect themselves and are never started in RPC mode here.

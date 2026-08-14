@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { compareWebSessions, moveWebQueuedMessage, moveWebSession, moveWebSessionRelative, orderWebSessions, type ServerStateFile, type WebQueuedMessage, type WebSession } from "../web/protocol.ts";
@@ -869,16 +869,19 @@ const sessionId = ${JSON.stringify(sessionId)};
 const sessionFile = ${JSON.stringify(sessionFile)};
 const entries = [{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } }];
 let reloadGeneration = 0;
+let sessionName = "named session";
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {
   const request = JSON.parse(line);
   let data;
-  if (request.type === "get_state") data = { sessionId, sessionFile, messageCount: entries.length, isStreaming: false };
+  if (request.type === "get_state") data = { sessionId, sessionFile, sessionName, messageCount: entries.length, isStreaming: false };
   else if (request.type === "get_entries") data = { entries, leafId: "managed-entry" };
   else if (request.type === "get_session_stats") data = {};
   else if (request.type === "get_commands") data = { commands: [{ name: "web-reload", description: "generation-" + reloadGeneration, source: "extension", sourceInfo: { path: "web-sessions.ts", scope: "temporary" } }] };
+  else if (request.type === "set_session_name") sessionName = request.name || null;
   else if (request.type === "prompt" && request.message === "/web-reload") reloadGeneration += 1;
   process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+  if (request.type === "set_session_name") process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
 }
 `);
 	await chmod(fakePi, 0o755);
@@ -923,6 +926,17 @@ for await (const line of lines) {
 	expect(await resumedHistory).toEqual([
 		{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } },
 	]);
+	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; name?: string }> };
+	expect(initialCatalog.sessions.find((session) => session.id === sessionId)?.name).toBe("named session");
+	await sessionCommand(`ws://127.0.0.1:${port}/ws/client`, sessionId, { type: "set_session_name", name: "" });
+	let clearedName: string | undefined = "named session";
+	const clearDeadline = Date.now() + 3_000;
+	while (Date.now() < clearDeadline && clearedName !== undefined) {
+		await Bun.sleep(25);
+		const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; name?: string }> };
+		clearedName = catalog.sessions.find((session) => session.id === sessionId)?.name;
+	}
+	expect(clearedName).toBeUndefined();
 
 	const reloadResult = new Promise<{ response: unknown; confirmation: string }>((resolve, reject) => {
 		const reloadSocket = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
@@ -1004,6 +1018,113 @@ test("managed RPC requests fail within the configured bound when Pi wedges", asy
 	});
 	expect(response.status).toBe(500);
 	expect(await response.text()).toContain("RPC command get_state timed out after 50ms");
+}, 10_000);
+
+test("sessions deleted from the TUI are removed from the live web catalog", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-external-session-delete-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const queuePath = join(webDir, "queues.json");
+	const repository = join(tempDir, "repository");
+	await mkdir(repository, { recursive: true });
+	await Bun.$`git -C ${repository} init -q`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "base\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+	const worktree = await createWebWorktree(repository, "tui-delete");
+	const sessionId = `tui-delete-${crypto.randomUUID()}`;
+	const survivorId = `tui-survivor-${crypto.randomUUID()}`;
+	const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
+	const survivorFile = join(sessionsDir, `${survivorId}.jsonl`);
+	await mkdir(sessionsDir, { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(sessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: worktree.path, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "managed-worktree", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: worktree }),
+	].join("\n") + "\n");
+	await writeFile(survivorFile, `${JSON.stringify({ type: "session", version: 3, id: survivorId, cwd: repository, timestamp: new Date().toISOString() })}\n`);
+	await writeFile(queuePath, `${JSON.stringify({ version: 2, queues: { [sessionId]: [{ id: "stale", message: "remove with session" }] } })}\n`);
+	const port = 40_000 + Math.floor(Math.random() * 5_000);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	await waitForState(statePath);
+	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(initialCatalog.sessions.some((session) => session.id === sessionId)).toBe(true);
+	expect(initialCatalog.sessions.some((session) => session.id === survivorId)).toBe(true);
+	const observer = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+	let resolveReady!: () => void;
+	let resolveRemoved!: () => void;
+	const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+	const removed = new Promise<void>((resolve) => { resolveRemoved = resolve; });
+	observer.onopen = () => observer.send(JSON.stringify({ type: "client.hello" }));
+	observer.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; sessions?: Array<{ id: string }> };
+		if (message.type === "server.snapshot") {
+			expect(message.sessions?.some((session) => session.id === sessionId)).toBe(true);
+			observer.send(JSON.stringify({ type: "client.subscribe", sessionId: survivorId }));
+		}
+		if (message.type === "server.history" && message.sessionId === survivorId) resolveReady();
+		if (message.type === "server.session_removed" && message.sessionId === sessionId) resolveRemoved();
+	};
+	await ready;
+
+	// Pi's built-in /resume selector deletes the JSONL directly, outside the web API.
+	await rm(sessionFile);
+	await Promise.race([
+		removed,
+		Bun.sleep(4_000).then(() => { throw new Error("externally deleted session was not removed from Pi web"); }),
+	]);
+	const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(catalog.sessions.some((session) => session.id === sessionId)).toBe(false);
+	expect(catalog.sessions.some((session) => session.id === survivorId)).toBe(true);
+	expect(await Bun.file(queuePath).json()).toEqual({ version: 2, queues: {} });
+	await expect(readFile(join(worktree.path, "README.md"), "utf8")).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} branch --list tui-delete`.text()).trim()).toBe("");
+	observer.close();
+}, 10_000);
+
+test("saved-session metadata refresh clears hydrated ownership and skips malformed markers", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-marker-clear-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const statePath = join(tempDir, "web", "server.json");
+	const clearedSessionId = `marker-clear-${crypto.randomUUID()}`;
+	const malformedSessionId = `marker-malformed-${crypto.randomUUID()}`;
+	const managedWorktree = { path: join(tempDir, "worktree"), repoRoot: tempDir, name: "worktree", branch: "feature", branchCreated: true };
+	await mkdir(sessionsDir, { recursive: true });
+	const clearedSessionFile = join(sessionsDir, `${clearedSessionId}.jsonl`);
+	await writeFile(clearedSessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: clearedSessionId, cwd: tempDir, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "owned", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: managedWorktree }),
+	].join("\n") + "\n");
+	await writeFile(join(sessionsDir, `${malformedSessionId}.jsonl`), [
+		JSON.stringify({ type: "session", version: 3, id: malformedSessionId, cwd: tempDir, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "owned", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: managedWorktree }),
+		JSON.stringify({ type: "custom", id: "malformed", parentId: "owned", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { managed: true } }),
+	].join("\n") + "\n");
+	const port = 40_000 + Math.floor(Math.random() * 5_000);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	await waitForState(statePath);
+	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown }> };
+	expect(initialCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toEqual(managedWorktree);
+	expect(initialCatalog.sessions.find((session) => session.id === malformedSessionId)?.managedWorktree).toEqual(managedWorktree);
+
+	await appendFile(clearedSessionFile,
+		`${JSON.stringify({ type: "custom", id: "cleared", parentId: "owned", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { ...managedWorktree, managed: false } })}\n`,
+	);
+	const refreshedCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown }> };
+	expect(refreshedCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toBeUndefined();
 }, 10_000);
 
 test("failed durable queue deletion leaves the session file and record retryable", async () => {
@@ -1521,6 +1642,11 @@ test("native worktree switches survive the replacement bridge reconnect", async 
 	});
 	await observerReady;
 	await rm(originalSessionFile);
+	// The missing-file reconciler must leave durable worktree replacements to the
+	// replacement handshake so queued work can migrate instead of being discarded.
+	await Bun.sleep(1_100);
+	const beforeReplacement = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(beforeReplacement.sessions.some((session) => session.id === originalSessionId)).toBe(true);
 	replacementAgent.send(JSON.stringify({
 		type: "agent.session_replaced",
 		previousSessionId: originalSessionId,

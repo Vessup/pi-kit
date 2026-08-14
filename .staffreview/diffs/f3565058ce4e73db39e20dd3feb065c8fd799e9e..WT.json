@@ -1431,8 +1431,260 @@
       "body": "Replaced attachment-only accounting with TextEncoder measurement of the complete serialized client.prompt frame, including prompt text, IDs, image metadata, and JSON framing. The exact outgoing frame is checked before send, with multi-image plus large-prompt and UTF-8 regression coverage.",
       "author": "GPT-5.6",
       "createdAt": "2026-08-14T02:32:19.170Z"
+    },
+    {
+      "id": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "threadId": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "file": "web/server/index.ts",
+      "line": 3091,
+      "side": "new",
+      "body": "The reconciler considers only records already present in `sessions`. If the TUI deletes a JSONL before any browser snapshot/API scan hydrates it, later discovery cannot create a record for the now-missing file, so its durable queue and managed-worktree ownership are never cleaned. Reconcile deleted paths from a persistent metadata index or managed-session/queue inventory rather than relying solely on the in-memory catalog (`web/server/index.ts:3091`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:36:04.984Z",
+      "resolution": {
+        "status": "skipped",
+        "body": "Skipped: safe cleanup requires an out-of-scope durable metadata inventory and migration policy.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:40:54.073Z"
+      }
+    },
+    {
+      "id": "57e7d453-db4d-40a5-a647-87c1a7ec710b",
+      "threadId": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "parentId": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "body": "Skipped this follow-up because safely cleaning a session that this daemon has never observed requires a new durable session-metadata inventory (including file identity, queue ownership, managed-worktree marker history, replacement migration, and transactional retirement). Inferring ownership from the queue key or managed-session file list alone is insufficient and could discard a queue during an in-flight native replacement. That persistent schema and its startup/migration/recovery policy are out of scope for this reconciliation patch; the implemented reconciler remains limited to records that were hydrated while their JSONL existed.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:40:54.028Z"
+    },
+    {
+      "id": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "threadId": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "file": "web/server/index.ts",
+      "line": 488,
+      "side": "new",
+      "body": "`managedWorktreeFromEntries([entry])` returns `undefined` for a newer `{ managed: false }` marker, but `?? managedWorktree` preserves the older ownership marker. Deleting such a session can therefore remove a checkout it explicitly disowned. Track whether a worktree marker was encountered and assign its result directly, or collect markers and call `managedWorktreeFromEntries` once (`web/server/index.ts:488`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T17:43:15.022Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Newest managed:false metadata markers now clear stale ownership, with regression coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:43:40.762Z"
+      }
+    },
+    {
+      "id": "9df9ecc8-0509-408c-a6f4-be86c55e9c9c",
+      "threadId": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "parentId": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "body": "Changed the metadata-only scanner to assign each encountered worktree marker result directly, so a newest `{ managed: false }` marker clears older ownership instead of falling through via nullish coalescing. Added an end-to-end saved-session catalog regression covering an owned marker followed by an explicit clear; the focused test and server typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:43:40.714Z"
+    },
+    {
+      "id": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "threadId": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "file": "web/server/index.ts",
+      "line": 491,
+      "side": "new",
+      "body": "`managedWorktreeFromEntries([entry])` returns `undefined` for malformed markers as well as explicit `{ managed: false }`, so a truncated or older marker after a valid ownership entry silently clears ownership and leaks the managed checkout during deletion. Collect all worktree entries and call `managedWorktreeFromEntries(entries)` once, which skips malformed markers while honoring an explicit ownership clear (`web/server/index.ts:491`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:47:23.254Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Worktree metadata scanning now preserves ownership across malformed markers.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:50:40.183Z"
+      }
+    },
+    {
+      "id": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "threadId": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "file": "web/server/index.ts",
+      "line": 811,
+      "side": "new",
+      "body": "`get_state` omits or nulls `sessionName` after `set_session_name` clears it, but this assignment updates `record.name` only for strings, so the old name remains in subsequent sidebar snapshots. Normalize the nullable contract explicitly, e.g. `record.name = typeof s.sessionName === \"string\" && s.sessionName ? s.sessionName : undefined`, and cover clearing an existing managed-session name (`web/server/index.ts:811`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:47:29.780Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Managed state refresh now clears stale session names.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:50:40.266Z"
+      }
+    },
+    {
+      "id": "3e02f477-7bc5-4acd-aef0-89331ce590e0",
+      "threadId": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "parentId": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "body": "Collected all metadata-only worktree markers and resolve them together with managedWorktreeFromEntries, so malformed newer markers are skipped while explicit managed:false markers still clear ownership. Expanded the catalog regression test to cover both cases; focused tests and the full typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:50:40.141Z"
+    },
+    {
+      "id": "56af2e26-f9b7-468c-b4e1-1fb27727a75a",
+      "threadId": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "parentId": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "body": "Normalized every managed get_state sessionName response, clearing record.name when the field is null, omitted, or empty instead of retaining stale sidebar metadata. Extended the managed resume end-to-end test to name the session, clear it, trigger state refresh, and verify the catalog drops the name; focused tests and the full typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:50:40.225Z"
+    },
+    {
+      "id": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "threadId": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "file": "web/server/index.ts",
+      "line": 3003,
+      "side": "new",
+      "body": "After durable queue deletion, a reconnect makes this path restore the queue with a single `persistWebQueue` attempt; if that rollback write fails, the record remains active but no dirty worker is armed, so a daemon crash loses every queued prompt. Schedule the retained snapshot through the retrying dirty worker (or keep retrying until durable) before returning from the aborted deletion (`web/server/index.ts:3003`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T17:54:56.154Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Aborted deletion queue rollback now retries until durable.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:57:49.368Z"
+      }
+    },
+    {
+      "id": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "threadId": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "file": "web/slash-commands.ts",
+      "line": 9,
+      "endLine": 30,
+      "side": "new",
+      "body": "`parseCommandArgs` does not preserve empty quoted arguments or recognize escapes, so `/foo \"\" second` shifts `second` into `$1`, while an escaped quote prematurely closes its argument; prompt-template substitutions therefore receive incorrect positions or content. Reuse Pi’s argument parser, or track argument-start and escape state while rejecting unterminated quotes, and add coverage for empty and escaped quoted arguments (`web/slash-commands.ts:9`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:55:04.173Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Slash arguments now preserve quoted positions and escapes.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:57:49.453Z"
+      }
+    },
+    {
+      "id": "1cdc212a-2f73-4545-bb5f-6058397c1b10",
+      "threadId": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "parentId": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "body": "Changed the post-delete reconnect path to restore the retained queue through the coalescing dirty-snapshot worker instead of a one-shot write. Transient rollback failures now retain an armed exponential retry loop, while the existing quiescence release still resumes normal queue processing. The full web-server integration suite passes.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:57:49.323Z"
+    },
+    {
+      "id": "f65a638e-a174-48fc-afe7-c2e93d864563",
+      "threadId": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "parentId": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "body": "Reworked command argument parsing to track argument starts independently from content, preserve empty quoted positions, honor backslash escapes (including escaped quotes), and reject unterminated quotes. Added focused prompt expansion coverage for empty and escaped quoted arguments plus malformed input.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:57:49.410Z"
+    },
+    {
+      "id": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "threadId": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "file": "web/server/index.ts",
+      "line": 3114,
+      "endLine": 3117,
+      "side": "new",
+      "body": "`hasOtherSessionInWorktree` is checked before `deleteSessionRecord` awaits durable queue deletion, so a new TUI session can be created in the same checkout during that yield and the subsequent `removeManagedWorktree` will forcibly delete its live checkout and uncommitted files. Re-check for other sessions immediately before cleanup, or serialize worktree ownership changes across deletion (`web/server/index.ts:3114`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T18:02:27.039Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Rechecked live worktree ownership immediately before cleanup.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.492Z"
+      }
+    },
+    {
+      "id": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "threadId": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "file": "web/slash-commands.ts",
+      "line": 23,
+      "side": "new",
+      "body": "Treating every backslash as an escape changes literal arguments such as `C:\\tmp\\file` or `'\\d+'` into `C:tmpfile` and `d+`, so web prompt templates receive corrupted values. Only consume a backslash when it escapes a supported quote/backslash in the current quoting context; otherwise append it literally, and add unquoted and single-quoted backslash cases alongside the escaped-quote test (`web/slash-commands.ts:23`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T18:02:37.184Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Literal backslashes are preserved with focused parser coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.573Z"
+      }
+    },
+    {
+      "id": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "threadId": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "file": "web/server/index.ts",
+      "line": 700,
+      "side": "new",
+      "body": "A metadata refresh passes an empty `history`, so `upsertSession` retains the record’s previously loaded history; if another Pi process has since appended `{ managed: false }`, `session.managedWorktree` is correctly undefined but this fallback resolves the older cached ownership marker and restores it. Deleting that session can then remove a checkout and branch explicitly marked unmanaged. For saved metadata scans, trust the freshly scanned ownership result using a tri-state indicating whether markers were scanned, rather than falling back to stale `record.history`, and test appending a clear after the record has already been hydrated (`web/server/index.ts:700`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T18:02:59.325Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Fresh metadata scans now authoritatively clear stale worktree ownership.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.658Z"
+      }
+    },
+    {
+      "id": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "threadId": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "file": "web/server/index.ts",
+      "line": 3070,
+      "side": "new",
+      "body": "`hasStagedOrDurableReplacement` synchronously enumerates every saved JSONL and calls `parseSessionFile` for each missing record, and the new one-second timer repeats this while a staged or durable replacement keeps the source record alive. Large catalogs or delayed replacement handshakes therefore repeatedly block the server event loop with full-history parsing. Cache/index replacement markers during the existing metadata scan, or make reconciliation event-driven and avoid full JSONL parsing on each poll (`web/server/index.ts:3070`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T18:03:14.571Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Replacement polling now uses cached metadata markers rather than full-history parsing.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.742Z"
+      }
+    },
+    {
+      "id": "a5fe3143-4e48-49ee-af75-203def248705",
+      "threadId": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "parentId": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "body": "Added a second saved-session ownership check immediately before managed worktree removal, after durable queue deletion and record cleanup have yielded, so a newly created TUI session prevents checkout removal. The focused web-server/worktree checks pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.452Z"
+    },
+    {
+      "id": "cf58532a-b804-47c0-bcd3-df1a389198e1",
+      "threadId": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "parentId": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "body": "Changed argument parsing to consume a backslash only before a quote supported by the current quoting context or another backslash; all other backslashes remain literal. Added focused unquoted path, single-quoted regex, escaped-quote, empty-argument, and unterminated-quote coverage.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.533Z"
+    },
+    {
+      "id": "0143c4c8-325f-4a5d-ba47-5416950d51ce",
+      "threadId": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "parentId": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "body": "Added an explicit metadata-scan ownership state and made saved-session upserts trust that fresh result, including authoritative undefined after , instead of falling back to hydrated history. The regression test hydrates ownership, appends a clear marker, refreshes metadata, and verifies ownership stays cleared.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.616Z"
+    },
+    {
+      "id": "d2c15a4d-17ea-40c6-97d6-e620aa26c9f0",
+      "threadId": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "parentId": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "body": "Indexed replacement markers while performing the cached metadata scan and changed missing-session reconciliation to consult that metadata result instead of fully parsing every JSONL transcript. Existing delayed replacement coverage verifies the source remains available for handshake migration; focused tests and typechecks pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.701Z"
     }
   ],
   "createdAt": "2026-08-13T21:25:59.887Z",
-  "updatedAt": "2026-08-14T02:32:19.214Z"
+  "updatedAt": "2026-08-14T18:07:48.742Z"
 }

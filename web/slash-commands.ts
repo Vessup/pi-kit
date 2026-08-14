@@ -11,22 +11,38 @@ function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
 	let current = "";
 	let quote: "'" | '"' | null = null;
-	for (const char of argsString) {
-		if (quote) {
+	let argumentStarted = false;
+	for (let index = 0; index < argsString.length; index += 1) {
+		const char = argsString[index];
+		if (char === "\\") {
+			const next = argsString[index + 1];
+			const escapesSupportedCharacter = next === "\\" || (quote ? next === quote : next === "'" || next === '"');
+			if (escapesSupportedCharacter) {
+				current += next;
+				index += 1;
+			} else {
+				current += char;
+			}
+			argumentStarted = true;
+		} else if (quote) {
 			if (char === quote) quote = null;
 			else current += char;
 		} else if (char === "'" || char === '"') {
 			quote = char;
+			argumentStarted = true;
 		} else if (/\s/.test(char)) {
-			if (current) {
+			if (argumentStarted) {
 				args.push(current);
 				current = "";
+				argumentStarted = false;
 			}
 		} else {
 			current += char;
+			argumentStarted = true;
 		}
 	}
-	if (current) args.push(current);
+	if (quote) throw new Error(`Unterminated ${quote} quote in command arguments`);
+	if (argumentStarted) args.push(current);
 	return args;
 }
 

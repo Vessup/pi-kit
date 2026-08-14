@@ -34,6 +34,20 @@ test("native web prompts expand Pi prompt templates with quoted arguments and de
 		.toBe("Target: owner/repo#42\nAll: owner/repo#42\nSecond: fallback\nTail: ");
 });
 
+test("prompt arguments preserve empty and escaped quoted values", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-web-prompt-args-test-"));
+	const path = join(tempDir, "args.md");
+	await writeFile(path, "First: [$1]\nSecond: [$2]\nThird: [$3]\nAll: [$@]");
+	const commands = [{ name: "args", source: "prompt" as const, sourceInfo: { path } }];
+
+	expect(await expandSlashCommand(commands, '/args "" second "say \\"hi\\""'))
+		.toBe('First: []\nSecond: [second]\nThird: [say "hi"]\nAll: [ second say "hi"]');
+	expect(await expandSlashCommand(commands, `/args C:\\tmp\\file '\\d+' "say \\"hi\\""`))
+		.toBe('First: [C:\\tmp\\file]\nSecond: [\\d+]\nThird: [say "hi"]\nAll: [C:\\tmp\\file \\d+ say "hi"]');
+	await expect(expandSlashCommand(commands, '/args "unterminated'))
+		.rejects.toThrow('Unterminated " quote');
+});
+
 test("web reload routing only accepts the exact built-in command", () => {
 	expect(isWebReloadCommand("/reload")).toBe(true);
 	expect(isWebReloadCommand("/reload   ")).toBe(true);
