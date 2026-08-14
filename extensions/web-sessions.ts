@@ -65,7 +65,30 @@ export function isScopedModelAllowed(
 	return scopedModels.length === 0 || scopedModels.some(({ model }) => model.provider === provider && model.id === modelId);
 }
 
-/** Apply a route change and roll it back if the matching settings write fails. */
+function bridgeCommandList(pi: ExtensionAPI) {
+	const commands = pi.getCommands()
+		.filter((command) => command.source === "prompt" || command.source === "skill" || command.name === "worktree")
+		.map((command) => ({
+			name: command.name,
+			description: command.description,
+			source: command.source,
+			location: command.sourceInfo.scope,
+		}));
+	if (!commands.some((command) => command.name === "reload")) {
+		commands.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
+	}
+	return commands;
+}
+
+export function splitWebWorktreeCommandArgs(args: string): { token: string; worktreeArgs: string } {
+	const trimmed = args.trim();
+	const separator = trimmed.search(/\s/);
+	return separator < 0
+		? { token: trimmed, worktreeArgs: "" }
+		: { token: trimmed.slice(0, separator), worktreeArgs: trimmed.slice(separator + 1) };
+}
+
+/** Abort the main session and wait for subagent abort operations registered through waitUntil. */
 export async function abortSessionAndSubagents(options: {
 	sessionId: string;
 	abortMain(): void;
@@ -87,6 +110,7 @@ export async function abortSessionAndSubagents(options: {
 	await Promise.allSettled(operations);
 }
 
+/** Apply a route change and roll it back if the matching settings write fails. */
 export async function applyTailscaleSettingTransaction<TSetting, TStatus>(options: {
 	current: TSetting;
 	next: TSetting;
@@ -507,32 +531,12 @@ async function executeAgentCommand(
 					reasoning: model.reasoning,
 					thinkingLevels: modelThinkingLevels(model),
 				}));
-				const commands = pi.getCommands()
-					.filter((command) => command.source === "prompt" || command.source === "skill" || command.name === "worktree")
-					.map((command) => ({
-						name: command.name,
-						description: command.description,
-						source: command.source,
-						location: command.sourceInfo.scope,
-					}));
-				if (!commands.some((command) => command.name === "reload")) {
-					commands.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
-				}
+				const commands = bridgeCommandList(pi);
 				respond(state, requestId, true, { models, thinkingLevels: modelThinkingLevels(state.ctx.model ?? {}), commands });
 				return;
 			}
 			case "get_commands": {
-				const commands = pi.getCommands()
-					.filter((command) => command.source === "prompt" || command.source === "skill" || command.name === "worktree")
-					.map((command) => ({
-						name: command.name,
-						description: command.description,
-						source: command.source,
-						location: command.sourceInfo.scope,
-					}));
-				if (!commands.some((command) => command.name === "reload")) {
-					commands.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
-				}
+				const commands = bridgeCommandList(pi);
 				respond(state, requestId, true, { commands });
 				return;
 			}
@@ -941,11 +945,11 @@ export default function webSessions(pi: ExtensionAPI): void {
 	pi.registerCommand("web-worktree", {
 		description: "Create and activate a worktree for the web session manager",
 		handler: async (args, ctx) => {
-			const [token = "", ...worktreeArgs] = args.trim().split(/\s+/);
+			const { token, worktreeArgs } = splitWebWorktreeCommandArgs(args);
 			const pending = pendingForks.get(token);
 			try {
 				if (pending) pending.expectingReplacement = true;
-				const result = await runWorktreeCommand(worktreeArgs.join(" "), ctx);
+				const result = await runWorktreeCommand(worktreeArgs, ctx);
 				if (result.replacedSession && bridge) sendSourceReplacement(bridge, result.replacedSession);
 				pending?.resolve({
 					...result,

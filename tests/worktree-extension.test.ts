@@ -3,6 +3,7 @@ import { closeSync, existsSync, openSync, realpathSync, writeFileSync } from "no
 import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -28,6 +29,8 @@ import { WORKTREE_SESSION_ENTRY } from "../web/server/worktrees.ts";
 import { formatWorktreeCreateCommandArgs, parseWorktreeCommandArgs, parseWorktreeInvocation } from "../web/worktree-command.ts";
 
 beforeEach(() => clearWorktreeToolRequests());
+
+const lsofAvailable = (spawnSync("lsof", ["-v"], { stdio: "ignore" }).error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
 
 function registeredWorktreeTool() {
 	let tool: {
@@ -198,6 +201,13 @@ test("worktree command parses safe quoted repository arguments", () => {
 		branch: "owner/topic",
 		startPoint: "origin/owner/topic",
 	});
+});
+
+test("quoted relative and root-relative Windows paths preserve separators", () => {
+	expect(parseWorktreeCommandArgs(String.raw`--existing ".\foo\bar"`)).toEqual({ existing: String.raw`.\foo\bar` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing "..\foo\bar"`)).toEqual({ existing: String.raw`..\foo\bar` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing "\foo\bar"`)).toEqual({ existing: String.raw`\foo\bar` });
+	expect(parseWorktreeCommandArgs(String.raw`--existing "project dir\nested"`)).toEqual({ existing: String.raw`project dir\nested` });
 });
 
 test("formatted branch and start-point values round-trip without command interpolation", () => {
@@ -466,7 +476,7 @@ test("verified replacement deletes its source session and records a durable tomb
 	}
 });
 
-test("an independently open source session rolls back and preserves the original", async () => {
+(lsofAvailable ? test : test.skip)("an independently open source session rolls back and preserves the original", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-kit-worktree-source-delete-failure-"));
 	try {
 		const sourceCwd = join(directory, "source");
@@ -479,12 +489,13 @@ test("an independently open source session rolls back and preserves the original
 		source.setSessionFile(sourceFile);
 		let replacementFile: string | undefined;
 		let rolledBack = false;
+		const notifications: string[] = [];
 		const ctx = {
 			cwd: sourceCwd,
 			hasUI: true,
 			sessionManager: source,
 			waitForIdle: async () => undefined,
-			ui: { input: async () => undefined, notify: () => undefined },
+			ui: { input: async () => undefined, notify: (message: string) => { notifications.push(message); } },
 			switchSession: async (sessionPath: string, options?: { withSession?: (next: ExtensionCommandContext) => Promise<void> }) => {
 				const manager = SessionManager.open(sessionPath);
 				const openSource = openSync(sourceFile, "a");
@@ -512,6 +523,7 @@ test("an independently open source session rolls back and preserves the original
 		});
 		expect(result.cancelled).toBe(true);
 		expect(rolledBack).toBe(true);
+		expect(notifications.some((message) => message.includes("Source session is still open by process"))).toBe(true);
 		expect(existsSync(sourceFile)).toBe(true);
 		expect(existsSync(replacementFile!)).toBe(false);
 	} finally {

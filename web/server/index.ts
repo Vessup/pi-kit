@@ -179,13 +179,18 @@ const managedSessionStorePath = join(dirname(stateFilePath), "managed-sessions.j
 const persistedQueues = readQueueStore(queueStorePath);
 const queueStoreWriter = new CoalescedQueueStoreWriter(queueStorePath);
 const managedSessionStore = new ManagedSessionStore(managedSessionStorePath);
-const port = Number(process.env.PI_WEB_PORT ?? `${DEFAULT_WEB_PORT}`) || DEFAULT_WEB_PORT;
+const configuredPort = Number(process.env.PI_WEB_PORT ?? `${DEFAULT_WEB_PORT}`);
+let port = Number.isInteger(configuredPort) && configuredPort >= 0 && configuredPort <= 65_535 ? configuredPort : DEFAULT_WEB_PORT;
 const host = "127.0.0.1";
 const configuredRpcTimeout = Number(process.env.PI_WEB_RPC_TIMEOUT_MS ?? "30000");
 const RPC_REQUEST_TIMEOUT_MS = Number.isFinite(configuredRpcTimeout) && configuredRpcTimeout > 0
 	? Math.floor(configuredRpcTimeout)
 	: 30_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const configuredShutdownWait = Number(process.env.PI_WEB_SHUTDOWN_WAIT_MS ?? "30000");
+const MANAGED_SHUTDOWN_WAIT_MS = Number.isFinite(configuredShutdownWait) && configuredShutdownWait >= 0
+	? Math.floor(configuredShutdownWait)
+	: 30_000;
 const MISSING_SESSION_RECONCILE_INTERVAL_MS = 1_000;
 // Accept one legacy agent.hello containing a large session until running Pi
 // processes reload the bridge that sends metadata-only hello frames.
@@ -1526,6 +1531,21 @@ function broadcastQueueDelivery(record: SessionRecord, item: WebQueuedMessage, p
 	} satisfies ServerEventMessage);
 }
 
+function broadcastReloadComplete(record: SessionRecord): void {
+	broadcast(record.id, {
+		type: "server.event",
+		sessionId: record.id,
+		event: {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "Reload complete." }],
+			},
+		},
+	} satisfies ServerEventMessage);
+}
+
 function sendSessionState(socket: Bun.ServerWebSocket<ClientSocketData>, record: SessionRecord): void {
 	// A newly subscribed client receives one bounded full transcript snapshot;
 	// subsequent subagent updates arrive as deltas.
@@ -1602,6 +1622,7 @@ async function flushWebQueueLocked(record: SessionRecord): Promise<void> {
 			// Queued control commands execute through their dedicated route only after
 			// the current run reaches idle; never turn /reload into an ordinary prompt.
 			await routeCommand(record, { type: "reload" });
+			broadcastReloadComplete(record);
 		} else {
 			await routeCommand(record, {
 				type: "prompt",
@@ -1742,22 +1763,24 @@ async function completeExternalSessionReplacement(
 	}
 
 	if (!previous) {
-		const orphaned = persistedQueues.get(replacement.previousSessionId);
-		if (!orphaned?.length) return;
 		if (existsSync(replacement.previousSessionFile)) return;
-		const ids = new Set<string>();
-		const queue = [...cloneWebQueue(orphaned), ...cloneWebQueue(next.queue)].filter((item) => {
-			if (ids.has(item.id)) return false;
-			ids.add(item.id);
-			return true;
-		});
-		await queueStoreWriter.mutate(persistedQueues, (queues) => {
-			queues.delete(replacement.previousSessionId);
-			if (queue.length > 0) queues.set(next.id, queue);
-		});
-		next.queue = queue;
-		broadcast(next.id, webQueueEvent(next));
-		if (next.status === "idle" && next.agentRunning !== true) scheduleQueueSettleFallback(next);
+		const orphaned = persistedQueues.get(replacement.previousSessionId);
+		if (orphaned?.length) {
+			const ids = new Set<string>();
+			const queue = [...cloneWebQueue(orphaned), ...cloneWebQueue(next.queue)].filter((item) => {
+				if (ids.has(item.id)) return false;
+				ids.add(item.id);
+				return true;
+			});
+			await queueStoreWriter.mutate(persistedQueues, (queues) => {
+				queues.delete(replacement.previousSessionId);
+				if (queue.length > 0) queues.set(next.id, queue);
+			});
+			next.queue = queue;
+			broadcast(next.id, webQueueEvent(next));
+			if (next.status === "idle" && next.agentRunning !== true) scheduleQueueSettleFallback(next);
+		}
+		sendSessionRemoved(replacement.previousSessionId, next.id);
 		return;
 	}
 
@@ -2187,7 +2210,14 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					startedAt: typeof event.startedAt === "number" ? event.startedAt : Date.now(),
 				};
 			}
-			if (event.type === "compaction_end") record.compaction = undefined;
+			if (event.type === "compaction_end") {
+				record.compaction = undefined;
+				if (event.aborted === true || event.willRetry === false) {
+					record.status = "idle";
+					record.agentRunning = false;
+					scheduleQueueSettleFallback(record);
+				}
+			}
 			if (event.type === "agent_settled") {
 				cancelQueueSettleFallback(record);
 				// A prompt may have been accepted during an agent_end compatibility
@@ -2385,6 +2415,7 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 				} else {
 					if (message.streamingBehavior === "steer") throw new Error("/reload must be queued or run while Pi is idle");
 					responseData = await routeCommand(record, { type: "reload" });
+					broadcastReloadComplete(record);
 				}
 			} else if (worktree) {
 				if (message.images?.length) throw new Error("/worktree does not accept image attachments");
@@ -2410,20 +2441,6 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 					images: message.images,
 					streamingBehavior: message.streamingBehavior,
 				});
-			}
-			if (reload) {
-				broadcast(record.id, {
-					type: "server.event",
-					sessionId: record.id,
-					event: {
-						type: "message_end",
-						message: {
-							role: "assistant",
-							timestamp: Date.now(),
-							content: [{ type: "text", text: "Reload complete." }],
-						},
-					},
-				} satisfies ServerEventMessage);
 			}
 			socket.send(JSON.stringify({
 				type: "server.response",
@@ -2670,6 +2687,9 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 		}
 		return { commands: webSlashCommands(await discoverSlashCommands(record.cwd)) };
 	}
+	if ((command.type === "create_worktree" || command.type === "create_worktree_v2") && hasActiveWebSubagents(record.subagents)) {
+		throw new Error("Wait for Pi and its subagents to become idle before creating a worktree");
+	}
 	if ((command.type === "create_worktree" || command.type === "create_worktree_v2") && record.managed) {
 		if (record.status !== "idle") throw new Error("Wait for Pi to become idle before creating a worktree");
 		const previousId = record.id;
@@ -2909,7 +2929,15 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 					startedAt: typeof event.event.startedAt === "number" ? event.event.startedAt : Date.now(),
 				};
 			}
-			if (event.event.type === "compaction_end") record.compaction = undefined;
+			if (event.event.type === "compaction_end") {
+				record.compaction = undefined;
+				if (event.event.aborted === true || event.event.willRetry === false) {
+					record.status = "idle";
+					record.agentRunning = false;
+					scheduleQueueSettleFallback(record);
+					lifecycleChanged = true;
+				}
+			}
 			if (event.event.type === "agent_settled") {
 				cancelQueueSettleFallback(record);
 				lifecycleChanged = true;
@@ -3212,6 +3240,12 @@ async function deleteSession(sessionId: string): Promise<void> {
 			console.warn(`Session ${sessionId} was deleted, but managed ownership cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	// Native shutdown and durable queue deletion may yield long enough for another
+	// Pi process to create a session in this checkout. Ownership can only be
+	// revoked here; never enable cleanup that was not part of the original request.
+	if (managedWorktree && sessionFile && hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)) {
+		managedWorktree = undefined;
+	}
 	// Durable deletion and client notification are complete before best-effort
 	// worktree cleanup, so cleanup failure cannot turn deletion into an error.
 	if (managedWorktree) {
@@ -3254,9 +3288,9 @@ async function handleApi(request: Request): Promise<Response> {
 				httpsPort: typeof suppliedCurrent.httpsPort === "number" && Number.isInteger(suppliedCurrent.httpsPort) && suppliedCurrent.httpsPort >= 1 && suppliedCurrent.httpsPort <= 65_535
 					? suppliedCurrent.httpsPort
 					: persisted.httpsPort,
-				serviceName: typeof suppliedCurrent.serviceName === "string"
-					? suppliedCurrent.serviceName.trim().replace(/^svc:/, "") || undefined
-					: undefined,
+				// The persisted route identity is authoritative; a browser may report
+				// the previously applied port, but cannot select another Service to remove.
+				serviceName: persisted.serviceName,
 			}
 			: persisted;
 		const settings: TailscaleWebSettings = {
@@ -3501,10 +3535,12 @@ async function cleanupAndExit(code = 0): Promise<void> {
 		.map((record) => record.name ?? record.id);
 	let busy = busyNames();
 	if (busy.length > 0) console.error(`Waiting for active managed sessions before restart: ${busy.join(", ")}`);
-	while (busy.length > 0 && !forceShutdownRequested) {
+	const shutdownWaitDeadline = Date.now() + MANAGED_SHUTDOWN_WAIT_MS;
+	while (busy.length > 0 && !forceShutdownRequested && Date.now() < shutdownWaitDeadline) {
 		await Bun.sleep(100);
 		busy = busyNames();
 	}
+	if (busy.length > 0) console.error(`Proceeding with shutdown while sessions remain active: ${busy.join(", ")}`);
 	// Stop admitting queue work and drain each per-session mutation tail before the
 	// final snapshot. This prevents a late mutation from racing or following flush.
 	const records = [...sessions.values()];
@@ -3579,6 +3615,8 @@ async function main(): Promise<void> {
 			},
 		},
 	});
+	port = server.port ?? port;
+	webState = { ...webState, port };
 	// Configure Serve only after localhost is listening, then publish discovery
 	// state with the final tailnet URL. Simultaneous startup losers never acquire
 	// the port and therefore cannot overwrite the winning server's state.

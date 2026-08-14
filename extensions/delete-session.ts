@@ -43,7 +43,12 @@ export default function deleteSessionExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			if (shouldRemoveWorktree && managedWorktree) {
+			const shouldRemoveWorktreeNow = Boolean(
+				shouldRemoveWorktree
+				&& managedWorktree
+				&& !hasOtherSessionInWorktree(sessionsRoot, sessionFile, managedWorktree.path),
+			);
+			if (shouldRemoveWorktreeNow && managedWorktree) {
 				try {
 					const result = removeManagedWorktree(managedWorktree);
 					if (result.branchWarning) ctx.ui.notify(`Worktree removed, but branch ${managedWorktree.branch} could not be deleted: ${result.branchWarning}`, "warning");

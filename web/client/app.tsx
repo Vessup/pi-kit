@@ -52,11 +52,11 @@ const SESSION_ORDER_KEY = "pi-web-session-order-v1";
 
 function semanticEntryIdentity(entry: SemanticEntry): string | undefined {
   const message = entry.message;
-  if (!message) return undefined;
-  if (typeof message.id === "string") return `id:${message.id}`;
-  const role = typeof message.role === "string" ? message.role : "";
-  const timestamp = typeof message.timestamp === "number" || typeof message.timestamp === "string" ? String(message.timestamp) : "";
+  if (typeof message?.id === "string") return `id:${message.id}`;
+  const role = typeof message?.role === "string" ? message.role : "";
+  const timestamp = typeof message?.timestamp === "number" || typeof message?.timestamp === "string" ? String(message.timestamp) : "";
   if (timestamp) return `${role}:${timestamp}`;
+  if (entry.id && !entry.id.startsWith("optimistic-")) return `entry:${entry.id}`;
   return undefined;
 }
 
@@ -64,7 +64,7 @@ function preserveSemanticEntryKeys(previous: SemanticEntry[], incoming: Semantic
   const previousIds = new Map<string, string>();
   for (const entry of previous) {
     const identity = semanticEntryIdentity(entry);
-    if (identity && entry.id) previousIds.set(identity, entry.id);
+    if (identity && entry.id && !entry.id.startsWith("optimistic-")) previousIds.set(identity, entry.id);
   }
   return incoming.map((entry) => {
     const identity = semanticEntryIdentity(entry);
@@ -78,9 +78,9 @@ function mergeSemanticHistory(previous: SemanticEntry[], incoming: SemanticEntry
   const incomingIdentities = new Set(reconciled.map(semanticEntryIdentity).filter((identity): identity is string => Boolean(identity)));
   const retained = previous.filter((entry) => {
     const identity = semanticEntryIdentity(entry);
-    return !identity || !incomingIdentities.has(identity);
+    return identity ? !incomingIdentities.has(identity) : false;
   });
-  return [...retained, ...reconciled];
+  return [...reconciled, ...retained];
 }
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
@@ -214,6 +214,15 @@ function fitBeginningEllipsis(text: string, maxWidth: number, measure: (value: s
   return `…${characters.slice(characters.length - visibleCharacters).join("")}`;
 }
 
+let sessionLocationMeasurementContext: CanvasRenderingContext2D | null | undefined;
+
+function textMeasurementContext(): CanvasRenderingContext2D | null {
+  if (sessionLocationMeasurementContext === undefined) {
+    sessionLocationMeasurementContext = document.createElement("canvas").getContext("2d");
+  }
+  return sessionLocationMeasurementContext;
+}
+
 function SessionLocation({ session }: { session: WebSession }) {
   const text = sessionSubtitle(session);
   const ref = React.useRef<HTMLDivElement | null>(null);
@@ -221,12 +230,11 @@ function SessionLocation({ session }: { session: WebSession }) {
   React.useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
+    const context = textMeasurementContext();
     if (!context) return;
     const update = () => {
       const style = getComputedStyle(element);
-      context.font = style.font;
+      context.font = style.font || `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
       const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
       const measure = (value: string) => context.measureText(value).width + Math.max(0, Array.from(value).length - 1) * letterSpacing;
       const fitted = fitBeginningEllipsis(text, element.clientWidth, measure);
@@ -326,24 +334,24 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
             <p className="text-xs text-zinc-500">Recently used repositories appear as you type.</p>
           </div>
           <div className="space-y-2">
-            <label className="text-xs uppercase tracking-wider text-zinc-500">worktree name</label>
-            <Input value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional managed directory name" />
+            <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-worktree`}>worktree name</label>
+            <Input id={`${repositoryListId}-worktree`} value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional managed directory name" />
             <p className="text-xs text-zinc-500">Creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The branch can have a different, namespaced name.</p>
           </div>
           {worktreeName.trim() && <>
             <div className="space-y-2">
-              <label className="text-xs uppercase tracking-wider text-zinc-500">local branch</label>
-              <Input value={worktreeBranch} onChange={(event) => { setWorktreeBranch(event.target.value); setCreateError(null); }} placeholder={`Defaults to ${worktreeName.trim()}`} />
+              <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-branch`}>local branch</label>
+              <Input id={`${repositoryListId}-branch`} value={worktreeBranch} onChange={(event) => { setWorktreeBranch(event.target.value); setCreateError(null); }} placeholder={`Defaults to ${worktreeName.trim()}`} />
             </div>
             <div className="space-y-2">
-              <label className="text-xs uppercase tracking-wider text-zinc-500">start point</label>
-              <Input value={worktreeStartPoint} onChange={(event) => { setWorktreeStartPoint(event.target.value); setCreateError(null); }} placeholder="Optional, e.g. origin/owner/topic" />
+              <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-start-point`}>start point</label>
+              <Input id={`${repositoryListId}-start-point`} value={worktreeStartPoint} onChange={(event) => { setWorktreeStartPoint(event.target.value); setCreateError(null); }} placeholder="Optional, e.g. origin/owner/topic" />
               <p className="text-xs text-zinc-500">Used only when creating a missing local branch. A remote-tracking ref configures its upstream.</p>
             </div>
           </>}
           <div className="space-y-2">
-            <label className="text-xs uppercase tracking-wider text-zinc-500">session name</label>
-            <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Optional display name" />
+            <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-session-name`}>session name</label>
+            <Input id={`${repositoryListId}-session-name`} value={name} onChange={(event) => setName(event.target.value)} placeholder="Optional display name" />
           </div>
           {createError && <p role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{createError}</p>}
         </DialogBody>
@@ -1070,7 +1078,6 @@ export function App() {
               const next = [...previous];
               next[optimisticIndex] = {
                 ...entry,
-                id: previous[optimisticIndex]!.id,
                 message: preserveOptimisticAttachments(finalized, previous[optimisticIndex]!),
               };
               return next;
@@ -1262,7 +1269,8 @@ export function App() {
     const promptFrame = { type: "client.prompt", requestId, sessionId, message, images, streamingBehavior } satisfies ClientPromptMessage;
     assertClientPromptPayloadFits(promptFrame);
     const queuedFollowUp = streamingBehavior === "followUp" && selectedSession?.status === "working";
-    const controlCommand = isWebReloadCommand(message) || /^\/worktree(?:\s|$)/.test(message.trim());
+    const worktreeCommand = /^\/worktree(?:\s|$)/.test(message.trim());
+    const controlCommand = isWebReloadCommand(message) || worktreeCommand;
     const optimisticallyWorking = !queuedFollowUp && !controlCommand && selectedSession?.status !== "working";
     const previousStatus = selectedSession?.status;
     if (optimisticallyWorking) {
@@ -1319,7 +1327,7 @@ export function App() {
       ]);
       return;
     }
-    if (message.trimStart().startsWith("/worktree") && responseData && typeof responseData === "object") {
+    if (worktreeCommand && responseData && typeof responseData === "object") {
       const replacementId = (responseData as { sessionId?: unknown }).sessionId;
       if (typeof replacementId === "string") {
         setSelectedId(replacementId);

@@ -70,6 +70,7 @@ import { Dialog, DialogBody, DialogClose, DialogContent, DialogDescription, Dial
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip";
 import { AnchoredPopover } from "./components/anchored-popover";
 import { anchoredScrollTop, resolveScrollFollow } from "./scroll-follow";
+import { hasActiveSessionWork } from "./session-status";
 import { totalSubagentUsage } from "./usage";
 import { toolHasArgumentDetails } from "./tool-expansion";
 import { cn } from "./lib/utils";
@@ -1238,13 +1239,13 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
       lastScrollTopRef.current = target.scrollTop;
     };
     const handleLayoutChange = () => {
-      if (!followOutputRef.current || showScrollToBottomRef.current) {
-        restoreViewportAnchor();
-        return;
-      }
       if (autoScrollFrameRef.current !== null) cancelAnimationFrame(autoScrollFrameRef.current);
       autoScrollFrameRef.current = requestAnimationFrame(() => {
         autoScrollFrameRef.current = null;
+        if (!followOutputRef.current || showScrollToBottomRef.current) {
+          restoreViewportAnchor();
+          return;
+        }
         pinToBottom();
       });
     };
@@ -1432,7 +1433,7 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
     [session?.subagents],
   );
 
-  const stopAction = !editingQueueId && session?.status === "working" && !draft.trim() && images.length === 0;
+  const stopAction = !editingQueueId && Boolean(session && hasActiveSessionWork(session)) && !draft.trim() && images.length === 0;
 
   const requestAbort = async () => {
     if (!session || aborting) return;

@@ -340,6 +340,9 @@ function sourceSessionSnapshot(sessionFile: string): SourceSessionSnapshot {
 
 function assertSourceSessionIsNotOpen(sessionFile: string): void {
 	const result = spawnSync("lsof", ["-t", "--", sessionFile], { encoding: "utf8" });
+	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+		throw new Error("Could not verify exclusive source-session ownership: lsof is required but was not found in PATH");
+	}
 	if (result.error) throw new Error(`Could not verify exclusive source-session ownership: ${result.error.message}`);
 	if (result.status === 0 && result.stdout.trim()) {
 		throw new Error(`Source session is still open by process ${result.stdout.trim().split(/\s+/).join(", ")}`);

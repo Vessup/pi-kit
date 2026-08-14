@@ -1,6 +1,6 @@
 import { accessSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const WORKTREE_SESSION_ENTRY = "vessup-managed-worktree";
 
@@ -14,13 +14,27 @@ export function validateWorktreeName(input: string): string {
 	return name;
 }
 
+const GIT_COMMAND_TIMEOUT_MS = 30_000;
+
+function spawnGit(args: string[]) {
+	const result = spawnSync("git", args, {
+		encoding: "utf8",
+		timeout: GIT_COMMAND_TIMEOUT_MS,
+		killSignal: "SIGKILL",
+	});
+	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || result.signal) {
+		throw new Error(`git ${args.join(" ")} did not finish within ${GIT_COMMAND_TIMEOUT_MS}ms`);
+	}
+	return result;
+}
+
 /** Validate a short local branch name while allowing namespaced branches such as owner/topic. */
 export function validateLocalBranchName(input: string): string {
 	const branch = input.trim();
 	if (!branch) throw new Error("Missing local branch name");
 	if (branch.includes("\0")) throw new Error("Local branch name contains a NUL byte");
 	if (branch.startsWith("refs/")) throw new Error("Local branch must be a short branch name, not a refs/... path");
-	const result = spawnSync("git", ["check-ref-format", "--branch", branch], { encoding: "utf8" });
+	const result = spawnGit(["check-ref-format", "--branch", branch]);
 	if (result.status !== 0) {
 		throw new Error(`Invalid local branch name ${JSON.stringify(branch)}: ${result.stderr?.trim() || result.error?.message || "git check-ref-format rejected it"}`);
 	}
@@ -28,7 +42,7 @@ export function validateLocalBranchName(input: string): string {
 }
 
 function gitOutput(cwd: string, args: string[]): string {
-	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+	const result = spawnGit(["-C", cwd, ...args]);
 	if (result.status !== 0) {
 		const error = result.stderr?.trim() || result.error?.message || `git ${args.join(" ")} failed`;
 		throw new Error(error);
@@ -47,7 +61,7 @@ export function validateGitVersion(versionOutput: string): void {
 }
 
 function ensureSupportedGit(): void {
-	const result = spawnSync("git", ["--version"], { encoding: "utf8" });
+	const result = spawnGit(["--version"]);
 	if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || "Could not run git --version");
 	validateGitVersion(result.stdout ?? "");
 }
@@ -66,6 +80,8 @@ export type CreatedWebWorktree = {
 	branchCreated: boolean;
 	/** Commit/ref used to initialize a newly created branch. */
 	startPoint: string;
+	/** Initial branch OID, used to avoid deleting commits made before rollback. */
+	initialCommit?: string;
 	/** Remote-tracking branch configured as upstream when one was requested. */
 	upstream?: string;
 	setupRan: boolean;
@@ -93,14 +109,20 @@ export function runWorktreeSetup(command: string, args: string[], cwd: string, t
 			kill("SIGTERM");
 			forceTimer = setTimeout(() => kill("SIGKILL"), 1_000);
 		}, timeoutMs);
+		const forceKillTimedOutGroup = () => {
+			if (!timedOut || !forceTimer) return;
+			clearTimeout(forceTimer);
+			forceTimer = undefined;
+			kill("SIGKILL");
+		};
 		child.once("error", (error) => {
 			clearTimeout(timer);
-			if (forceTimer) clearTimeout(forceTimer);
+			forceKillTimedOutGroup();
 			rejectSetup(error);
 		});
 		child.once("close", (code, signal) => {
 			clearTimeout(timer);
-			if (forceTimer) clearTimeout(forceTimer);
+			forceKillTimedOutGroup();
 			if (timedOut) rejectSetup(new Error(`setup.sh timed out after ${timeoutMs}ms`));
 			else if (code === 0) resolveSetup();
 			else rejectSetup(new Error(`setup.sh exited with code ${code ?? `signal ${signal ?? "unknown"}`}`));
@@ -128,12 +150,21 @@ export function managedWorktreeFromEntries(entries: readonly unknown[]): Managed
 	return undefined;
 }
 
-function samePath(left: string, right: string): boolean {
+function canonicalPath(path: string): string {
 	try {
-		return realpathSync(left) === realpathSync(right);
+		return realpathSync(path);
 	} catch {
-		return resolve(left) === resolve(right);
+		return resolve(path);
 	}
+}
+
+function samePath(left: string, right: string): boolean {
+	return canonicalPath(left) === canonicalPath(right);
+}
+
+function pathIsWithin(path: string, root: string): boolean {
+	const relation = relative(canonicalPath(root), canonicalPath(path));
+	return relation === "" || (relation !== ".." && !relation.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(relation));
 }
 
 function primaryRepositoryGitDir(cwd: string): string {
@@ -144,7 +175,7 @@ function parseRegisteredWorktrees(cwd: string): Array<{ path: string; head?: str
 	ensureSupportedGit();
 	const records: Array<{ path: string; head?: string; branch?: string; detached: boolean }> = [];
 	let current: { path: string; head?: string; branch?: string; detached: boolean } | undefined;
-	const result = spawnSync("git", ["-C", cwd, "worktree", "list", "--porcelain", "-z"], { encoding: "utf8" });
+	const result = spawnGit(["-C", cwd, "worktree", "list", "--porcelain", "-z"]);
 	if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || "git worktree list failed");
 	for (const field of (result.stdout ?? "").split("\0")) {
 		if (!field) {
@@ -175,7 +206,7 @@ function primaryRepositoryRoot(cwd: string): string {
 type ResolvedStartPoint = { value: string; commit: string; upstream?: string };
 
 function localBranchExists(cwd: string, branch: string): boolean {
-	const result = spawnSync("git", ["-C", cwd, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { encoding: "utf8" });
+	const result = spawnGit(["-C", cwd, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
 	if (result.status === 0) return true;
 	if (result.status === 1) return false;
 	throw new Error(result.stderr?.trim() || result.error?.message || `Could not inspect local branch ${branch}`);
@@ -194,7 +225,7 @@ function resolveStartPoint(cwd: string, input: string): ResolvedStartPoint {
 	}
 	if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error(`Worktree start point resolved to an invalid commit: ${value}`);
 
-	const symbolic = spawnSync("git", ["-C", cwd, "rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", value], { encoding: "utf8" });
+	const symbolic = spawnGit(["-C", cwd, "rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", value]);
 	const fullRef = symbolic.status === 0 ? symbolic.stdout?.trim() ?? "" : "";
 	const remoteMatch = fullRef.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
 	const upstream = remoteMatch && remoteMatch[2] !== "HEAD" ? `${remoteMatch[1]}/${remoteMatch[2]}` : undefined;
@@ -253,7 +284,7 @@ export function inspectExistingWorktree(currentCwd: string, requestedPath: strin
 
 /** Read the checked-out branch or detached commit without modifying the worktree. */
 export function currentWorktreeRef(cwd: string): WorktreeRef {
-	const symbolic = spawnSync("git", ["-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD"], { encoding: "utf8" });
+	const symbolic = spawnGit(["-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD"]);
 	if (symbolic.status === 0 && symbolic.stdout.trim()) return { kind: "branch", value: symbolic.stdout.trim() };
 	const head = gitOutput(cwd, ["rev-parse", "--verify", "HEAD"]);
 	if (!/^[0-9a-fA-F]{40,64}$/.test(head)) throw new Error(`Invalid detached HEAD: ${head}`);
@@ -304,7 +335,7 @@ export function hasOtherSessionInWorktree(sessionsRoot: string, currentSessionFi
 			if (!entry.isFile() || !entry.name.endsWith(".jsonl") || samePath(file, currentSessionFile)) continue;
 			try {
 				const header = readSessionHeader(file);
-				if (isRecord(header) && typeof header.cwd === "string" && samePath(header.cwd, worktreePath)) return true;
+				if (isRecord(header) && typeof header.cwd === "string" && pathIsWithin(header.cwd, worktreePath)) return true;
 			} catch {
 				// An unreadable or malformed unrelated session is not evidence that it
 				// owns this worktree. Normal session deletion handles that file itself.
@@ -363,8 +394,18 @@ export function rollbackWebWorktree(worktree: CreatedWebWorktree): void {
 	const verified = verifiedManagedWorktreeLocation(worktree);
 	const dirty = gitOutput(verified.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
 	if (dirty) throw new Error(`Refusing to roll back managed worktree with uncommitted or untracked changes: ${verified.path}`);
+	const branchAdvanced = verified.branchCreated && worktree.initialCommit !== undefined
+		&& gitOutput(verified.repoRoot, ["rev-parse", "--verify", `refs/heads/${verified.branch}^{commit}`]).toLowerCase() !== worktree.initialCommit;
 	gitOutput(verified.repoRoot, ["worktree", "remove", verified.path]);
-	if (verified.branchCreated) gitOutput(verified.repoRoot, ["branch", "-D", verified.branch]);
+	if (verified.branchCreated && !branchAdvanced) {
+		if (worktree.initialCommit) {
+			// Delete only if the branch still points at the commit we created. update-ref's
+			// expected-old check closes the race between verification and deletion.
+			gitOutput(verified.repoRoot, ["update-ref", "-d", `refs/heads/${verified.branch}`, worktree.initialCommit]);
+		} else {
+			gitOutput(verified.repoRoot, ["branch", "-D", verified.branch]);
+		}
+	}
 }
 
 /** Create or reuse a local branch in a managed worktree directory. */
@@ -379,15 +420,16 @@ export async function createWebWorktree(
 	gitOutput(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 	const repoRoot = primaryRepositoryRoot(cwd);
 	const path = join(repoRoot, ".pi", "worktrees", name);
+	let pathExists = false;
 	try {
 		lstatSync(path);
-		throw new Error(`Worktree path already exists: ${path}`);
+		pathExists = true;
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("Worktree path already exists:")) throw error;
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 			throw new Error(`Could not inspect worktree path ${path}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	if (pathExists) throw new Error(`Worktree path already exists: ${path}`);
 
 	const explicitStart = options.startPoint === undefined ? undefined : resolveStartPoint(repoRoot, options.startPoint);
 	const branchExists = localBranchExists(repoRoot, branch);
@@ -407,6 +449,7 @@ export async function createWebWorktree(
 		branch,
 		branchCreated: !branchExists,
 		startPoint,
+		initialCommit: branchStart,
 		upstream: !branchExists ? explicitStart?.upstream : undefined,
 		setupRan: false,
 	};
@@ -457,7 +500,8 @@ export async function createWebWorktree(
 		const actualHead = gitOutput(path, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase();
 		if (actualHead !== branchStart) throw new Error(`Created worktree HEAD ${actualHead} does not match requested start ${branchStart}`);
 		if (explicitStart?.upstream && !branchExists) {
-			const actualUpstream = gitOutput(path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+			const upstreamResult = spawnGit(["-C", path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+			const actualUpstream = upstreamResult.status === 0 ? upstreamResult.stdout?.trim() ?? "" : "";
 			if (actualUpstream !== explicitStart.upstream) {
 				throw new Error(`Created branch upstream ${actualUpstream || "none"} does not match ${explicitStart.upstream}`);
 			}
@@ -484,8 +528,8 @@ export async function createWebWorktree(
 		try {
 			let executable = false;
 			try {
-				accessSync(setup, constants.X_OK);
-				executable = true;
+				if (process.platform !== "win32") accessSync(setup, constants.X_OK);
+				executable = process.platform !== "win32";
 			} catch {
 				// A mode bit alone is insufficient when this process lacks that group.
 			}

@@ -1,3 +1,13 @@
+function hasWindowsPathPrefix(value: string): boolean {
+	return /^[A-Za-z]:/.test(value)
+		|| value.startsWith("\\")
+		|| value.includes(" ")
+		|| value === "."
+		|| value.startsWith(".\\")
+		|| value === ".."
+		|| value.startsWith("..\\");
+}
+
 function parseWords(input: string): string[] {
 	const words: string[] = [];
 	let current = "";
@@ -7,7 +17,10 @@ function parseWords(input: string): string[] {
 	for (let index = 0; index < source.length; index += 1) {
 		const char = source[index]!;
 		if (escaped) {
-			if (quote === '"' && char === "u" && /^[0-9a-fA-F]{4}$/.test(source.slice(index + 1, index + 5))) {
+			const startsRootRelativeWindowsPath = quote === '"' && !current && /^[A-Za-z.]$/.test(char);
+			if (quote === '"' && (hasWindowsPathPrefix(current) || startsRootRelativeWindowsPath) && char !== "\\" && char !== '"') {
+				current += `\\${char}`;
+			} else if (quote === '"' && char === "u" && /^[0-9a-fA-F]{4}$/.test(source.slice(index + 1, index + 5))) {
 				current += String.fromCharCode(Number.parseInt(source.slice(index + 1, index + 5), 16));
 				index += 4;
 			} else {
@@ -15,7 +28,10 @@ function parseWords(input: string): string[] {
 				current += jsonEscape ?? char;
 			}
 			escaped = false;
-		} else if (char === "\\" && quote !== "'") {
+		} else if (char === "\\" && quote === '"' && !current && source[index + 1] === "\\" && source[index + 2] !== "\\") {
+			current = "\\\\";
+			index += 1;
+		} else if (char === "\\" && (quote === '"' || (!quote && /\s/.test(source[index + 1] ?? "")))) {
 			escaped = true;
 		} else if (quote) {
 			if (char === quote) quote = undefined;

@@ -309,14 +309,14 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-token-details { display: grid; min-width: 11rem; gap: 0.3rem; }
 .semantic-token-details > span { display: flex; justify-content: space-between; gap: 1rem; color: rgb(161 161 170); }
 .semantic-token-details strong { color: rgb(228 228 231); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
-.semantic-context-progress { display: grid; width: 1.75rem; height: 2.25rem; flex: none; cursor: default; place-items: center; border-radius: 0.5rem; color: rgb(56 189 248); }
+.semantic-context-progress { display: grid; width: 1.75rem; height: 2.25rem; flex: none; cursor: default; place-items: center; border-radius: 0.5rem; color: rgb(var(--status-idle)); }
 .semantic-context-progress:hover { background: rgb(39 39 42); }
 .semantic-context-progress svg { width: 1.15rem; height: 1.15rem; transform: rotate(-90deg); overflow: visible; }
 .semantic-context-progress circle { fill: none; stroke-width: 2.25; }
 .semantic-context-progress-track { stroke: rgb(63 63 70); }
-.semantic-context-progress-value { stroke: currentColor; stroke-linecap: round; }
-.semantic-context-progress.is-warning { color: rgb(250 204 21); }
-.semantic-context-progress.is-critical { color: rgb(248 113 113); }
+.semantic-context-progress-value { stroke: currentcolor; stroke-linecap: round; }
+.semantic-context-progress.is-warning { color: rgb(var(--status-transition)); }
+.semantic-context-progress.is-critical { color: rgb(var(--status-error)); }
 .semantic-context-progress.is-compacting { color: rgb(var(--status-working)); }
 .semantic-context-progress.is-compacting svg { animation: spin 1s linear infinite; }
 .semantic-context-progress-details { display: grid; min-width: 10rem; gap: 0.2rem; }

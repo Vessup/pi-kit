@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { abortSessionAndSubagents, applyTailscaleSettingTransaction, isScopedModelAllowed } from "../extensions/web-sessions.ts";
+import { abortSessionAndSubagents, applyTailscaleSettingTransaction, isScopedModelAllowed, splitWebWorktreeCommandArgs } from "../extensions/web-sessions.ts";
 
 test("web Stop aborts the main session and waits for subagent propagation", async () => {
 	let releaseSubagents!: () => void;
@@ -26,6 +26,13 @@ test("web Stop still aborts when an optional subagent listener fails", async () 
 		emit: () => { throw new Error("listener failed"); },
 	});
 	expect(mainAborted).toBe(true);
+});
+
+test("web worktree forwarding preserves spaces in quoted arguments", () => {
+	expect(splitWebWorktreeCommandArgs('request-token --existing "/tmp/my  repo"')).toEqual({
+		token: "request-token",
+		worktreeArgs: '--existing "/tmp/my  repo"',
+	});
 });
 
 test("web model selection honors the session model scope", () => {

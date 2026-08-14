@@ -32,6 +32,7 @@ test("web worktrees are created under the primary repository .pi directory", asy
 
 	const result = await createWebWorktree(repository, "feature-one");
 	expect(await realpath(result.path)).toBe(await realpath(join(repository, ".pi", "worktrees", "feature-one")));
+	await expect(createWebWorktree(repository, "feature-one")).rejects.toThrow(`Worktree path already exists: ${result.path}`);
 	expect(result).toMatchObject({ name: "feature-one", branch: "feature-one", branchCreated: true });
 	expect((await Bun.$`git -C ${result.path} branch --show-current`.text()).trim()).toBe("feature-one");
 
@@ -270,6 +271,24 @@ test("worktree setup is terminated after its bounded timeout", async () => {
 	expect(Date.now() - startedAt).toBeLessThan(2_000);
 });
 
+test("worktree setup force-kills descendants after a timed-out leader exits", async () => {
+	if (process.platform === "win32") return;
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-timeout-group-"));
+	const script = join(directory, "hang-with-child.sh");
+	const childPidFile = join(directory, "child.pid");
+	await writeFile(script, "#!/bin/sh\nsh -c 'trap \"\" TERM; while :; do sleep 1; done' &\necho $! > \"$1\"\ntrap 'exit 0' TERM\nwait\n");
+	await chmod(script, 0o755);
+	await expect(runWorktreeSetup(script, [childPidFile], directory, 250)).rejects.toThrow("timed out after 250ms");
+	const childPid = Number((await readFile(childPidFile, "utf8")).trim());
+	let alive = true;
+	for (let attempt = 0; attempt < 30 && alive; attempt += 1) {
+		await Bun.sleep(100);
+		try { process.kill(childPid, 0); } catch { alive = false; }
+	}
+	if (alive) process.kill(childPid, "SIGKILL");
+	expect(alive).toBe(false);
+});
+
 test("managed worktree metadata is parsed and cleanup removes its checkout and branch", async () => {
 	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-cleanup-"));
 	const repository = join(directory, "repo");
@@ -309,7 +328,7 @@ test("worktree cleanup waits until the final saved session is deleted", async ()
 	const other = join(sessions, "nested", "other.jsonl");
 	await mkdir(join(sessions, "nested"), { recursive: true });
 	await writeFile(current, `${JSON.stringify({ type: "session", cwd: worktree })}\n`);
-	await writeFile(other, `${JSON.stringify({ type: "session", cwd: worktree })}\n${"large transcript line\n".repeat(250_000)}`);
+	await writeFile(other, `${JSON.stringify({ type: "session", cwd: join(worktree, "packages", "app") })}\n${"large transcript line\n".repeat(250_000)}`);
 	expect(hasOtherSessionInWorktree(sessions, current, worktree)).toBe(true);
 	await rm(other);
 	expect(hasOtherSessionInWorktree(sessions, current, worktree)).toBe(false);
@@ -349,6 +368,26 @@ test("rollback removes operation-owned resources after the checkout branch chang
 	expect((await Bun.$`git -C ${repository} branch --list user-created`.text()).trim()).toBe("user-created");
 });
 
+test("rollback preserves commits made after a managed branch was created", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-rollback-advanced-"));
+	const repository = join(directory, "repo");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "test\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+
+	const result = await createWebWorktree(repository, "rollback-advanced");
+	await writeFile(join(result.path, "committed.txt"), "preserve me\n");
+	await Bun.$`git -C ${result.path} add committed.txt`;
+	await Bun.$`git -C ${result.path} commit -qm advanced`;
+	const advancedHead = (await Bun.$`git -C ${result.path} rev-parse HEAD`.text()).trim();
+	rollbackWebWorktree(result);
+	await expect(stat(result.path)).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} rev-parse rollback-advanced`.text()).trim()).toBe(advancedHead);
+});
+
 test("rollback preserves a changed checkout with uncommitted files", async () => {
 	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-rollback-dirty-"));
 	const repository = join(directory, "repo");
@@ -372,6 +411,8 @@ test("worktree handling requires Git 2.36 or newer", () => {
 	expect(() => validateGitVersion("git version unknown")).toThrow("Could not determine Git version");
 	expect(() => validateGitVersion("git version 2.36.0")).not.toThrow();
 	expect(() => validateGitVersion("git version 3.0.0")).not.toThrow();
+	expect(() => validateGitVersion("git version 2.39.5 (Apple Git-154)")).not.toThrow();
+	expect(() => validateGitVersion("git version 2.43.0.windows.1")).not.toThrow();
 });
 
 test("web worktree names reject traversal and nested paths", () => {
@@ -383,4 +424,5 @@ test("web worktree names reject traversal and nested paths", () => {
 	for (const value of ["bad..branch", "refs/heads/topic", "-option", "bad branch"]) {
 		expect(() => validateLocalBranchName(value)).toThrow();
 	}
+	expect(() => validateLocalBranchName("topic\0injected")).toThrow("NUL byte");
 });

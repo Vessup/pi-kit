@@ -15,40 +15,36 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 const FORK_COMMAND_TIMEOUT_MS = 35_000;
 const WORKTREE_COMMAND_TIMEOUT_MS = 11 * 60_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 11 * 60_000;
-let commandHelloCapability: Promise<boolean> | undefined;
-let worktreeRefsCapability: Promise<boolean> | undefined;
-
-export function commandHelloType(health: unknown): "client.hello" | "client.command_hello" {
+function healthCapability(health: unknown, key: string): boolean {
   const capabilities = health && typeof health === "object" && "capabilities" in health
     ? (health as { capabilities?: unknown }).capabilities
     : undefined;
-  return capabilities && typeof capabilities === "object" && "commandHello" in capabilities && (capabilities as { commandHello?: unknown }).commandHello === true
-    ? "client.command_hello"
-    : "client.hello";
+  return Boolean(capabilities && typeof capabilities === "object" && (capabilities as Record<string, unknown>)[key] === true);
+}
+
+export function commandHelloType(health: unknown): "client.hello" | "client.command_hello" {
+  return healthCapability(health, "commandHello") ? "client.command_hello" : "client.hello";
 }
 
 export function healthSupportsWorktreeRefs(health: unknown): boolean {
-  const capabilities = health && typeof health === "object" && "capabilities" in health
-    ? (health as { capabilities?: unknown }).capabilities
-    : undefined;
-  return Boolean(capabilities && typeof capabilities === "object" && "worktreeRefs" in capabilities && (capabilities as { worktreeRefs?: unknown }).worktreeRefs === true);
+  return healthCapability(health, "worktreeRefs");
+}
+
+async function supportsHealthCapability(key: string): Promise<boolean> {
+  try {
+    const response = await fetch("/api/health", { cache: "no-store" });
+    return response.ok && healthCapability(await response.json(), key);
+  } catch {
+    return false;
+  }
 }
 
 async function supportsWorktreeRefs(): Promise<boolean> {
-  worktreeRefsCapability ??= fetch("/api/health", { cache: "no-store" })
-    .then(async (response) => response.ok && healthSupportsWorktreeRefs(await response.json()))
-    .catch(() => false);
-  return await worktreeRefsCapability;
+  return supportsHealthCapability("worktreeRefs");
 }
 
 async function supportsCommandHello(): Promise<boolean> {
-  commandHelloCapability ??= fetch("/api/health", { cache: "no-store" })
-    .then(async (response) => {
-      if (!response.ok) return false;
-      return commandHelloType(await response.json()) === "client.command_hello";
-    })
-    .catch(() => false);
-  return await commandHelloCapability;
+  return supportsHealthCapability("commandHello");
 }
 
 export function sessionCommandTimeout(command: AgentCommand | RpcSessionCommand): number {
@@ -162,7 +158,14 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
   // Fall back to client.hello when an older daemon is still serving a freshly built
   // client bundle; this protocol skew previously broke Stop and every queue action.
   const socket = new SessionSocket(await supportsCommandHello() ? "client.command_hello" : "client.hello");
-  await socket.connect();
+  let earlyClose: CloseEvent | undefined;
+  const unsubscribeEarlyClose = socket.onClose((event) => { earlyClose = event; });
+  try {
+    await socket.connect();
+  } catch (error) {
+    unsubscribeEarlyClose();
+    throw error;
+  }
   return new Promise<unknown>((resolve, reject) => {
     const requestId = crypto.randomUUID();
     let settled = false;
@@ -178,6 +181,9 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
       socket.close();
       callback();
     };
+    const rejectClosed = (event: CloseEvent) => {
+      finish(() => reject(new Error(`Command socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`)));
+    };
     unsubscribeMessage = socket.onMessage((message) => {
       if (!message || typeof message !== "object" || !("requestId" in message) || message.requestId !== requestId) return;
       const response = message as unknown as { success?: boolean; error?: string; data?: unknown };
@@ -186,9 +192,12 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
         else resolve(response.data);
       });
     });
-    unsubscribeClose = socket.onClose((event) => {
-      finish(() => reject(new Error(`Command socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`)));
-    });
+    unsubscribeClose = socket.onClose(rejectClosed);
+    unsubscribeEarlyClose();
+    if (earlyClose) {
+      rejectClosed(earlyClose);
+      return;
+    }
     timeout = window.setTimeout(
       () => finish(() => reject(new Error(`Command timed out after ${sessionCommandTimeout(command)}ms`))),
       sessionCommandTimeout(command),
