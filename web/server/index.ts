@@ -2210,7 +2210,7 @@ async function handleApi(request: Request): Promise<Response> {
 		if (Boolean(requestedCwd) === Boolean(worktreeName)) return badRequest("Specify either cwd or worktreeName, but not both");
 
 		let cwd: string;
-		let worktree: ReturnType<typeof createWebWorktree> | undefined;
+		let worktree: Awaited<ReturnType<typeof createWebWorktree>> | undefined;
 		if (worktreeName) {
 			const baseSessionId = typeof body.worktreeBaseSessionId === "string" ? body.worktreeBaseSessionId.trim() : "";
 			const baseSession = baseSessionId ? sessions.get(baseSessionId) : undefined;
@@ -2218,7 +2218,7 @@ async function handleApi(request: Request): Promise<Response> {
 			if (!resolveSessionProject(baseSession.cwd).id.startsWith("git:")) return badRequest("Worktree base session is not in a Git repository");
 			try {
 				if (!statSync(baseSession.cwd).isDirectory()) return badRequest(`base session cwd is not a directory: ${baseSession.cwd}`);
-				worktree = createWebWorktree(baseSession.cwd, worktreeName);
+				worktree = await createWebWorktree(baseSession.cwd, worktreeName);
 				cwd = worktree.path;
 			} catch (error) {
 				return badRequest(error instanceof Error ? error.message : String(error));

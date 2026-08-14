@@ -22,6 +22,7 @@
 			"./extensions/session-footer.ts",
 			"./extensions/pr-footer.ts",
 			"./extensions/subagents.ts",
+			"./extensions/worktree.ts",
 			"./extensions/web-sessions.ts",
 			"./extensions/delete-session.ts"
 		],

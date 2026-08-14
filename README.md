@@ -31,6 +31,12 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 
 The subagent extension independently contributes its token use and status to `extensions/session-footer.ts`, the package's generic composable footer. When subagents are involved, a third footer line shows their aggregate status. With an empty editor, press Option+Down (Alt+Down) to select that line and Enter to open the manager; `/subagents` opens it directly. The manager shows individual status and transcripts and supports model, effort, messaging, and termination controls. Run `/subagents-cleanup` to stop and remove every retained subagent.
 
+## Worktrees
+
+Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>` from the current checkout's `HEAD`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the new worktree. Use `/worktree <name> --repo <path>` to select another repository. To enter an already registered worktree in the same primary repository without modifying its checkout or branch, run `/worktree --existing <worktree-path>`. The original session is preserved as the replacement's parent and the switch completes only after the replacement CWD and branch or detached HEAD are verified.
+
+The LLM-callable `worktree` tool provides the same create/existing flows. It queues an internal correlated `/worktree` follow-up, ends the old agent run, verifies the replacement session, and automatically resumes a supplied continuation prompt in the new session. Agents are instructed to use this tool instead of invoking `git worktree` directly or asking the user to type the slash command.
+
 ## Web sessions
 
 `extensions/web-sessions.ts` connects every running Pi session to a local Bun server. The first Pi process starts the server on `127.0.0.1:31415`; later processes discover it through `~/.pi/agent/web/server.json` and attach their own live event streams.
@@ -109,5 +115,5 @@ bun install --frozen-lockfile
 bun run check
 bun test
 bun run web:build
-pi -e ./extensions/session-footer.ts -e ./extensions/pr-footer.ts -e ./extensions/subagents.ts -e ./extensions/web-sessions.ts
+pi -e ./extensions/session-footer.ts -e ./extensions/pr-footer.ts -e ./extensions/subagents.ts -e ./extensions/worktree.ts -e ./extensions/web-sessions.ts
 ```
