@@ -4,10 +4,10 @@ function hasUsage(value: WebUsage | undefined): boolean {
 	return Boolean(value && (value.input || value.output || value.cacheRead || value.cacheWrite || value.totalTokens));
 }
 
-function preserveSubagentTelemetry(previous: WebSession["subagents"], next: WebSession["subagents"]): WebSession["subagents"] {
-	if (next === undefined) return previous;
+function preserveSubagentTelemetry(previous: WebSession["subagents"], next: WebSession): WebSession["subagents"] {
+	if (next.subagents === undefined) return next.status === "offline" || next.source === "saved" ? [] : previous;
 	const priorById = new Map((previous ?? []).map((agent) => [agent.id, agent]));
-	return next.map((agent) => {
+	return next.subagents.map((agent) => {
 		const prior = priorById.get(agent.id);
 		return {
 			...agent,
@@ -26,7 +26,7 @@ export function preserveSessionTelemetry(previous: WebSession | undefined, next:
 	if (!previous || previous.id !== next.id) return next;
 	return {
 		...next,
-		subagents: preserveSubagentTelemetry(previous.subagents, next.subagents),
+		subagents: preserveSubagentTelemetry(previous.subagents, next),
 		subagentUsage: next.subagentUsage ?? previous.subagentUsage,
 		usage: hasUsage(next.usage) || !hasUsage(previous.usage) ? next.usage : previous.usage,
 		contextUsage: next.contextUsage ?? previous.contextUsage,

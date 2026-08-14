@@ -13,6 +13,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager,
+	type ModelRegistry,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -36,6 +37,8 @@ import {
 	type FooterUsage,
 } from "./footer-events.js";
 import {
+	parseSubagentAbortRequest,
+	SUBAGENT_ABORT_EVENT,
 	SUBAGENT_STATUS_EVENT,
 	type SubagentStatusEvent,
 	type SubagentWebSnapshot,
@@ -371,6 +374,18 @@ export function countsAgainstSubagentLimit(agent: { status: SubagentStatus; sess
 	return agent.status === "creating" || agent.session !== undefined;
 }
 
+export function isTerminalSubagentStatus(status: SubagentStatus): boolean {
+	return status === "completed" || status === "failed" || status === "terminated";
+}
+
+export function shouldArchiveTerminalSubagent(agent: {
+	status: SubagentStatus;
+	lastReadActivity: number;
+	activity: readonly unknown[];
+}): boolean {
+	return isTerminalSubagentStatus(agent.status) && agent.lastReadActivity < agent.activity.length;
+}
+
 export async function abortRunningSubagentSessions<T extends { status: SubagentStatus; session?: { abort(): Promise<unknown> } }>(
 	agents: readonly T[],
 ): Promise<Array<{ agent: T; error?: Error }>> {
@@ -392,6 +407,25 @@ export function filterModelsToScope<T extends { provider: string; id: string }>(
 	if (scoped.length === 0) return available;
 	const allowed = new Set(scoped.map(({ model }) => `${model.provider}/${model.id}`));
 	return available.filter((model) => allowed.has(`${model.provider}/${model.id}`));
+}
+
+export function inheritedSubagentModel<T extends { provider: string; id: string }>(
+	current: T | undefined,
+	runtimeModel: T | undefined,
+): T | undefined {
+	return runtimeModel ?? current;
+}
+
+export function subagentModelRuntime(modelRegistry: ModelRegistry): ModelRuntime {
+	// ModelRegistry is the extension-facing compatibility facade around the
+	// canonical runtime. Sharing that runtime preserves runtime-only keys and
+	// provider-resolved headers/env/base URLs, while leaving stored OAuth in the
+	// credential store so both host and child continue to refresh it normally.
+	const runtime: unknown = Reflect.get(modelRegistry, "runtime");
+	if (!(runtime instanceof ModelRuntime)) {
+		throw new Error("The host model registry does not expose its canonical runtime");
+	}
+	return runtime;
 }
 
 function statusIcon(status: SubagentStatus): string {
@@ -432,8 +466,36 @@ function truncateToolOutput(text: string): string {
 	return `${output}\n\n[Output truncated: ${bytes - Buffer.byteLength(output, "utf8")} bytes omitted. Re-read a specific subagent or use the transcript modal for details.]`;
 }
 
-function modelName(model: AgentModel | undefined): string {
+function modelName(model: { provider: string; id: string } | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "no-model";
+}
+
+export function subagentModelGuidance(
+	current: { provider: string; id: string } | undefined,
+	available: readonly { provider: string; id: string }[],
+): string {
+	const choices = [...new Set(available.map(modelName))];
+	const inherited = modelName(current);
+	return [
+		"Subagent model selection for this session:",
+		`- subagent_create inherits ${inherited} when model is omitted.`,
+		"- Only pass model when intentionally overriding the inherited model.",
+		`- Exact available provider/model IDs: ${choices.length > 0 ? choices.join(", ") : "none"}.`,
+		"- Never shorten, generalize, or invent a model ID.",
+	].join("\n");
+}
+
+function unavailableModelMessage(
+	requested: string,
+	available: readonly { provider: string; id: string }[],
+	current: { provider: string; id: string } | undefined,
+	withinScope: boolean,
+): string {
+	const choices = [...new Set(available.map(modelName))];
+	const scope = withinScope ? " within the session scope" : "";
+	const allowed = choices.length > 0 ? choices.join(", ") : "none";
+	const inherit = current ? ` Omit model to inherit ${modelName(current)}.` : "";
+	return `Model is unavailable${scope}: ${requested}. Exact available models: ${allowed}.${inherit}`;
 }
 
 function asFooterUsage(usage: Usage): FooterUsage {
@@ -442,9 +504,9 @@ function asFooterUsage(usage: Usage): FooterUsage {
 
 class SubagentManager {
 	readonly agents = new Map<string, ManagedSubagent>();
+	private archivedAgents = new Map<string, ManagedSubagent>();
 	private nextId = 1;
 	private currentContext?: ExtensionContext;
-	private modelRuntimePromise?: Promise<ModelRuntime>;
 	private totalUsage = zeroUsage();
 	private accountedUsage = zeroUsage();
 	private usageDirty = false;
@@ -453,6 +515,7 @@ class SubagentManager {
 	private webStatusPublishTimer?: ReturnType<typeof setTimeout>;
 	private webTranscriptCursors = new Map<string, TranscriptItem | undefined>();
 	private webStreamingSnapshots = new Map<string, string>();
+	private abortAllInFlight?: Promise<number>;
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
@@ -491,6 +554,7 @@ class SubagentManager {
 		this.lastWebStatusPublishedAt = 0;
 		this.webTranscriptCursors.clear();
 		this.webStreamingSnapshots.clear();
+		this.archivedAgents.clear();
 		const ctx = this.currentContext;
 		if (ctx) {
 			const sessionId = ctx.sessionManager.getSessionId();
@@ -525,7 +589,7 @@ class SubagentManager {
 	}
 
 	getAgent(id: string): ManagedSubagent {
-		const agent = this.agents.get(id);
+		const agent = this.agents.get(id) ?? this.archivedAgents.get(id);
 		if (!agent) throw new Error(`Unknown subagent: ${id}`);
 		return agent;
 	}
@@ -612,9 +676,9 @@ class SubagentManager {
 	private makeId(requestedName?: string): string {
 		const base = requestedName ? sanitizeName(requestedName) : `agent-${this.nextId++}`;
 		if (!base) return this.makeId();
-		if (!this.agents.has(base)) return base;
+		if (!this.agents.has(base) && !this.archivedAgents.has(base)) return base;
 		let suffix = 2;
-		while (this.agents.has(`${base}-${suffix}`)) suffix++;
+		while (this.agents.has(`${base}-${suffix}`) || this.archivedAgents.has(`${base}-${suffix}`)) suffix++;
 		return `${base}-${suffix}`;
 	}
 
@@ -622,49 +686,36 @@ class SubagentManager {
 		return this.list().filter(countsAgainstSubagentLimit).length;
 	}
 
-	private async getModelRuntime(ctx: ExtensionContext): Promise<ModelRuntime> {
-		if (!this.modelRuntimePromise) {
-			this.modelRuntimePromise = (async () => {
-				const runtime = await ModelRuntime.create();
-				for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-					const native = ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-					if (native) {
-						runtime.registerNativeProvider(native);
-						continue;
-					}
-					const config = ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-					if (config) runtime.registerProvider(providerId, config);
-				}
-				return runtime;
-			})();
-		}
-		return this.modelRuntimePromise;
+	private getModelRuntime(ctx: ExtensionContext): ModelRuntime {
+		return subagentModelRuntime(ctx.modelRegistry);
 	}
 
 	async availableModels(ctx: ExtensionContext): Promise<readonly AgentModel[]> {
-		const available = await (await this.getModelRuntime(ctx)).getAvailable();
+		const available = await this.getModelRuntime(ctx).getAvailable();
 		return filterModelsToScope(available, ctx.scopedModels);
 	}
 
-	private async resolveModel(ctx: ExtensionContext, requested?: string): Promise<AgentModel | undefined> {
-		const available = await this.availableModels(ctx);
+	private async resolveModel(ctx: ExtensionContext, requested?: string, runtime?: ModelRuntime): Promise<AgentModel | undefined> {
 		if (!requested) {
 			if (!ctx.model) return undefined;
-			const current = available.find(
-				(model) => model.provider === ctx.model?.provider && model.id === ctx.model.id,
+			const inheritedRuntime = runtime ?? this.getModelRuntime(ctx);
+			// Omitted model means exact host-session inheritance. Session model scope
+			// applies only to explicit overrides and may intentionally exclude the
+			// separately selected --model value.
+			return inheritedSubagentModel(
+				ctx.model as AgentModel,
+				inheritedRuntime.getModel(ctx.model.provider, ctx.model.id),
 			);
-			if (current) return current;
-			throw new Error(`The current model is unavailable to subagents: ${modelName(ctx.model)}`);
 		}
 
+		const available = await this.availableModels(ctx);
 		const slash = requested.indexOf("/");
 		if (slash > 0) {
 			const provider = requested.slice(0, slash);
 			const id = requested.slice(slash + 1);
 			const model = available.find((item) => item.provider === provider && item.id === id);
 			if (model) return model;
-			const qualifier = ctx.scopedModels.length > 0 ? "outside the session model scope or unavailable" : "unavailable";
-			throw new Error(`Model is ${qualifier}: ${requested}`);
+			throw new Error(unavailableModelMessage(requested, available, ctx.model, ctx.scopedModels.length > 0));
 		}
 
 		const matches = available.filter((item) => item.id === requested || item.name === requested);
@@ -672,7 +723,7 @@ class SubagentManager {
 		if (matches.length > 1) {
 			throw new Error(`Model name is ambiguous; use provider/model: ${matches.map(modelName).join(", ")}`);
 		}
-		throw new Error(`Model is unavailable${ctx.scopedModels.length > 0 ? " within the session scope" : ""}: ${requested}`);
+		throw new Error(unavailableModelMessage(requested, available, ctx.model, ctx.scopedModels.length > 0));
 	}
 
 	private scopedEffort(ctx: ExtensionContext, model: AgentModel | undefined): SubagentEffort | undefined {
@@ -864,7 +915,7 @@ class SubagentManager {
 
 		try {
 			const runtime = await this.getModelRuntime(ctx);
-			const selectedModel = await this.resolveModel(ctx, options.model);
+			const selectedModel = await this.resolveModel(ctx, options.model, runtime);
 			const selectedEffort = options.effort ?? this.scopedEffort(ctx, selectedModel) ?? effort;
 			agent.effort = selectedEffort;
 			const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir());
@@ -966,16 +1017,25 @@ class SubagentManager {
 	}
 
 	async abortAll(): Promise<number> {
-		const results = await abortRunningSubagentSessions(this.list());
-		for (const { agent, error } of results) {
-			if (error) {
-				agent.error = error.message;
-				this.activity(agent, `abort failed: ${agent.error}`);
-			} else {
-				this.activity(agent, "aborted with the main agent");
+		if (this.abortAllInFlight) return await this.abortAllInFlight;
+		const operation = (async () => {
+			const results = await abortRunningSubagentSessions(this.list());
+			for (const { agent, error } of results) {
+				if (error) {
+					agent.error = error.message;
+					this.activity(agent, `abort failed: ${agent.error}`);
+				} else {
+					this.activity(agent, "aborted with the main agent");
+				}
 			}
+			return results.length;
+		})();
+		this.abortAllInFlight = operation;
+		try {
+			return await operation;
+		} finally {
+			if (this.abortAllInFlight === operation) this.abortAllInFlight = undefined;
 		}
-		return results.length;
 	}
 
 	async terminate(id: string, remove = false): Promise<ManagedSubagent> {
@@ -1006,6 +1066,7 @@ class SubagentManager {
 		}
 		if (remove) {
 			this.agents.delete(id);
+			this.archivedAgents.delete(id);
 			this.webTranscriptCursors.delete(id);
 			this.webStreamingSnapshots.delete(id);
 			this.footerSelected = false;
@@ -1016,6 +1077,21 @@ class SubagentManager {
 
 	async terminateAll(remove = false): Promise<void> {
 		await Promise.all(this.list().map(async (agent) => this.terminate(agent.id, remove)));
+		if (remove) this.archivedAgents.clear();
+	}
+
+	async clearTerminalAgents(): Promise<number> {
+		const terminalAgents = this.list().filter((agent) => isTerminalSubagentStatus(agent.status));
+		if (terminalAgents.length === 0) return 0;
+
+		await Promise.all(terminalAgents.map(async (agent) => {
+			const preserveUnreadOutput = shouldArchiveTerminalSubagent(agent);
+			await this.terminate(agent.id, true);
+			if (preserveUnreadOutput) this.archivedAgents.set(agent.id, agent);
+		}));
+		if (this.webStatusPublishTimer) clearTimeout(this.webStatusPublishTimer);
+		this.publishWebStatus();
+		return terminalAgents.length;
 	}
 
 	private hasUnread(agent: ManagedSubagent): boolean {
@@ -1079,6 +1155,7 @@ class SubagentManager {
 				if (latest) output += `\n\nLatest assistant output:\n${latest}`;
 			}
 			sections.push(output);
+			if (this.archivedAgents.get(agent.id) === agent) this.archivedAgents.delete(agent.id);
 		}
 		return truncateToolOutput(sections.join("\n\n---\n\n"));
 	}
@@ -1593,7 +1670,7 @@ const EffortSchema = stringEnum(THINKING_LEVELS, {
 const CreateParams = Type.Object({
 	prompt: Type.String({ description: "Complete task prompt for the new isolated subagent" }),
 	name: Type.Optional(Type.String({ description: "Short stable name used to address the subagent" })),
-	model: Type.Optional(Type.String({ description: "Model as provider/model-id, or an unambiguous model id" })),
+	model: Type.Optional(Type.String({ description: "Exact provider/model-id or exact unambiguous model id. Omit to inherit the current model; never use a shortened family alias." })),
 	effort: Type.Optional(EffortSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory, relative to the main session unless absolute" })),
 });
@@ -1620,7 +1697,7 @@ const SendParams = Type.Object({
 
 const ConfigureParams = Type.Object({
 	id: Type.String({ description: "Subagent id" }),
-	model: Type.Optional(Type.String({ description: "New model as provider/model-id, or an unambiguous model id" })),
+	model: Type.Optional(Type.String({ description: "Exact new provider/model-id or exact unambiguous model id. Omit to retain the current model; never use a shortened family alias." })),
 	effort: Type.Optional(EffortSchema),
 });
 
@@ -1635,6 +1712,17 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let managerOpen = false;
 	let mainAbortSignal: AbortSignal | undefined;
 	let onMainAbort: (() => void) | undefined;
+	let explicitAbortInProgress = false;
+
+	pi.events.on(SUBAGENT_ABORT_EVENT, (value) => {
+		const request = parseSubagentAbortRequest(value);
+		if (!request) return;
+		explicitAbortInProgress = true;
+		const operation = manager.abortAll().finally(() => {
+			explicitAbortInProgress = false;
+		});
+		request.waitUntil(operation);
+	});
 
 	const openManager = (ctx: ExtensionContext) => {
 		if (managerOpen) return;
@@ -1645,12 +1733,21 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	};
 
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!pi.getActiveTools().includes("subagent_create")) return;
+		// Prompt construction must not trigger provider authentication or OAuth
+		// refreshes. The host registry already maintains an authoritative snapshot.
+		const available = filterModelsToScope(ctx.modelRegistry.getAvailable(), ctx.scopedModels);
+		return { systemPrompt: `${event.systemPrompt}\n\n${subagentModelGuidance(ctx.model, available)}` };
+	});
+
 	pi.registerTool({
 		name: "subagent_create",
 		label: "Create subagent",
 		description: `Create a background subagent with an isolated context, model, and reasoning effort. Returns immediately after startup. Up to ${MAX_SUBAGENTS} live subagent sessions are allowed.`,
 		promptSnippet: "Create a background subagent with a chosen prompt, model, and effort",
 		promptGuidelines: [
+			"When calling subagent_create, omit model to inherit the current model unless deliberately choosing one of the exact session-available provider/model IDs listed in the system prompt; never shorten or invent a model ID.",
 			"After subagent_create returns, use subagent_read with its default wait roughly every 15–30 seconds while work continues; briefly tell the user about meaningful progress between polls without narrating every event.",
 			"Wait for subagent_create to return before calling another subagent management tool for that id.",
 			"Use subagent_send with urgent only when the current approach must change immediately; use normal for work that can wait until the current run finishes.",
@@ -1794,11 +1891,18 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	});
 
+	pi.on("input", async () => {
+		await manager.clearTerminalAgents();
+		return { action: "continue" };
+	});
+
 	pi.on("agent_start", (_event, ctx) => {
 		if (!ctx.signal) return;
 		if (mainAbortSignal && onMainAbort) mainAbortSignal.removeEventListener("abort", onMainAbort);
 		mainAbortSignal = ctx.signal;
-		onMainAbort = () => { void manager.abortAll(); };
+		onMainAbort = () => {
+			if (!explicitAbortInProgress) void manager.abortAll();
+		};
 		mainAbortSignal.addEventListener("abort", onMainAbort, { once: true });
 	});
 

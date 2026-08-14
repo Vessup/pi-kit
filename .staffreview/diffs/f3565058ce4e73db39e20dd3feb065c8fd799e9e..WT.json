@@ -1025,8 +1025,864 @@
       "body": "Changed readQueueStore to return an empty map only for ENOENT. Other filesystem errors now propagate, malformed JSON throws, and invalid queue schema/items fail closed, aborting startup before persistence can overwrite the recovery copy. Added regression coverage for a missing store, truncated JSON preservation, and malformed queued entries; the full test suite and typecheck pass.",
       "author": "GPT-5.6",
       "createdAt": "2026-08-13T23:01:38.194Z"
+    },
+    {
+      "id": "50f39dd1-e7e6-4f54-87d1-d5a9f4a1f431",
+      "threadId": "50f39dd1-e7e6-4f54-87d1-d5a9f4a1f431",
+      "file": "extensions/web-sessions.ts",
+      "line": 814,
+      "side": "new",
+      "body": "The server publishes or replaces the Tailscale route before this settings write, but a lock, disk, or rename failure leaves the new route active while persisted settings still say it is disabled or use the old service identity. The command reports failure, and subsequent startups may leave the unexpected endpoint reachable indefinitely. Make route configuration and settings persistence one transaction, rolling the route back if persistence fails (`extensions/web-sessions.ts:814`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T01:49:47.145Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Tailscale route changes now roll back when settings persistence fails.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T01:55:15.096Z"
+      }
+    },
+    {
+      "id": "eb8705b3-5ad0-4f9d-9911-b5d159884220",
+      "threadId": "eb8705b3-5ad0-4f9d-9911-b5d159884220",
+      "file": "web/server/index.ts",
+      "line": 882,
+      "endLine": 884,
+      "side": "new",
+      "body": "Every stderr chunk from each long-lived managed Pi process is appended to `stderrBuffer`, but the buffer is never read or truncated. A noisy process therefore grows daemon memory for the entire session lifetime. Discard drained stderr or retain only a bounded ring buffer for diagnostics (`web/server/index.ts:882`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T01:49:47.194Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Managed RPC stderr is drained without unbounded retention.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T01:55:15.187Z"
+      }
+    },
+    {
+      "id": "86a08d50-1bff-473a-8699-d44d86805be4",
+      "threadId": "86a08d50-1bff-473a-8699-d44d86805be4",
+      "file": "web/server/queue-store.ts",
+      "line": 162,
+      "endLine": 164,
+      "side": "new",
+      "body": "If `writeFile` or `rename` fails, the uniquely named queue-store temporary file is never removed. The dirty-snapshot worker retries indefinitely, so a persistent filesystem failure can accumulate unbounded `.tmp` files and exhaust disk space. Wrap temporary-file creation and rename in `try/finally` with a forceful `rm`, and apply the same cleanup to `writeQueueStore` (`web/server/queue-store.ts:162`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T01:49:47.242Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Queue-store temporary files are removed on all write and rename paths.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T01:55:15.284Z"
+      }
+    },
+    {
+      "id": "b90ac903-52cc-4bd8-8b1c-d4671a3c3344",
+      "threadId": "b90ac903-52cc-4bd8-8b1c-d4671a3c3344",
+      "file": "web/server/index.ts",
+      "line": 2189,
+      "side": "new",
+      "body": "`agent.update` broadcasts `update.session` instead of the enriched `record`, so native sessions lose `managedWorktree` after their next update and the browser stops warning that deletion will remove the checkout. Broadcast `sessionToClientPayload(record)` here and in the hello path, and add a regression test covering metadata preservation across native updates (`web/server/index.ts:2189`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T01:49:47.291Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Native broadcasts now preserve enriched session metadata.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T01:55:15.377Z"
+      }
+    },
+    {
+      "id": "12b28c1f-0ed1-4012-815b-846d6df1fd40",
+      "threadId": "12b28c1f-0ed1-4012-815b-846d6df1fd40",
+      "file": "web/client/components/anchored-popover.tsx",
+      "line": 45,
+      "side": "new",
+      "body": "The self-scheduling animation frame continuously reads `getBoundingClientRect`, `offsetWidth`, and `offsetHeight` while any menu remains open, forcing up to 60 layout measurements per second even when nothing moves. Reposition on scroll/resize/`visualViewport` events and a `ResizeObserver`, using animation frames only to coalesce those events (`web/client/components/anchored-popover.tsx:45`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T01:49:47.341Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Popover layout measurement is now event-driven and frame-coalesced.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T01:55:15.467Z"
+      }
+    },
+    {
+      "id": "1b53cad9-f43b-42e2-988e-1e5070a6d015",
+      "threadId": "50f39dd1-e7e6-4f54-87d1-d5a9f4a1f431",
+      "parentId": "50f39dd1-e7e6-4f54-87d1-d5a9f4a1f431",
+      "body": "Wrapped live Tailscale route changes and settings persistence in a rollback transaction. The server API now receives the actual currently applied route, so a failed settings write restores the prior service/port and removes the replacement; rollback failures are surfaced. Added focused persistence and rollback-failure tests.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T01:55:15.049Z"
+    },
+    {
+      "id": "c8a45de9-d062-4ec4-beab-a9ed5262a4ae",
+      "threadId": "eb8705b3-5ad0-4f9d-9911-b5d159884220",
+      "parentId": "eb8705b3-5ad0-4f9d-9911-b5d159884220",
+      "body": "Removed the unused stderr buffer and decoder. The managed child stderr pipe is still continuously drained to prevent child blocking, but chunks are discarded instead of retained for the session lifetime.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T01:55:15.141Z"
+    },
+    {
+      "id": "93eb6671-c5ce-489d-bac4-4e294069cc85",
+      "threadId": "86a08d50-1bff-473a-8699-d44d86805be4",
+      "parentId": "86a08d50-1bff-473a-8699-d44d86805be4",
+      "body": "Wrapped both direct and coalesced atomic queue-store writes in try/finally cleanup using forceful rm. Added regression coverage that forces rename failures in both paths and verifies no temporary files remain.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T01:55:15.236Z"
+    },
+    {
+      "id": "cbfb6e0d-4bc9-46f6-9dfb-dd27f836df03",
+      "threadId": "b90ac903-52cc-4bd8-8b1c-d4671a3c3344",
+      "parentId": "b90ac903-52cc-4bd8-8b1c-d4671a3c3344",
+      "body": "Changed native hello and update broadcasts to serialize the enriched SessionRecord, preserving managedWorktree and other server-derived metadata. Extended the native session end-to-end test to verify the ownership marker survives agent.update.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T01:55:15.332Z"
+    },
+    {
+      "id": "7f26cd0c-4fdf-41cc-870c-3ac4c8e92377",
+      "threadId": "12b28c1f-0ed1-4012-815b-846d6df1fd40",
+      "parentId": "12b28c1f-0ed1-4012-815b-846d6df1fd40",
+      "body": "Replaced the perpetual animation-frame loop with scroll, resize, visualViewport, and ResizeObserver triggers. A single scheduled animation frame now only coalesces actual reposition events, with complete listener and observer cleanup.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T01:55:15.421Z"
+    },
+    {
+      "id": "ade55c15-c759-458d-95ed-daf472c815e9",
+      "threadId": "ade55c15-c759-458d-95ed-daf472c815e9",
+      "file": "extensions/worktree.ts",
+      "line": 100,
+      "side": "new",
+      "body": "The `--existing` path always appends `{ managed: false }`, even when the target is the current Pi-managed worktree. If the original owning session is deleted while the replacement still exists, cleanup is deferred; deleting the replacement later then has no ownership marker, permanently leaking the checkout and branch. Preserve the inherited marker when its path matches `target.path`, or reject switching to the current worktree (`extensions/worktree.ts:100`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:01:12.451Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Existing-session replacement now preserves matching worktree ownership.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:03:32.314Z"
+      }
+    },
+    {
+      "id": "a3fcca35-9933-4652-a3fd-7dc1642d4bee",
+      "threadId": "a3fcca35-9933-4652-a3fd-7dc1642d4bee",
+      "file": "web/client/api.ts",
+      "line": 124,
+      "endLine": 125,
+      "side": "new",
+      "body": "`sendSessionCommand` creates a fresh `SessionSocket`, whose `client.hello` makes the server rescan and serialize the entire saved-session catalog before the command is sent; queue edits, model changes, aborts, and other routine actions therefore incur growing filesystem and network work as session history grows. Route commands through the app existing subscribed socket/request map, or add a command-only handshake that does not call `sendSessionSnapshot` (`web/client/api.ts:124`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:01:12.497Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "One-shot commands no longer request or serialize the session catalog.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:03:32.399Z"
+      }
+    },
+    {
+      "id": "2b8a5816-0309-4e99-90ad-dfef9675a32c",
+      "threadId": "ade55c15-c759-458d-95ed-daf472c815e9",
+      "parentId": "ade55c15-c759-458d-95ed-daf472c815e9",
+      "body": "Preserved the inherited managed-worktree ownership marker when --existing resolves to the current owned checkout, while still appending managed:false for unrelated existing worktrees. Added regression coverage for matching, unrelated, and explicitly cleared ownership.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:03:32.271Z"
+    },
+    {
+      "id": "0fd17f0e-83c9-4f02-b724-d7a5dee70946",
+      "threadId": "a3fcca35-9933-4652-a3fd-7dc1642d4bee",
+      "parentId": "a3fcca35-9933-4652-a3fd-7dc1642d4bee",
+      "body": "Added a command-only WebSocket handshake. One-shot command sockets now authenticate without requesting the saved-session snapshot, while the app's subscribed socket retains normal catalog discovery. Updated server command coverage to fail if this handshake emits a snapshot, and rebuilt the web assets.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:03:32.356Z"
+    },
+    {
+      "id": "8bb5a969-1778-44b9-9667-356ed08c81aa",
+      "threadId": "8bb5a969-1778-44b9-9667-356ed08c81aa",
+      "file": "web/server/index.ts",
+      "line": 1653,
+      "side": "new",
+      "body": "`createManagedSession` transfers the prior record queue but leaves its `queueDirtyWorker` alive. A retry can later persist the orphaned record stale queue under the same session ID and erase follow-ups added after resume. Quiesce the existing record and drain its dirty worker before replacing it (`web/server/index.ts:1653`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T02:10:20.398Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Resume now retires old queue persistence before replacement.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:16:52.767Z"
+      }
+    },
+    {
+      "id": "88cbf69b-3aa9-4ff3-8a7b-124359bf47b5",
+      "threadId": "88cbf69b-3aa9-4ff3-8a7b-124359bf47b5",
+      "file": "web/client/semantic-session.tsx",
+      "line": 121,
+      "side": "new",
+      "body": "The composer permits four 10 MiB images, but base64 expansion makes three maximum-sized images exceed the server 32 MiB WebSocket limit, closing the socket instead of delivering the prompt. Enforce an aggregate encoded-payload limit below the server maximum and add a multi-image boundary test (`web/client/semantic-session.tsx:121`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:10:20.446Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Aggregate encoded image payloads are bounded and tested.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:16:52.851Z"
+      }
+    },
+    {
+      "id": "630da459-bb5d-4336-a147-4a9c77a3de79",
+      "threadId": "630da459-bb5d-4336-a147-4a9c77a3de79",
+      "file": "web/server/worktrees.ts",
+      "line": 241,
+      "side": "new",
+      "body": "`setup.sh` runs through `spawnSync` without a timeout, so a slow or hung setup freezes streaming, queue delivery, and shutdown handling for every session. Run setup asynchronously with a bounded timeout and termination path (`web/server/worktrees.ts:241`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:10:20.492Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Worktree setup is asynchronous, bounded, and terminable.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:16:52.940Z"
+      }
+    },
+    {
+      "id": "486d1680-e715-4b7e-b14c-3256174d4b82",
+      "threadId": "486d1680-e715-4b7e-b14c-3256174d4b82",
+      "file": "web/client/app.tsx",
+      "line": 65,
+      "endLine": 67,
+      "side": "new",
+      "body": "`loadSessionSort` accesses `localStorage` without the best-effort guard used by adjacent preference and draft helpers, so browsers that deny storage throw during state initialization and render no application. Catch storage failures and fall back to `newest`; similarly guard preference writes (`web/client/app.tsx:65`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:10:20.538Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Preference reads and writes now tolerate unavailable storage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:16:53.027Z"
+      }
+    },
+    {
+      "id": "b476528b-4992-47c6-99b8-4aaef2348ad2",
+      "threadId": "b476528b-4992-47c6-99b8-4aaef2348ad2",
+      "file": "web/server/index.ts",
+      "line": 2584,
+      "endLine": 2586,
+      "side": "new",
+      "body": "Before opening the listening socket, startup synchronously reads, splits, and JSON-parses every line of every saved session through `scanSavedSessions`; a large history catalog can exceed the bridge fixed 8-second startup deadline, making Pi Web appear unavailable. Start health serving first and hydrate metadata lazily/in the background, or maintain a lightweight metadata index (`web/server/index.ts:2584`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:10:20.582Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Startup no longer parses the saved-session catalog.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:16:53.114Z"
+      }
+    },
+    {
+      "id": "6a71450e-4060-42d7-a400-7f3198eba3bf",
+      "threadId": "8bb5a969-1778-44b9-9667-356ed08c81aa",
+      "parentId": "8bb5a969-1778-44b9-9667-356ed08c81aa",
+      "body": "Quiesced the resumed record's serialized queue intake, cancelled any armed retry, and drained/cancelled its dirty snapshot worker before transferring the queue to the replacement. Startup failure restores the prior record and retry lifecycle, preventing an orphaned writer from persisting stale state under the shared session ID.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:16:52.723Z"
+    },
+    {
+      "id": "2a02cdfc-516b-41f2-82eb-a9a9ece09cdf",
+      "threadId": "88cbf69b-3aa9-4ff3-8a7b-124359bf47b5",
+      "parentId": "88cbf69b-3aa9-4ff3-8a7b-124359bf47b5",
+      "body": "Added a 28 MiB aggregate encoded-image budget, leaving 4 MiB beneath the server frame cap for prompt/protocol overhead. Attachment addition and submission both enforce it, with a boundary test proving two maximum images fit and a third is rejected.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:16:52.810Z"
+    },
+    {
+      "id": "f4c7178c-d6e5-4815-ab57-a80dab5e3cec",
+      "threadId": "630da459-bb5d-4336-a147-4a9c77a3de79",
+      "parentId": "630da459-bb5d-4336-a147-4a9c77a3de79",
+      "body": "Converted worktree creation/setup to async spawning with a five-minute bound, process-group SIGTERM/SIGKILL termination, and retained-worktree diagnostics. Added a focused short-timeout termination test and updated all callers to await setup without blocking the server event loop.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:16:52.893Z"
+    },
+    {
+      "id": "de7330fb-082c-42c7-9e37-28adf980242d",
+      "threadId": "486d1680-e715-4b7e-b14c-3256174d4b82",
+      "parentId": "486d1680-e715-4b7e-b14c-3256174d4b82",
+      "body": "Wrapped session-sort reads in the same best-effort fallback used by adjacent preferences, and routed order, sort, and collapsed-project writes through a guarded persistence helper so denied/full localStorage cannot break rendering.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:16:52.984Z"
+    },
+    {
+      "id": "88ec3417-a468-4053-bbed-b16fc18014e7",
+      "threadId": "b476528b-4992-47c6-99b8-4aaef2348ad2",
+      "parentId": "b476528b-4992-47c6-99b8-4aaef2348ad2",
+      "body": "Removed eager saved-session JSONL scanning from main startup. The listener, health endpoint, and discovery state now come up before historical metadata, which is discovered lazily only on catalog/subscription/deletion requests; lazy deletion was added so startup hydration is no longer required.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:16:53.071Z"
+    },
+    {
+      "id": "0155a13e-9739-4c7f-be93-506ad3b9f614",
+      "threadId": "0155a13e-9739-4c7f-be93-506ad3b9f614",
+      "file": "web/server/index.ts",
+      "line": 2069,
+      "side": "new",
+      "body": "**Native worktree switches reject their response during the expected bridge reconnect**\n\n`create_worktree` replaces the native session and closes its old agent socket before the replacement bridge returns the command response, but only reload requests survive that disconnect. The server therefore rejects the pending request with `Agent socket closed`, so the browser reports a failed worktree switch and does not navigate to the successfully created replacement. Preserve worktree requests across the expected reconnect as well:\n\n```suggestion\nsurviveDisconnect: command.type === \"reload\" || command.type === \"create_worktree\",\n```\n\nAdd an end-to-end native worktree test analogous to the reload reconnect test.",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T02:26:15.149Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Native worktree requests now survive their expected bridge replacement and are covered end to end.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:31:50.640Z"
+      }
+    },
+    {
+      "id": "da6c4aa8-5022-4e78-9cb1-c8c2d4c73b24",
+      "threadId": "da6c4aa8-5022-4e78-9cb1-c8c2d4c73b24",
+      "file": "web/server/index.ts",
+      "line": 2335,
+      "side": "new",
+      "body": "**Successful session deletion can be reported as failed**\n\nIf managed-worktree cleanup fails, the session has already been durably deleted, but the exception skips `sendSessionRemoved` and returns an error even though retry cannot find the deleted session. Treat cleanup failure as a warning after broadcasting the completed deletion, or perform cleanup before committing deletion.",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:26:15.193Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Completed deletion is reported before best-effort worktree cleanup, with failure coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:31:50.642Z"
+      }
+    },
+    {
+      "id": "c38bf8c1-31e5-4d4c-9b77-a2d0418c1d52",
+      "threadId": "c38bf8c1-31e5-4d4c-9b77-a2d0418c1d52",
+      "file": "web/client/image-payload.ts",
+      "line": 5,
+      "endLine": 14,
+      "side": "new",
+      "body": "**Attachment limit does not actually guarantee a valid WebSocket frame**\n\nThe 28 MiB attachment allowance assumes all remaining framing fits within 4 MiB, but the prompt textarea has no corresponding byte limit; a large pasted prompt plus valid attachments can exceed the server's 32 MiB frame limit and close the socket. Measure the complete serialized `client.prompt` payload with `TextEncoder`, or bound prompt and attachment bytes together.",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:26:15.259Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "The complete serialized prompt frame is now byte-bounded before send.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:32:19.213Z"
+      }
+    },
+    {
+      "id": "e7789945-72ce-4421-9f91-f50afff85de1",
+      "threadId": "e7789945-72ce-4421-9f91-f50afff85de1",
+      "file": "web/server/worktrees.ts",
+      "line": 198,
+      "side": "new",
+      "body": "**Worktree cleanup scans entire session histories synchronously**\n\n`hasOtherSessionInWorktree` uses `readFileSync(file, \"utf8\")` merely to inspect each file first line, so deleting a session synchronously loads every potentially large JSONL history and can stall the web server or TUI. Read only the header with a bounded file read, or reuse cached session-header metadata.",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T02:26:24.713Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Worktree reference scans now read only a bounded session header.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T02:31:50.644Z"
+      }
+    },
+    {
+      "id": "f465105c-40f8-4e6f-89f5-d9551b7e3378",
+      "threadId": "e7789945-72ce-4421-9f91-f50afff85de1",
+      "parentId": "e7789945-72ce-4421-9f91-f50afff85de1",
+      "body": "Replaced full readFileSync transcript loads with a bounded 64 KiB header read using open/read/close. Oversized unterminated headers fail closed, and the cleanup-reference test now includes a multi-megabyte transcript behind the header.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:31:43.290Z"
+    },
+    {
+      "id": "e7df8044-2ab6-4773-b3ba-45e410e8eed4",
+      "threadId": "0155a13e-9739-4c7f-be93-506ad3b9f614",
+      "parentId": "0155a13e-9739-4c7f-be93-506ad3b9f614",
+      "body": "Preserved create_worktree requests across the expected native bridge disconnect, alongside reload requests. Added an end-to-end replacement-session reconnect test that closes the original agent socket and returns the successful replacement session ID from the new bridge.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:32:19.082Z"
+    },
+    {
+      "id": "36ceb5e5-e4f9-4069-942b-d2f83a0dc97e",
+      "threadId": "da6c4aa8-5022-4e78-9cb1-c8c2d4c73b24",
+      "parentId": "da6c4aa8-5022-4e78-9cb1-c8c2d4c73b24",
+      "body": "Moved server.session_removed notification immediately after durable session deletion and made managed-worktree cleanup best-effort with a warning. Added an end-to-end cleanup-failure test proving deletion returns success and another subscribed client receives the removal event.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:32:19.127Z"
+    },
+    {
+      "id": "a9ea619a-5a5f-4206-a9f6-1251081c1466",
+      "threadId": "c38bf8c1-31e5-4d4c-9b77-a2d0418c1d52",
+      "parentId": "c38bf8c1-31e5-4d4c-9b77-a2d0418c1d52",
+      "body": "Replaced attachment-only accounting with TextEncoder measurement of the complete serialized client.prompt frame, including prompt text, IDs, image metadata, and JSON framing. The exact outgoing frame is checked before send, with multi-image plus large-prompt and UTF-8 regression coverage.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T02:32:19.170Z"
+    },
+    {
+      "id": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "threadId": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "file": "web/server/index.ts",
+      "line": 3091,
+      "side": "new",
+      "body": "The reconciler considers only records already present in `sessions`. If the TUI deletes a JSONL before any browser snapshot/API scan hydrates it, later discovery cannot create a record for the now-missing file, so its durable queue and managed-worktree ownership are never cleaned. Reconcile deleted paths from a persistent metadata index or managed-session/queue inventory rather than relying solely on the in-memory catalog (`web/server/index.ts:3091`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:36:04.984Z",
+      "resolution": {
+        "status": "skipped",
+        "body": "Skipped: safe cleanup requires an out-of-scope durable metadata inventory and migration policy.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:40:54.073Z"
+      }
+    },
+    {
+      "id": "57e7d453-db4d-40a5-a647-87c1a7ec710b",
+      "threadId": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "parentId": "18bbd03b-779b-428c-b9bf-17e67c6d08ef",
+      "body": "Skipped this follow-up because safely cleaning a session that this daemon has never observed requires a new durable session-metadata inventory (including file identity, queue ownership, managed-worktree marker history, replacement migration, and transactional retirement). Inferring ownership from the queue key or managed-session file list alone is insufficient and could discard a queue during an in-flight native replacement. That persistent schema and its startup/migration/recovery policy are out of scope for this reconciliation patch; the implemented reconciler remains limited to records that were hydrated while their JSONL existed.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:40:54.028Z"
+    },
+    {
+      "id": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "threadId": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "file": "web/server/index.ts",
+      "line": 488,
+      "side": "new",
+      "body": "`managedWorktreeFromEntries([entry])` returns `undefined` for a newer `{ managed: false }` marker, but `?? managedWorktree` preserves the older ownership marker. Deleting such a session can therefore remove a checkout it explicitly disowned. Track whether a worktree marker was encountered and assign its result directly, or collect markers and call `managedWorktreeFromEntries` once (`web/server/index.ts:488`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T17:43:15.022Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Newest managed:false metadata markers now clear stale ownership, with regression coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:43:40.762Z"
+      }
+    },
+    {
+      "id": "9df9ecc8-0509-408c-a6f4-be86c55e9c9c",
+      "threadId": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "parentId": "7b8c2636-8c39-4ad1-9387-3ee09ffe1d0f",
+      "body": "Changed the metadata-only scanner to assign each encountered worktree marker result directly, so a newest `{ managed: false }` marker clears older ownership instead of falling through via nullish coalescing. Added an end-to-end saved-session catalog regression covering an owned marker followed by an explicit clear; the focused test and server typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:43:40.714Z"
+    },
+    {
+      "id": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "threadId": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "file": "web/server/index.ts",
+      "line": 491,
+      "side": "new",
+      "body": "`managedWorktreeFromEntries([entry])` returns `undefined` for malformed markers as well as explicit `{ managed: false }`, so a truncated or older marker after a valid ownership entry silently clears ownership and leaks the managed checkout during deletion. Collect all worktree entries and call `managedWorktreeFromEntries(entries)` once, which skips malformed markers while honoring an explicit ownership clear (`web/server/index.ts:491`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:47:23.254Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Worktree metadata scanning now preserves ownership across malformed markers.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:50:40.183Z"
+      }
+    },
+    {
+      "id": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "threadId": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "file": "web/server/index.ts",
+      "line": 811,
+      "side": "new",
+      "body": "`get_state` omits or nulls `sessionName` after `set_session_name` clears it, but this assignment updates `record.name` only for strings, so the old name remains in subsequent sidebar snapshots. Normalize the nullable contract explicitly, e.g. `record.name = typeof s.sessionName === \"string\" && s.sessionName ? s.sessionName : undefined`, and cover clearing an existing managed-session name (`web/server/index.ts:811`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:47:29.780Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Managed state refresh now clears stale session names.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:50:40.266Z"
+      }
+    },
+    {
+      "id": "3e02f477-7bc5-4acd-aef0-89331ce590e0",
+      "threadId": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "parentId": "5adcf1ce-c18c-4a1b-a7c7-d2c53f6784c1",
+      "body": "Collected all metadata-only worktree markers and resolve them together with managedWorktreeFromEntries, so malformed newer markers are skipped while explicit managed:false markers still clear ownership. Expanded the catalog regression test to cover both cases; focused tests and the full typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:50:40.141Z"
+    },
+    {
+      "id": "56af2e26-f9b7-468c-b4e1-1fb27727a75a",
+      "threadId": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "parentId": "0fde1571-073e-4de9-aa47-0d5dbd329432",
+      "body": "Normalized every managed get_state sessionName response, clearing record.name when the field is null, omitted, or empty instead of retaining stale sidebar metadata. Extended the managed resume end-to-end test to name the session, clear it, trigger state refresh, and verify the catalog drops the name; focused tests and the full typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:50:40.225Z"
+    },
+    {
+      "id": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "threadId": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "file": "web/server/index.ts",
+      "line": 3003,
+      "side": "new",
+      "body": "After durable queue deletion, a reconnect makes this path restore the queue with a single `persistWebQueue` attempt; if that rollback write fails, the record remains active but no dirty worker is armed, so a daemon crash loses every queued prompt. Schedule the retained snapshot through the retrying dirty worker (or keep retrying until durable) before returning from the aborted deletion (`web/server/index.ts:3003`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T17:54:56.154Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Aborted deletion queue rollback now retries until durable.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:57:49.368Z"
+      }
+    },
+    {
+      "id": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "threadId": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "file": "web/slash-commands.ts",
+      "line": 9,
+      "endLine": 30,
+      "side": "new",
+      "body": "`parseCommandArgs` does not preserve empty quoted arguments or recognize escapes, so `/foo \"\" second` shifts `second` into `$1`, while an escaped quote prematurely closes its argument; prompt-template substitutions therefore receive incorrect positions or content. Reuse Pi’s argument parser, or track argument-start and escape state while rejecting unterminated quotes, and add coverage for empty and escaped quoted arguments (`web/slash-commands.ts:9`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T17:55:04.173Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Slash arguments now preserve quoted positions and escapes.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T17:57:49.453Z"
+      }
+    },
+    {
+      "id": "1cdc212a-2f73-4545-bb5f-6058397c1b10",
+      "threadId": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "parentId": "3349de6d-190c-4132-a0f2-59d5cd5c1825",
+      "body": "Changed the post-delete reconnect path to restore the retained queue through the coalescing dirty-snapshot worker instead of a one-shot write. Transient rollback failures now retain an armed exponential retry loop, while the existing quiescence release still resumes normal queue processing. The full web-server integration suite passes.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:57:49.323Z"
+    },
+    {
+      "id": "f65a638e-a174-48fc-afe7-c2e93d864563",
+      "threadId": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "parentId": "5e0fedbe-ffce-406b-b000-6cec89e7f64d",
+      "body": "Reworked command argument parsing to track argument starts independently from content, preserve empty quoted positions, honor backslash escapes (including escaped quotes), and reject unterminated quotes. Added focused prompt expansion coverage for empty and escaped quoted arguments plus malformed input.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T17:57:49.410Z"
+    },
+    {
+      "id": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "threadId": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "file": "web/server/index.ts",
+      "line": 3114,
+      "endLine": 3117,
+      "side": "new",
+      "body": "`hasOtherSessionInWorktree` is checked before `deleteSessionRecord` awaits durable queue deletion, so a new TUI session can be created in the same checkout during that yield and the subsequent `removeManagedWorktree` will forcibly delete its live checkout and uncommitted files. Re-check for other sessions immediately before cleanup, or serialize worktree ownership changes across deletion (`web/server/index.ts:3114`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T18:02:27.039Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Rechecked live worktree ownership immediately before cleanup.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.492Z"
+      }
+    },
+    {
+      "id": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "threadId": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "file": "web/slash-commands.ts",
+      "line": 23,
+      "side": "new",
+      "body": "Treating every backslash as an escape changes literal arguments such as `C:\\tmp\\file` or `'\\d+'` into `C:tmpfile` and `d+`, so web prompt templates receive corrupted values. Only consume a backslash when it escapes a supported quote/backslash in the current quoting context; otherwise append it literally, and add unquoted and single-quoted backslash cases alongside the escaped-quote test (`web/slash-commands.ts:23`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T18:02:37.184Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Literal backslashes are preserved with focused parser coverage.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.573Z"
+      }
+    },
+    {
+      "id": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "threadId": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "file": "web/server/index.ts",
+      "line": 700,
+      "side": "new",
+      "body": "A metadata refresh passes an empty `history`, so `upsertSession` retains the record’s previously loaded history; if another Pi process has since appended `{ managed: false }`, `session.managedWorktree` is correctly undefined but this fallback resolves the older cached ownership marker and restores it. Deleting that session can then remove a checkout and branch explicitly marked unmanaged. For saved metadata scans, trust the freshly scanned ownership result using a tri-state indicating whether markers were scanned, rather than falling back to stale `record.history`, and test appending a clear after the record has already been hydrated (`web/server/index.ts:700`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T18:02:59.325Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Fresh metadata scans now authoritatively clear stale worktree ownership.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.658Z"
+      }
+    },
+    {
+      "id": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "threadId": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "file": "web/server/index.ts",
+      "line": 3070,
+      "side": "new",
+      "body": "`hasStagedOrDurableReplacement` synchronously enumerates every saved JSONL and calls `parseSessionFile` for each missing record, and the new one-second timer repeats this while a staged or durable replacement keeps the source record alive. Large catalogs or delayed replacement handshakes therefore repeatedly block the server event loop with full-history parsing. Cache/index replacement markers during the existing metadata scan, or make reconciliation event-driven and avoid full JSONL parsing on each poll (`web/server/index.ts:3070`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T18:03:14.571Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Replacement polling now uses cached metadata markers rather than full-history parsing.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T18:07:48.742Z"
+      }
+    },
+    {
+      "id": "a5fe3143-4e48-49ee-af75-203def248705",
+      "threadId": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "parentId": "844891d5-74cd-41dc-9490-937d28c0cc40",
+      "body": "Added a second saved-session ownership check immediately before managed worktree removal, after durable queue deletion and record cleanup have yielded, so a newly created TUI session prevents checkout removal. The focused web-server/worktree checks pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.452Z"
+    },
+    {
+      "id": "cf58532a-b804-47c0-bcd3-df1a389198e1",
+      "threadId": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "parentId": "fc1af1b6-9646-4971-a785-0674271197cd",
+      "body": "Changed argument parsing to consume a backslash only before a quote supported by the current quoting context or another backslash; all other backslashes remain literal. Added focused unquoted path, single-quoted regex, escaped-quote, empty-argument, and unterminated-quote coverage.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.533Z"
+    },
+    {
+      "id": "0143c4c8-325f-4a5d-ba47-5416950d51ce",
+      "threadId": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "parentId": "5dc93c54-e9e1-41c8-9991-d46150d34cd6",
+      "body": "Added an explicit metadata-scan ownership state and made saved-session upserts trust that fresh result, including authoritative undefined after , instead of falling back to hydrated history. The regression test hydrates ownership, appends a clear marker, refreshes metadata, and verifies ownership stays cleared.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.616Z"
+    },
+    {
+      "id": "d2c15a4d-17ea-40c6-97d6-e620aa26c9f0",
+      "threadId": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "parentId": "08bc0810-2bb9-4ab6-b162-95f53fb53352",
+      "body": "Indexed replacement markers while performing the cached metadata scan and changed missing-session reconciliation to consult that metadata result instead of fully parsing every JSONL transcript. Existing delayed replacement coverage verifies the source remains available for handshake migration; focused tests and typechecks pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T18:07:48.701Z"
+    },
+    {
+      "id": "8f06f40a-6ab1-401f-8e72-699946a9da9d",
+      "threadId": "8f06f40a-6ab1-401f-8e72-699946a9da9d",
+      "file": "web/server/index.ts",
+      "line": 3591,
+      "endLine": 3595,
+      "side": "new",
+      "body": "`/ws/agent` treats absence of `Origin` as proof that the caller is the local Pi bridge, but Tailscale Serve proxies the entire localhost server and a non-browser tailnet client also sends no `Origin`. Such a client can register or spoof agent sessions, inject transcript events, and receive commands routed to its fake session. Require a random bridge credential stored in the mode-0600 state file, or at minimum reject forwarded requests (`x-forwarded-host`/`forwarded`) before upgrading (`web/server/index.ts:3591`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T19:24:26.718Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Forwarded agent WebSocket upgrades are now rejected.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:30:13.587Z"
+      }
+    },
+    {
+      "id": "d4806989-e1ac-41c4-bc81-b50592ae08bc",
+      "threadId": "d4806989-e1ac-41c4-bc81-b50592ae08bc",
+      "file": "extensions/subagents.ts",
+      "line": 682,
+      "endLine": 688,
+      "side": "new",
+      "body": "Omitting `model` is documented to inherit `ctx.model`, but this branch requires that model to survive both the configured scope filter and a separately created runtime's authentication check. A valid session started with `--model provider/a --models provider/b`, or with a temporary `--api-key`, therefore advertises inheritance and then rejects `subagent_create`. Reuse the host session's model runtime, or explicitly carry the active model and its resolved runtime authentication into the child runtime before applying scope only to explicit overrides (`extensions/subagents.ts:682`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T19:24:26.768Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Host model and temporary runtime authentication are inherited.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:30:13.686Z"
+      }
+    },
+    {
+      "id": "29e3c199-84d5-4f70-b21c-2b372f015c01",
+      "threadId": "29e3c199-84d5-4f70-b21c-2b372f015c01",
+      "file": "extensions/subagents.ts",
+      "line": 1702,
+      "side": "new",
+      "body": "The new `before_agent_start` hook awaits `ModelRuntime.getAvailable()` without a signal or deadline; that operation invokes every provider's authentication resolver, including OAuth refreshes and configured external commands. One wedged provider can therefore prevent the main agent turn from ever starting, and the fallback runs only after rejection. Build the guidance from the host registry's already-resolved snapshot (`ctx.modelRegistry.getAvailable()` plus the scope filter), or pass `ctx.signal` combined with a bounded timeout (`extensions/subagents.ts:1702`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T19:24:26.815Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Model guidance now uses the host registry snapshot synchronously.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:30:13.783Z"
+      }
+    },
+    {
+      "id": "b536f038-d05b-4c03-8422-a00640920e9b",
+      "threadId": "b536f038-d05b-4c03-8422-a00640920e9b",
+      "file": "web/client/app.tsx",
+      "line": 1233,
+      "endLine": 1234,
+      "side": "new",
+      "body": "`loadSessionOptions` already returns `commands`, but every session selection also invokes `loadSessionCommands`; for a cold native session, the server handles `get_commands` by spawning a temporary `pi --mode rpc --no-session` process. This adds an unnecessary process startup plus duplicate health checks and WebSocket connections whenever a session is selected. Use the commands returned by `get_session_options` here, and reserve `get_commands` for the post-reload refresh (`web/client/app.tsx:1233`).",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T19:24:26.863Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Session selection now uses commands from get_session_options.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:30:13.882Z"
+      }
+    },
+    {
+      "id": "95b630a6-971b-4030-ac61-a94cd80098c4",
+      "threadId": "95b630a6-971b-4030-ac61-a94cd80098c4",
+      "file": "tests/web-worktrees.test.ts",
+      "line": 281,
+      "endLine": 282,
+      "side": "new",
+      "body": "The 250 ms timeout can expire before the spawned shell writes `child.pid`, after which the unconditional read throws `ENOENT`; this failed repeatedly in focused runs and also failed the full suite. Use a substantially larger timeout or a readiness handshake before exercising termination, and assert the PID file exists before reading it (`tests/web-worktrees.test.ts:281`).",
+      "author": "GPT-5.6",
+      "priority": "P3",
+      "createdAt": "2026-08-14T19:24:26.910Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "The timeout fixture now waits for PID readiness reliably.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:30:13.980Z"
+      }
+    },
+    {
+      "id": "8b4af69a-2c7c-45e7-aab6-1aea35546f6c",
+      "threadId": "8f06f40a-6ab1-401f-8e72-699946a9da9d",
+      "parentId": "8f06f40a-6ab1-401f-8e72-699946a9da9d",
+      "body": "Restricted /ws/agent upgrades to direct localhost requests by rejecting Origin-bearing and standard Forwarded/X-Forwarded proxy requests before upgrade. This closes the tokenless Tailscale Serve path while preserving the direct native bridge, with integration coverage for a forwarded no-Origin client.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:30:13.526Z"
+    },
+    {
+      "id": "ba02c28a-7df3-44a5-b3f7-6a4f58a717c8",
+      "threadId": "d4806989-e1ac-41c4-bc81-b50592ae08bc",
+      "parentId": "d4806989-e1ac-41c4-bc81-b50592ae08bc",
+      "body": "Changed omitted-model resolution to inherit ctx.model directly instead of filtering it through explicit override scope or the child runtime availability list. The child runtime now copies the host provider resolved API key, preserving temporary --api-key authentication; focused tests cover both excluded-scope inheritance and runtime-key transfer.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:30:13.636Z"
+    },
+    {
+      "id": "03807175-44f1-4b6f-8db9-fc7f49d09477",
+      "threadId": "29e3c199-84d5-4f70-b21c-2b372f015c01",
+      "parentId": "29e3c199-84d5-4f70-b21c-2b372f015c01",
+      "body": "Made before_agent_start synchronous and built model guidance from ctx.modelRegistry.getAvailable(), then applied the existing session scope filter. Prompt construction no longer creates a ModelRuntime or invokes provider authentication/OAuth resolvers.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:30:13.734Z"
+    },
+    {
+      "id": "83875fa5-90d4-4521-91b0-4bbacb54a8b2",
+      "threadId": "b536f038-d05b-4c03-8422-a00640920e9b",
+      "parentId": "b536f038-d05b-4c03-8422-a00640920e9b",
+      "body": "Removed the redundant get_commands request from the session-selection effect. Selection now consumes commands already returned by get_session_options; the dedicated get_commands refresh remains only in the post-/reload path, and the checked-in web assets were rebuilt.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:30:13.833Z"
+    },
+    {
+      "id": "cd523116-951c-4367-a39b-13331aac900e",
+      "threadId": "95b630a6-971b-4030-ac61-a94cd80098c4",
+      "parentId": "95b630a6-971b-4030-ac61-a94cd80098c4",
+      "body": "Raised the descendant-termination fixture timeout from 250 ms to 2 seconds so the shell has time to publish its child PID under load, and added an explicit PID-file existence assertion before reading it. Focused and full-suite runs now pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:30:13.931Z"
+    },
+    {
+      "id": "19929ff9-2a7a-4885-b58a-538df0f25450",
+      "threadId": "19929ff9-2a7a-4885-b58a-538df0f25450",
+      "file": "extensions/subagents.ts",
+      "line": 411,
+      "endLine": 412,
+      "side": "new",
+      "body": "`inheritRuntimeModelAuth` copies only `auth.apiKey`, but valid providers can resolve authentication exclusively as headers/environment—for example Cloudflare AI Gateway returns `cf-aig-authorization` with no `apiKey`. A host session using that provider with a temporary `--api-key` therefore creates the subagent, but its independent runtime remains unauthenticated and the first model request fails. Reuse the host session's canonical `ModelRuntime`, or add a complete resolved-auth override that preserves headers, environment, and base URL; add an integration test with a headers-only resolver (`extensions/subagents.ts:411`).",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T19:36:53.846Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Subagents now share complete host runtime authentication.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:41:22.920Z"
+      }
+    },
+    {
+      "id": "69d3a070-20ac-4bd6-8d3e-e77a8eadcaa6",
+      "threadId": "69d3a070-20ac-4bd6-8d3e-e77a8eadcaa6",
+      "file": "extensions/subagents.ts",
+      "line": 702,
+      "endLine": 703,
+      "side": "new",
+      "body": "`getProviderAuth` resolves every credential source, including OAuth access tokens and API-key commands, but `setRuntimeApiKey` reclassifies the result as a persistent runtime API key. OAuth-backed subagents can therefore stop authenticating when the copied token expires even though the host and child credential stores could refresh it. At `extensions/subagents.ts:702`, copy credentials only when `ctx.modelRegistry.getProviderAuthStatus(provider).source === \"runtime\"`; otherwise let the child runtime resolve its own stored/configured authentication.",
+      "author": "GPT-5.6",
+      "priority": "P1",
+      "createdAt": "2026-08-14T19:36:53.901Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Credential source and OAuth refresh semantics are preserved.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:41:22.915Z"
+      }
+    },
+    {
+      "id": "4c142bd7-293b-451e-b59d-ccb6cf47d89e",
+      "threadId": "69d3a070-20ac-4bd6-8d3e-e77a8eadcaa6",
+      "parentId": "69d3a070-20ac-4bd6-8d3e-e77a8eadcaa6",
+      "body": "Removed resolved-credential copying entirely and share the host canonical ModelRuntime with subagents. Runtime-only API keys remain runtime credentials, while stored OAuth remains in the shared credential store and continues through the normal refresh lifecycle instead of being frozen as a runtime API key. The authentication regression test also asserts host/child runtime identity.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:41:17.783Z"
+    },
+    {
+      "id": "f6754a22-edae-40cc-9d66-c1620b0e5d9b",
+      "threadId": "f6754a22-edae-40cc-9d66-c1620b0e5d9b",
+      "file": "web/dist/assets/index-TphFCQc_.js",
+      "line": 50,
+      "side": "new",
+      "body": "The checked-in production bundle still invokes both session-option and command loaders on selection (`he(Q.id,q),Ne(Q.id,q)`), so deployed users retain the duplicate WebSocket connection and native process spawn that `web/client/app.tsx:1233` removes. Run `bun run web:build` and commit the regenerated `web/dist` assets.",
+      "author": "GPT-5.6",
+      "priority": "P2",
+      "createdAt": "2026-08-14T19:45:49.997Z",
+      "resolution": {
+        "status": "fixed",
+        "body": "Regenerated web/dist from the corrected session-selection source; build and client typecheck pass.",
+        "author": "GPT-5.6",
+        "at": "2026-08-14T19:46:42.428Z"
+      }
+    },
+    {
+      "id": "ff2e02f0-cf27-4471-8cb1-f28dc5048dd4",
+      "threadId": "f6754a22-edae-40cc-9d66-c1620b0e5d9b",
+      "parentId": "f6754a22-edae-40cc-9d66-c1620b0e5d9b",
+      "body": "Rebuilt the checked-in production assets with the updated app source. The old index-TphFCQc_.js bundle was replaced by index-B4xRToSm.js, so deployed session selection now uses commands from get_session_options without issuing the redundant command loader request. The production build and web-client typecheck pass.",
+      "author": "GPT-5.6",
+      "createdAt": "2026-08-14T19:46:42.360Z"
     }
   ],
   "createdAt": "2026-08-13T21:25:59.887Z",
-  "updatedAt": "2026-08-13T23:01:38.239Z"
+  "updatedAt": "2026-08-14T19:46:42.428Z"
 }

@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { WebQueuedMessage } from "../protocol.js";
@@ -96,8 +96,12 @@ function restoreQueues(target: Map<string, WebQueuedMessage[]>, snapshot: Readon
 export async function writeQueueStore(path: string, queues: ReadonlyMap<string, readonly WebQueuedMessage[]>): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
 	const tempPath = `${path}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
-	await writeFile(tempPath, JSON.stringify(snapshotQueueStore(queues)), { mode: 0o600 });
-	await rename(tempPath, path);
+	try {
+		await writeFile(tempPath, JSON.stringify(snapshotQueueStore(queues)), { mode: 0o600 });
+		await rename(tempPath, path);
+	} finally {
+		await rm(tempPath, { force: true }).catch(() => undefined);
+	}
 }
 
 type PendingWrite = {
@@ -160,8 +164,12 @@ export class CoalescedQueueStoreWriter {
 		}
 		await mkdir(dirname(this.path), { recursive: true });
 		const tempPath = `${this.path}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
-		await writeFile(tempPath, contents, { mode: 0o600 });
-		await rename(tempPath, this.path);
+		try {
+			await writeFile(tempPath, contents, { mode: 0o600 });
+			await rename(tempPath, this.path);
+		} finally {
+			await rm(tempPath, { force: true }).catch(() => undefined);
+		}
 	}
 
 	private async flush(): Promise<void> {

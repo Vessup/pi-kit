@@ -1,6 +1,21 @@
 import type { FooterUsage } from "./footer-events.js";
 
 export const SUBAGENT_STATUS_EVENT = "vessup:subagents:status";
+export const SUBAGENT_ABORT_EVENT = "vessup:subagents:abort";
+
+/** Synchronous event-bus request used to join subagent aborts to a main-session Stop. */
+export type SubagentAbortRequest = {
+	sessionId: string;
+	waitUntil(operation: Promise<unknown>): void;
+};
+
+export function parseSubagentAbortRequest(value: unknown): SubagentAbortRequest | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const request = value as Partial<SubagentAbortRequest>;
+	return typeof request.sessionId === "string" && typeof request.waitUntil === "function"
+		? request as SubagentAbortRequest
+		: undefined;
+}
 
 export type SubagentWebStatus = "creating" | "working" | "completed" | "failed" | "terminating" | "terminated";
 

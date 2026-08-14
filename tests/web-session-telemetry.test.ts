@@ -31,6 +31,15 @@ test("session telemetry survives partial and transient zero-valued snapshots", (
 	expect(merged.contextUsage).toEqual(previous.contextUsage);
 });
 
+test("an explicit empty subagent snapshot clears stale managed-runtime telemetry", () => {
+	const previous = {
+		...session("one", 100),
+		subagents: [{ id: "old-worker", status: "working" as const, model: "test/model", effort: "high", turns: 1, queued: 0, createdAt: 1, updatedAt: 2 }],
+	};
+	expect(preserveSessionTelemetry(previous, { ...session("one", 100), subagents: [] }).subagents).toEqual([]);
+	expect(preserveSessionTelemetry(previous, { ...session("one", 100), status: "offline", source: "saved" }).subagents).toEqual([]);
+});
+
 test("new authoritative telemetry replaces the preserved snapshot per session", () => {
 	const previous = [session("one", 100), session("two", 200)];
 	const next = preserveSessionsTelemetry(previous, [session("one", 300), session("two")]);

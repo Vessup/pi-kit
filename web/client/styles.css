@@ -5,6 +5,17 @@
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   background: #09090b;
   color: #fafafa;
+  /* One status palette shared by sidebar badges, activity dots, and subagents. */
+  --status-working: 52 211 153;
+  --status-working-text: 110 231 183;
+  --status-idle: 56 189 248;
+  --status-idle-text: 125 211 252;
+  --status-transition: 251 191 36;
+  --status-transition-text: 252 211 77;
+  --status-error: 248 113 113;
+  --status-error-text: 252 165 165;
+  --status-inactive: 113 113 122;
+  --status-inactive-text: 161 161 170;
 }
 
 html, body, #root {
@@ -115,13 +126,20 @@ body {
 .semantic-message-group-user > header { justify-content: flex-end; }
 .semantic-message-time { color: rgb(82 82 91); font-size: 0.7rem; font-weight: 400; letter-spacing: 0; text-transform: none; }
 
+.semantic-session-status.is-working { border-color: rgb(var(--status-working) / 0.25); background: rgb(var(--status-working) / 0.1); color: rgb(var(--status-working-text)); }
+.semantic-session-status.is-starting { border-color: rgb(var(--status-transition) / 0.25); background: rgb(var(--status-transition) / 0.1); color: rgb(var(--status-transition-text)); }
+.semantic-session-status.is-idle { border-color: rgb(var(--status-idle) / 0.25); background: rgb(var(--status-idle) / 0.1); color: rgb(var(--status-idle-text)); }
+.semantic-session-status.is-error { border-color: rgb(var(--status-error) / 0.25); background: rgb(var(--status-error) / 0.1); color: rgb(var(--status-error-text)); }
+.semantic-session-status.is-inactive { border-color: rgb(var(--status-inactive) / 0.6); background: rgb(39 39 42 / 0.7); color: rgb(var(--status-inactive-text)); }
+.session-location { min-width: 0; overflow: hidden; direction: ltr; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+
 .semantic-streaming-dot {
   display: inline-block;
   width: 0.45rem;
   height: 0.45rem;
   margin-left: 0.5rem;
   border-radius: 999px;
-  background: rgb(56 189 248);
+  background: rgb(var(--status-working));
   animation: pulse 1.2s ease-in-out infinite;
 }
 
@@ -202,17 +220,22 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-tool-success { display: flex; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(16 185 129 / 0.08); padding: 0.7rem 0.8rem; color: rgb(110 231 183); font-size: 0.85rem; }
 
 .semantic-activity-label { display: flex; align-items: center; gap: 0.35rem; color: rgb(161 161 170); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
-.semantic-compaction-status { display: flex; align-items: flex-start; gap: 0.65rem; border: 1px solid rgb(56 189 248 / 0.28); border-radius: 0.75rem; background: rgb(56 189 248 / 0.07); padding: 0.75rem 0.85rem; color: rgb(125 211 252); }
+.semantic-compaction-status { display: flex; align-items: flex-start; gap: 0.65rem; border: 1px solid rgb(var(--status-working) / 0.28); border-radius: 0.75rem; background: rgb(var(--status-working) / 0.07); padding: 0.75rem 0.85rem; color: rgb(var(--status-working-text)); }
 .semantic-compaction-status > svg { margin-top: 0.1rem; flex: none; }
 .semantic-compaction-status > div { display: grid; gap: 0.15rem; }
-.semantic-compaction-status strong { color: rgb(186 230 253); font-size: 0.84rem; font-weight: 600; }
+.semantic-compaction-status strong { color: rgb(var(--status-working-text)); font-size: 0.84rem; font-weight: 600; }
 .semantic-compaction-status small { color: rgb(113 113 122); font-size: 0.74rem; line-height: 1.45; }
 .semantic-subagent-list { display: grid; gap: 0.4rem; margin-top: 0.65rem; }
 .semantic-subagent-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.6rem; border-top: 1px solid rgb(63 63 70 / 0.5); padding-top: 0.55rem; }
-.semantic-subagent-status { width: 0.55rem; height: 0.55rem; border-radius: 999px; background: rgb(113 113 122); }
-.semantic-subagent-status.is-creating, .semantic-subagent-status.is-working, .semantic-subagent-status.is-terminating { background: rgb(56 189 248); animation: pulse 1.2s ease-in-out infinite; }
-.semantic-subagent-status.is-completed { background: rgb(52 211 153); }
-.semantic-subagent-status.is-failed { background: rgb(248 113 113); }
+.semantic-subagent-status { width: 0.55rem; height: 0.55rem; border-radius: 999px; background: rgb(var(--status-inactive)); }
+.semantic-subagent-status.is-creating, .semantic-subagent-status.is-terminating { background: rgb(var(--status-transition)); animation: pulse 1.2s ease-in-out infinite; }
+.semantic-subagent-status.is-working { background: rgb(var(--status-working)); animation: pulse 1.2s ease-in-out infinite; }
+.semantic-subagent-status.is-completed { background: rgb(var(--status-working)); }
+.semantic-subagent-status.is-failed { background: rgb(var(--status-error)); }
+.semantic-subagent-status-label.is-creating, .semantic-subagent-status-label.is-terminating { color: rgb(var(--status-transition-text)); }
+.semantic-subagent-status-label.is-working, .semantic-subagent-status-label.is-completed { color: rgb(var(--status-working-text)); }
+.semantic-subagent-status-label.is-failed { color: rgb(var(--status-error-text)); }
+.semantic-subagent-status-label.is-terminated { color: rgb(var(--status-inactive-text)); }
 .semantic-subagent-main { display: grid; min-width: 0; }
 .semantic-subagent-main strong, .semantic-subagent-main button { overflow: hidden; color: rgb(228 228 231); font-size: 0.8rem; font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-subagent-main button:hover { color: rgb(125 211 252); text-decoration: underline; }
@@ -220,6 +243,11 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-subagent-activity { display: flex; max-width: 42vw; align-items: center; justify-content: flex-end; gap: 0.45rem; overflow: hidden; color: rgb(113 113 122); font-size: 0.7rem; white-space: nowrap; }
 .semantic-subagent-tool { overflow: hidden; color: rgb(125 211 252); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; }
 .semantic-live-subagents { max-height: 12rem; overflow-y: auto; margin-bottom: 0.55rem; border: 1px solid rgb(63 63 70 / 0.7); border-radius: 0.85rem; background: rgb(24 24 27 / 0.75); padding: 0.65rem 0.75rem; }
+.semantic-live-subagents.is-minimized { overflow: hidden; }
+.semantic-live-subagents-header { display: flex; min-height: 1.75rem; align-items: center; gap: 0.5rem; }
+.semantic-live-subagents-header > .semantic-queue-label { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-subagents-minimize { display: inline-grid; width: 1.75rem; height: 1.75rem; margin-left: auto; flex: none; place-items: center; border-radius: 0.4rem; color: rgb(161 161 170); }
+.semantic-subagents-minimize:hover { background: rgb(63 63 70 / 0.7); color: white; }
 .semantic-subagent-dialog-body { max-height: min(70vh, 48rem); overflow-y: auto; }
 .semantic-subagent-error { margin-bottom: 0.75rem; border: 1px solid rgb(248 113 113 / 0.3); border-radius: 0.6rem; background: rgb(248 113 113 / 0.08); padding: 0.7rem; color: rgb(252 165 165); font-size: 0.8rem; }
 .semantic-subagent-transcript-item + .semantic-subagent-transcript-item { margin-top: 1rem; }
@@ -281,6 +309,23 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-token-details { display: grid; min-width: 11rem; gap: 0.3rem; }
 .semantic-token-details > span { display: flex; justify-content: space-between; gap: 1rem; color: rgb(161 161 170); }
 .semantic-token-details strong { color: rgb(228 228 231); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.semantic-context-progress { display: grid; width: 1.75rem; height: 2.25rem; flex: none; cursor: default; place-items: center; border-radius: 0.5rem; color: rgb(var(--status-idle)); }
+.semantic-context-progress:hover { background: rgb(39 39 42); }
+.semantic-context-progress svg { width: 1.15rem; height: 1.15rem; transform: rotate(-90deg); transform-origin: center; overflow: visible; }
+.semantic-context-progress circle { fill: none; stroke-width: 2.25; }
+.semantic-context-progress-track { stroke: rgb(63 63 70); }
+.semantic-context-progress-value { stroke: currentcolor; stroke-linecap: round; }
+.semantic-context-progress.is-warning { color: rgb(var(--status-transition)); }
+.semantic-context-progress.is-critical { color: rgb(var(--status-error)); }
+.semantic-context-progress.is-compacting { color: rgb(var(--status-working)); }
+@keyframes semantic-context-progress-spin {
+  from { transform: rotate(-90deg); }
+  to { transform: rotate(270deg); }
+}
+.semantic-context-progress.is-compacting svg { animation: semantic-context-progress-spin 1s linear infinite; will-change: transform; }
+.semantic-context-progress-details { display: grid; min-width: 10rem; gap: 0.2rem; }
+.semantic-context-progress-details strong { color: rgb(228 228 231); font-size: 0.75rem; font-weight: 600; }
+.semantic-context-progress-details span { color: rgb(161 161 170); font: 0.7rem ui-monospace, SFMono-Regular, Menlo, monospace; }
 .semantic-composer-control { min-width: 0; overflow: hidden; color: rgb(161 161 170); text-overflow: ellipsis; white-space: nowrap; }
 .semantic-composer-menu button { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 0.75rem; border-radius: 0.4rem; padding: 0.55rem 0.65rem; color: rgb(212 212 216); text-align: left; }
 .semantic-composer-menu button:hover { background: rgb(39 39 42); }
@@ -289,13 +334,16 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-composer-menu small { overflow: hidden; color: rgb(113 113 122); font: 0.7rem ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-composer-menu-label { padding: 0.45rem 0.65rem 0.3rem; color: rgb(113 113 122); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
 .semantic-composer-menu-divider { height: 1px; margin: 0.35rem 0.45rem; background: rgb(63 63 70 / 0.75); }
+.semantic-model-menu { width: min(38rem, calc(100vw - 1rem)); }
+.semantic-model-menu-sections { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(13rem, 1fr); align-items: start; }
+.semantic-model-menu-section { min-width: 0; }
+.semantic-model-menu-effort { align-self: stretch; border-left: 1px solid rgb(63 63 70 / 0.75); }
 .semantic-effort-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .semantic-attachment-drop { position: absolute; inset: 0; z-index: 10; display: flex; pointer-events: none; align-items: center; justify-content: center; gap: 0.5rem; border-radius: 1rem; background: rgb(9 9 11 / 0.88); color: rgb(125 211 252); font-size: 0.85rem; font-weight: 600; }
 .semantic-queue { display: grid; margin-bottom: 0.5rem; }
 .semantic-queue-label { margin-bottom: 0.15rem; color: rgb(113 113 122); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-.semantic-queue-item { display: flex; min-width: 0; cursor: grab; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(39 39 42 / 0.72); padding: 0.45rem 0.55rem; color: rgb(161 161 170); font-size: 0.8rem; transition: opacity 150ms ease, background-color 150ms ease; }
-.semantic-queue-item:active { cursor: grabbing; }
-.semantic-queue-item.is-uncertain { cursor: default; border: 1px solid rgb(251 191 36 / 0.65); background: rgb(120 53 15 / 0.35); color: rgb(253 230 138); }
+.semantic-queue-item { display: flex; min-width: 0; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(39 39 42 / 0.72); padding: 0.45rem 0.55rem; color: rgb(161 161 170); font-size: 0.8rem; transition: opacity 150ms ease, background-color 150ms ease; }
+.semantic-queue-item.is-uncertain { border: 1px solid rgb(251 191 36 / 0.65); background: rgb(120 53 15 / 0.35); color: rgb(253 230 138); }
 .semantic-queue-item.is-blocked { cursor: not-allowed; opacity: 0.55; }
 .semantic-queue-item.is-sortable-dragging { opacity: 0; }
 .semantic-queue-item.is-overlay { width: min(34rem, calc(100vw - 2rem)); cursor: grabbing; border: 1px solid rgb(255 255 255 / 0.65); background: rgb(39 39 42); box-shadow: 0 18px 50px rgb(0 0 0 / 0.65); opacity: 1; }
@@ -305,9 +353,15 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-queue-item > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-queue-item > button { display: inline-grid; width: 1.75rem; height: 1.75rem; flex: none; cursor: pointer; place-items: center; border-radius: 0.4rem; color: rgb(161 161 170); }
 .semantic-queue-item > button:hover { background: rgb(63 63 70); color: white; }
+.semantic-queue-item > button:disabled { cursor: wait; opacity: 0.55; }
+.semantic-queue-item > button:disabled:hover { background: transparent; color: rgb(161 161 170); }
+.semantic-queue-item > button.semantic-queue-grip { cursor: grab; touch-action: none; }
+.semantic-queue-item > button.semantic-queue-grip:active { cursor: grabbing; }
 
 @media (max-width: 640px) {
   .semantic-token-inline { display: none; }
+  .semantic-model-menu-sections { grid-template-columns: minmax(0, 1fr); }
+  .semantic-model-menu-effort { margin-top: 0.35rem; border-top: 1px solid rgb(63 63 70 / 0.75); border-left: 0; padding-top: 0.35rem; }
   .semantic-token-mobile { display: inline-flex; }
   .semantic-tool summary, .semantic-tool-call summary { gap: 0.35rem; }
   .semantic-tool-detail { display: block; max-width: 38%; font-size: 0.72rem; }

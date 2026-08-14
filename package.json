@@ -22,6 +22,7 @@
 			"./extensions/session-footer.ts",
 			"./extensions/pr-footer.ts",
 			"./extensions/subagents.ts",
+			"./extensions/worktree.ts",
 			"./extensions/web-sessions.ts",
 			"./extensions/delete-session.ts"
 		],
@@ -33,7 +34,7 @@
 		]
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "*",
 		"typebox": "*"
 	},

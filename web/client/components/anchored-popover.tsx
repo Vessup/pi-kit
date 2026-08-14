@@ -1,5 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
+import { anchoredPopoverPosition } from "../anchored-position";
 import { cn } from "../lib/utils";
 
 type AnchoredPopoverProps = {
@@ -17,31 +18,52 @@ export function AnchoredPopover({ open, onOpenChange, anchorRef, children, class
 
   React.useLayoutEffect(() => {
     if (!open) return;
+    let frame: number | undefined;
     const update = () => {
       const anchor = anchorRef.current;
       const panel = panelRef.current;
       if (!anchor) return;
       const rect = anchor.getBoundingClientRect();
-      const width = panel?.offsetWidth ?? 240;
-      const height = panel?.offsetHeight ?? 200;
-      const left = align === "start" ? rect.left : rect.right - width;
-      const preferredTop = rect.bottom + 6;
-      const top = preferredTop + height <= window.innerHeight - 8
-        ? preferredTop
-        : Math.max(8, rect.top - height - 6);
-      setPosition({
-        left: Math.max(8, Math.min(window.innerWidth - width - 8, left)),
-        top,
+      const viewport = window.visualViewport;
+      const next = anchoredPopoverPosition({
+        anchor: rect,
+        panelWidth: panel?.offsetWidth ?? 240,
+        panelHeight: panel?.offsetHeight ?? 200,
+        viewport: {
+          offsetLeft: viewport?.offsetLeft ?? 0,
+          offsetTop: viewport?.offsetTop ?? 0,
+          width: viewport?.width ?? window.innerWidth,
+          height: viewport?.height ?? window.innerHeight,
+        },
+        align,
+      });
+      setPosition((current) => current.left === next.left && current.top === next.top ? current : next);
+    };
+    const scheduleUpdate = () => {
+      if (frame !== undefined) return;
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        update();
       });
     };
+
     update();
-    const frame = requestAnimationFrame(update);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", scheduleUpdate);
+    window.addEventListener("scroll", scheduleUpdate, true);
+    const viewport = window.visualViewport;
+    viewport?.addEventListener("resize", scheduleUpdate);
+    viewport?.addEventListener("scroll", scheduleUpdate);
+    const observer = new ResizeObserver(scheduleUpdate);
+    if (anchorRef.current) observer.observe(anchorRef.current);
+    if (panelRef.current) observer.observe(panelRef.current);
+
     return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleUpdate);
+      window.removeEventListener("scroll", scheduleUpdate, true);
+      viewport?.removeEventListener("resize", scheduleUpdate);
+      viewport?.removeEventListener("scroll", scheduleUpdate);
     };
   }, [align, anchorRef, open]);
 

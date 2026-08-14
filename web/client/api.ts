@@ -13,9 +13,42 @@ const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 const SOCKET_PATHS = ["/ws/client"] as const;
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 const FORK_COMMAND_TIMEOUT_MS = 35_000;
+const WORKTREE_COMMAND_TIMEOUT_MS = 11 * 60_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 11 * 60_000;
+function healthCapability(health: unknown, key: string): boolean {
+  const capabilities = health && typeof health === "object" && "capabilities" in health
+    ? (health as { capabilities?: unknown }).capabilities
+    : undefined;
+  return Boolean(capabilities && typeof capabilities === "object" && (capabilities as Record<string, unknown>)[key] === true);
+}
+
+export function commandHelloType(health: unknown): "client.hello" | "client.command_hello" {
+  return healthCapability(health, "commandHello") ? "client.command_hello" : "client.hello";
+}
+
+export function healthSupportsWorktreeRefs(health: unknown): boolean {
+  return healthCapability(health, "worktreeRefs");
+}
+
+async function supportsHealthCapability(key: string): Promise<boolean> {
+  try {
+    const response = await fetch("/api/health", { cache: "no-store" });
+    return response.ok && healthCapability(await response.json(), key);
+  } catch {
+    return false;
+  }
+}
+
+async function supportsWorktreeRefs(): Promise<boolean> {
+  return supportsHealthCapability("worktreeRefs");
+}
+
+async function supportsCommandHello(): Promise<boolean> {
+  return supportsHealthCapability("commandHello");
+}
 
 export function sessionCommandTimeout(command: AgentCommand | RpcSessionCommand): number {
+  if (command.type === "create_worktree" || command.type === "create_worktree_v2" || command.type === "reload") return WORKTREE_COMMAND_TIMEOUT_MS;
   if (command.type === "clone" || command.type === "fork") return FORK_COMMAND_TIMEOUT_MS;
   return command.type === "compact" || command.type === "bash"
     ? LONG_RUNNING_COMMAND_TIMEOUT_MS
@@ -72,6 +105,9 @@ export async function listSessions(): Promise<WebSession[]> {
 }
 
 export async function createSession(request: CreateSessionRequest): Promise<WebSession> {
+  if ((request.worktreeBranch || request.worktreeStartPoint) && !await supportsWorktreeRefs()) {
+    throw new Error("The running Pi Web daemon must be updated before creating a worktree with branch or start-point options");
+  }
   const data = await tryJson<SessionActionResponse>(["/api/sessions"], {
     method: "POST",
     body: JSON.stringify(request),
@@ -118,20 +154,37 @@ export function isServerMessage(message: unknown): message is ServerToClientMess
 }
 
 export async function sendSessionCommand(sessionId: string, command: AgentCommand | RpcSessionCommand): Promise<unknown> {
-  const socket = new SessionSocket();
-  await socket.connect();
+  // New daemons avoid a full session-catalog snapshot on one-shot command sockets.
+  // Fall back to client.hello when an older daemon is still serving a freshly built
+  // client bundle; this protocol skew previously broke Stop and every queue action.
+  const socket = new SessionSocket(await supportsCommandHello() ? "client.command_hello" : "client.hello");
+  let earlyClose: CloseEvent | undefined;
+  const unsubscribeEarlyClose = socket.onClose((event) => { earlyClose = event; });
+  try {
+    await socket.connect();
+  } catch (error) {
+    unsubscribeEarlyClose();
+    throw error;
+  }
   return new Promise<unknown>((resolve, reject) => {
     const requestId = crypto.randomUUID();
     let settled = false;
+    let timeout: number | undefined;
+    let unsubscribeMessage = () => {};
+    let unsubscribeClose = () => {};
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
-      window.clearTimeout(timeout);
-      unsubscribe();
+      if (timeout !== undefined) window.clearTimeout(timeout);
+      unsubscribeMessage();
+      unsubscribeClose();
       socket.close();
       callback();
     };
-    const unsubscribe = socket.onMessage((message) => {
+    const rejectClosed = (event: CloseEvent) => {
+      finish(() => reject(new Error(`Command socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`)));
+    };
+    unsubscribeMessage = socket.onMessage((message) => {
       if (!message || typeof message !== "object" || !("requestId" in message) || message.requestId !== requestId) return;
       const response = message as unknown as { success?: boolean; error?: string; data?: unknown };
       finish(() => {
@@ -139,11 +192,21 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
         else resolve(response.data);
       });
     });
-    const timeout = window.setTimeout(
+    unsubscribeClose = socket.onClose(rejectClosed);
+    unsubscribeEarlyClose();
+    if (earlyClose) {
+      rejectClosed(earlyClose);
+      return;
+    }
+    timeout = window.setTimeout(
       () => finish(() => reject(new Error(`Command timed out after ${sessionCommandTimeout(command)}ms`))),
       sessionCommandTimeout(command),
     );
-    socket.send({ type: "client.command", requestId, sessionId, command } satisfies ClientToServerMessage as Record<string, unknown>);
+    try {
+      socket.send({ type: "client.command", requestId, sessionId, command } satisfies ClientToServerMessage as Record<string, unknown>);
+    } catch (error) {
+      finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+    }
   });
 }
 
@@ -174,6 +237,15 @@ export async function cloneSessionViaCommand(sessionId: string): Promise<unknown
 
 export async function forkSessionViaCommand(sessionId: string, entryId: string): Promise<unknown> {
   return sendSessionCommand(sessionId, { type: "fork", entryId });
+}
+
+export async function createSessionWorktreeViaCommand(
+  sessionId: string,
+  repository: string,
+  name: string,
+  options: { branch?: string; startPoint?: string } = {},
+): Promise<unknown> {
+  return sendSessionCommand(sessionId, { type: "create_worktree", repository, name, ...options });
 }
 
 export async function openSessionSocket(onMessage: (message: unknown) => void): Promise<SessionSocket> {

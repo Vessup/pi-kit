@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { compareWebSessions, moveWebQueuedMessage, moveWebSession, moveWebSessionRelative, orderWebSessions, type ServerStateFile, type WebQueuedMessage, type WebSession } from "../web/protocol.ts";
 import { clearSessionProjectCache, resolveSessionProject } from "../web/server/projects.ts";
+import { createWebWorktree, WORKTREE_SESSION_ENTRY } from "../web/server/worktrees.ts";
 
 let child: Bun.Subprocess | undefined;
 let tempDir: string | undefined;
@@ -63,6 +64,29 @@ test("linked Git worktrees resolve to the same sidebar project", async () => {
 	const worktreeProject = resolveSessionProject(worktree);
 	expect(mainProject.id).toBe(worktreeProject.id);
 	expect(mainProject.name).toBe("project");
+	expect(mainProject.root).toBe(await realpath(repository));
+	expect(worktreeProject.root).toBe(await realpath(repository));
+});
+
+test("Git projects expose checkout roots for submodules and bare repositories", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-project-root-test-"));
+	const repository = join(tempDir, "project");
+	const childRepository = join(tempDir, "child-source");
+	const submodule = join(repository, "nested");
+	const bareRepository = join(tempDir, "archive.git");
+	for (const path of [repository, childRepository]) {
+		await Bun.$`git init -q ${path}`;
+		await Bun.$`git -C ${path} config user.name test`;
+		await Bun.$`git -C ${path} config user.email test@example.com`;
+		await Bun.write(join(path, "README.md"), "test\n");
+		await Bun.$`git -C ${path} add README.md`;
+		await Bun.$`git -C ${path} commit -qm initial`;
+	}
+	await Bun.$`git -c protocol.file.allow=always -C ${repository} submodule add -q ${childRepository} nested`;
+	await Bun.$`git init -q --bare ${bareRepository}`;
+	clearSessionProjectCache();
+	expect(resolveSessionProject(submodule).root).toBe(await realpath(submodule));
+	expect(resolveSessionProject(bareRepository).root).toBe(await realpath(bareRepository));
 });
 
 afterEach(async () => {
@@ -99,10 +123,18 @@ function sessionCommand(url: string, sessionId: string, command: Record<string, 
 		const socket = browserSocket(url);
 		const requestId = crypto.randomUUID();
 		const timeout = setTimeout(() => { socket.close(); reject(new Error("session command timed out")); }, 10_000);
-		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onopen = () => {
+			socket.send(JSON.stringify({ type: "client.command_hello" }));
+			socket.send(JSON.stringify({ type: "client.command", requestId, sessionId, command }));
+		};
 		socket.onmessage = ({ data }) => {
 			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; error?: string; data?: unknown };
-			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.command", requestId, sessionId, command }));
+			if (message.type === "server.snapshot") {
+				clearTimeout(timeout);
+				socket.close();
+				reject(new Error("command-only websocket unexpectedly received the session catalog"));
+				return;
+			}
 			if (message.type !== "server.response" || message.requestId !== requestId) return;
 			clearTimeout(timeout);
 			socket.close();
@@ -155,16 +187,80 @@ function websocketSnapshot(url: string): Promise<unknown> {
 	});
 }
 
+function nativeLifecycleStatuses(url: string, sessionId: string, agent: WebSocket): Promise<string[]> {
+	return new Promise((resolve, reject) => {
+		const statuses: string[] = [];
+		const socket = browserSocket(url);
+		let started = false;
+		const timeout = setTimeout(() => {
+			socket.close();
+			reject(new Error("native lifecycle status update timed out"));
+		}, 3_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; session?: WebSession };
+			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history" && message.sessionId === sessionId && !started) {
+				started = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_start" } }));
+				return;
+			}
+			if (!started || message.type !== "server.session" || message.session?.id !== sessionId) return;
+			if (message.session.status === "working" && statuses.length === 0) {
+				statuses.push("working");
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+			} else if (message.session.status === "idle" && statuses[0] === "working" && statuses.length === 1) {
+				statuses.push("idle");
+				agent.send(JSON.stringify({
+					type: "agent.update",
+					session: { ...message.session, status: "working", updatedAt: Date.now() },
+				}));
+			} else if (message.session.status === "idle" && statuses.length === 2) {
+				statuses.push("idle");
+				clearTimeout(timeout);
+				socket.close();
+				resolve(statuses);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("native lifecycle websocket failed")); };
+	});
+}
+
+function nativeUpdatePayload(url: string, sessionId: string, agent: WebSocket, session: WebSession): Promise<WebSession> {
+	return new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		let updateSent = false;
+		const timeout = setTimeout(() => {
+			socket.close();
+			reject(new Error("native update metadata timed out"));
+		}, 3_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; session?: WebSession };
+			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history" && message.sessionId === sessionId && !updateSent) {
+				updateSent = true;
+				agent.send(JSON.stringify({ type: "agent.update", session }));
+				return;
+			}
+			if (!updateSent || message.type !== "server.session" || message.session?.id !== sessionId) return;
+			clearTimeout(timeout);
+			socket.close();
+			resolve(message.session);
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("native update websocket failed")); };
+	});
+}
+
 test("Bun web server keeps tokenless clients inside localhost and same-origin trust boundaries", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-web-test-"));
 	const statePath = join(tempDir, "server.json");
-	const port = 32_000 + Math.floor(Math.random() * 8_000);
 	child = Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"],
 		cwd: process.cwd(),
 		env: {
 			...process.env,
-			PI_WEB_PORT: String(port),
+			PI_WEB_PORT: "0",
 			PI_WEB_ROOT: process.cwd(),
 			PI_WEB_STATE_FILE: statePath,
 			PI_CODING_AGENT_DIR: join(tempDir, "pi-agent"),
@@ -174,7 +270,8 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 	});
 
 	const state = await waitForState(statePath);
-	expect(state.port).toBe(port);
+	const { port } = state;
+	expect(port).toBeGreaterThan(0);
 
 	const health = await fetch(`http://127.0.0.1:${port}/api/health`);
 	expect(health.ok).toBe(true);
@@ -231,15 +328,29 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 			untrusted.onclose = () => { clearTimeout(timeout); resolve(); };
 		});
 	}
+	await new Promise<void>((resolve, reject) => {
+		const forwarded = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`, {
+			headers: { "X-Forwarded-Host": "pi-web.example.ts.net" },
+		} as unknown as string[]);
+		const timeout = setTimeout(() => reject(new Error("forwarded agent websocket did not close")), 1_000);
+		forwarded.onopen = () => { clearTimeout(timeout); forwarded.close(); reject(new Error("forwarded agent websocket was accepted")); };
+		forwarded.onerror = () => { clearTimeout(timeout); resolve(); };
+		forwarded.onclose = () => { clearTimeout(timeout); resolve(); };
+	});
 
 	const sessionId = `semantic-${crypto.randomUUID()}`;
+	const managedWorktree = { path: join(tempDir, "worktree"), repoRoot: tempDir, name: "worktree", branch: "feature", branchCreated: false };
+	const nativeSession: WebSession = { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 1 };
 	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
 	await new Promise<void>((resolve, reject) => {
 		agent.onopen = () => {
 			agent.send(JSON.stringify({
 				type: "agent.hello",
-				session: { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 1 },
-				entries: [{ id: "entry-1", type: "message", message: { role: "user", content: "semantic history" } }],
+				session: nativeSession,
+				entries: [
+					{ id: "entry-1", type: "message", message: { role: "user", content: "semantic history" } },
+					{ id: "worktree-1", type: "custom", customType: WORKTREE_SESSION_ENTRY, data: managedWorktree },
+				],
 			}));
 			resolve();
 		};
@@ -247,37 +358,23 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 	});
 	await Bun.sleep(25);
 	const history = await semanticHistory(`ws://127.0.0.1:${port}/ws/client`, sessionId);
-	expect(history).toHaveLength(1);
+	expect(history).toHaveLength(2);
+	const updated = await nativeUpdatePayload(`ws://127.0.0.1:${port}/ws/client`, sessionId, agent, {
+		...nativeSession,
+		updatedAt: Date.now() + 1,
+		messageCount: 2,
+	});
+	expect(updated.managedWorktree).toEqual(managedWorktree);
+	expect(await nativeLifecycleStatuses(`ws://127.0.0.1:${port}/ws/client`, sessionId, agent)).toEqual(["working", "idle", "idle"]);
 	agent.close();
 }, 15_000);
 
-function replaceQueueAndReadBack(url: string, sessionId: string): Promise<Array<{ id: string; message: string }>> {
-	return new Promise((resolve, reject) => {
-		const socket = browserSocket(url);
-		const requestId = crypto.randomUUID();
-		const expected = [{ id: "queued-1", message: "editable follow-up" }];
-		let subscribed = false;
-		const timeout = setTimeout(() => { socket.close(); reject(new Error("web queue round-trip timed out")); }, 10_000);
-		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
-		socket.onmessage = ({ data }) => {
-			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; event?: { type?: string; queue?: Array<{ id: string; message: string }> } };
-			if (message.type === "server.snapshot" && !subscribed) {
-				subscribed = true;
-				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
-				socket.send(JSON.stringify({ type: "client.command", requestId, sessionId, command: { type: "replace_queue", queue: expected } }));
-			}
-			if (message.type === "server.event" && message.event?.type === "web_queue_update" && message.event.queue?.[0]?.id === "queued-1") {
-				clearTimeout(timeout); socket.close(); resolve(message.event.queue);
-			}
-			if (message.type === "server.response" && message.requestId === requestId && message.success === false) {
-				clearTimeout(timeout); socket.close(); reject(new Error("replace_queue failed"));
-			}
-		};
-		socket.onerror = () => { clearTimeout(timeout); reject(new Error("web queue websocket failed")); };
-	});
-}
-
-async function queuedFollowUpDeliveryOrder(url: string, sessionId: string, agent: WebSocket): Promise<string[]> {
+async function queuedFollowUpDeliveryOrder(
+	url: string,
+	sessionId: string,
+	agent: WebSocket,
+	completionEvent: "agent_settled" | "agent_end" = "agent_settled",
+): Promise<string[]> {
 	const order: string[] = [];
 	let deliveryStarted = false;
 	let settledSent = false;
@@ -301,7 +398,10 @@ async function queuedFollowUpDeliveryOrder(url: string, sessionId: string, agent
 			if (message.type !== "server.event") return;
 			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !settledSent) {
 				settledSent = true;
-				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+				if (completionEvent === "agent_settled") {
+					agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				}
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: completionEvent } }));
 			}
 			if (message.event?.type === "web_queue_delivery" && message.event.phase === "started") {
 				deliveryStarted = true;
@@ -315,6 +415,267 @@ async function queuedFollowUpDeliveryOrder(url: string, sessionId: string, agent
 			}
 		};
 		socket.onerror = () => { clearTimeout(timeout); reject(new Error("queued delivery websocket failed")); };
+	});
+}
+
+async function steerQueuedFollowUpNow(url: string, sessionId: string, agent: WebSocket): Promise<{ behavior?: string; transcriptBeforePrompt: boolean; queueCleared: boolean }> {
+	let deliveryStarted = false;
+	let deliveryStartedWhenPrompted = false;
+	let behavior: string | undefined;
+	agent.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; streamingBehavior?: string } };
+		if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+		behavior = message.command.streamingBehavior;
+		deliveryStartedWhenPrompted = deliveryStarted;
+		agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+	};
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const queueRequestId = crypto.randomUUID();
+		const steerRequestId = crypto.randomUUID();
+		let steerSent = false;
+		let steerSucceeded = false;
+		let queueCleared = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("immediate queued steer timed out")); }, 10_000);
+		const finish = () => {
+			if (!steerSucceeded || !queueCleared || !behavior) return;
+			clearTimeout(timeout);
+			socket.close();
+			resolve({ behavior, transcriptBeforePrompt: deliveryStartedWhenPrompted, queueCleared });
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; event?: { type?: string; phase?: string; queue?: Array<{ id?: string }> } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({ type: "client.prompt", requestId: queueRequestId, sessionId, message: "steer this now", streamingBehavior: "followUp" }));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.some((item) => item.id === queueRequestId) && !steerSent) {
+				steerSent = true;
+				socket.send(JSON.stringify({ type: "client.command", requestId: steerRequestId, sessionId, command: { type: "steer_queue_item", itemId: queueRequestId } }));
+			}
+			if (message.event?.type === "web_queue_delivery" && message.event.phase === "started") deliveryStarted = true;
+			if (steerSent && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				queueCleared = true;
+				finish();
+			}
+			if (message.type === "server.response" && message.requestId === steerRequestId) {
+				if (message.success === false) {
+					clearTimeout(timeout);
+					socket.close();
+					reject(new Error("queued steer was rejected"));
+					return;
+				}
+				steerSucceeded = true;
+				finish();
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("immediate queued steer websocket failed")); };
+	});
+}
+
+async function idleQueueReplacementStartsAutomatically(url: string, sessionId: string, agent: WebSocket): Promise<string | undefined> {
+	let behavior: string | undefined;
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		let replaced = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("idle replacement queue timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; streamingBehavior?: string } };
+			if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+			behavior = message.command.streamingBehavior;
+			agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; session?: { id?: string; status?: string }; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history") {
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (!replaced && message.type === "server.session" && message.session?.id === sessionId && message.session.status === "idle") {
+				replaced = true;
+				socket.send(JSON.stringify({ type: "client.command", requestId, sessionId, command: { type: "replace_queue", queue: [{ id: "idle-replacement", message: "deliver from idle" }] } }));
+			}
+			if (replaced && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(behavior);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("idle replacement queue websocket failed")); };
+	});
+}
+
+async function rejectedPromptPreservesLegacyQueueFallback(url: string, sessionId: string, agent: WebSocket): Promise<string | undefined> {
+	let queuedBehavior: string | undefined;
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const queueRequestId = crypto.randomUUID();
+		const rejectedRequestId = crypto.randomUUID();
+		let completionSent = false;
+		let rejectionSent = false;
+		let rejectionObserved = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("rejected prompt queue fallback timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; message?: string; streamingBehavior?: string } };
+			if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+			if (message.command.message === "reject during grace") {
+				// Settlement belongs to the run that emitted agent_end, not this admitted
+				// prompt. Its later rejection must still roll back optimistic working state.
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+				setTimeout(() => agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: false, error: "rejected for test" })), 10);
+			} else if (message.command.message === "deliver despite rejection") {
+				queuedBehavior = message.command.streamingBehavior;
+				agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+			}
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; session?: { id?: string; status?: string }; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({ type: "client.prompt", requestId: queueRequestId, sessionId, message: "deliver despite rejection", streamingBehavior: "followUp" }));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !completionSent) {
+				completionSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+			}
+			if (completionSent && !rejectionSent && message.type === "server.session" && message.session?.id === sessionId && message.session.status === "idle") {
+				rejectionSent = true;
+				socket.send(JSON.stringify({ type: "client.prompt", requestId: rejectedRequestId, sessionId, message: "reject during grace" }));
+			}
+			if (message.type === "server.response" && message.requestId === rejectedRequestId && message.success === false) rejectionObserved = true;
+			if (rejectionObserved && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(queuedBehavior);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("rejected prompt queue fallback websocket failed")); };
+	});
+}
+
+async function lateSettlementDoesNotBurstQueue(url: string, sessionId: string, agent: WebSocket): Promise<number[]> {
+	const promptCounts: number[] = [];
+	let promptCount = 0;
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const replaceRequestId = crypto.randomUUID();
+		let completionSent = false;
+		let secondCompletionSent = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("late settlement queue test timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+			if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+			promptCount += 1;
+			agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+			if (promptCount === 1) {
+				setTimeout(() => agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } })), 10);
+				setTimeout(() => {
+					promptCounts.push(promptCount);
+					secondCompletionSent = true;
+					agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				}, 160);
+			}
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({
+					type: "client.command", requestId: replaceRequestId, sessionId,
+					command: { type: "replace_queue", queue: [{ id: "late-1", message: "first" }, { id: "late-2", message: "second" }] },
+				}));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 2 && !completionSent) {
+				completionSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+			}
+			if (secondCompletionSent && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				promptCounts.push(promptCount);
+				clearTimeout(timeout);
+				socket.close();
+				resolve(promptCounts);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("late settlement queue websocket failed")); };
+	});
+}
+
+async function promptAdmissionStatus(url: string, sessionId: string, agent: WebSocket): Promise<string[]> {
+	const statuses: string[] = [];
+	agent.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+		if (message.type === "agent.command" && message.command?.type === "prompt" && message.requestId) {
+			agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+		}
+	};
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		let prompted = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("prompt admission status timed out")); }, 10_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; session?: { id?: string; status?: string } };
+			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history") {
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (message.type === "server.session" && message.session?.id === sessionId && message.session.status === "idle" && !prompted) {
+				prompted = true;
+				statuses.push("idle");
+				socket.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "start immediately" }));
+			} else if (prompted && message.type === "server.session" && message.session?.id === sessionId && message.session.status === "working") {
+				if (statuses.at(-1) !== "working") statuses.push("working");
+			}
+			if (message.type === "server.response" && message.requestId === requestId) {
+				clearTimeout(timeout);
+				socket.close();
+				if (!message.success) reject(new Error("prompt admission failed"));
+				else resolve(statuses);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("prompt admission websocket failed")); };
+	});
+}
+
+async function promptAcknowledgementLossBecomesUncertain(url: string, sessionId: string, agent: WebSocket): Promise<boolean> {
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		let completionSent = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("prompt acknowledgement uncertainty timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+			// This deliberately destroys the shared agent connection and must remain the
+			// final helper in the aggregated native-session test below.
+			if (message.type === "agent.command" && message.command?.type === "prompt" && message.requestId) agent.close();
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; event?: { type?: string; phase?: string; queue?: Array<{ deliveryState?: string }> } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "do not redeliver", streamingBehavior: "followUp" }));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !completionSent) {
+				completionSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (message.event?.type === "web_queue_delivery" && message.event.phase === "uncertain") {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(true);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("prompt acknowledgement uncertainty websocket failed")); };
 	});
 }
 
@@ -337,7 +698,7 @@ async function compactionLifecycle(url: string, sessionId: string, agent: WebSoc
 			if (message.session.compaction?.reason === "overflow" && !ended) {
 				states.push({ reason: message.session.compaction.reason, status: message.session.status });
 				ended = true;
-				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "compaction_end", reason: "overflow", aborted: false, willRetry: true } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "compaction_end", reason: "overflow", aborted: false, willRetry: false } }));
 			} else if (ended && !message.session.compaction) {
 				states.push({ status: message.session.status });
 				clearTimeout(timeout);
@@ -374,18 +735,17 @@ test("an idle native session flushes its restored web follow-up queue on hello",
 		version: 1,
 		queues: { [sessionId]: [{ id: "restored-follow-up", message: "deliver after reconnect" }] },
 	}));
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
 	child = Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	const { port } = await waitForState(statePath);
 	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
-	const delivered = new Promise<{ type?: string; message?: string }>((resolve, reject) => {
+	const delivered = new Promise<{ type?: string; message?: string; streamingBehavior?: string }>((resolve, reject) => {
 		const timeout = setTimeout(() => reject(new Error("restored queue was not flushed after hello")), 5_000);
 		agent.onmessage = ({ data }) => {
-			const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; message?: string } };
+			const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; message?: string; streamingBehavior?: string } };
 			if (frame.type !== "agent.command" || frame.command?.type !== "prompt" || !frame.requestId) return;
 			clearTimeout(timeout);
 			agent.send(JSON.stringify({ type: "agent.response", requestId: frame.requestId, success: true }));
@@ -404,7 +764,56 @@ test("an idle native session flushes its restored web follow-up queue on hello",
 		};
 		agent.onerror = () => reject(new Error("native agent websocket failed"));
 	});
-	expect(await delivered).toEqual({ type: "prompt", message: "deliver after reconnect" });
+	expect(await delivered).toEqual({ type: "prompt", message: "deliver after reconnect", streamingBehavior: "followUp" });
+	agent.close();
+}, 10_000);
+
+test("a visible client can resynchronize a durable queue after a missed reconnect update", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queue-sync-test-"));
+	const statePath = join(tempDir, "web", "server.json");
+	const sessionId = `queue-sync-${crypto.randomUUID()}`;
+	const expectedQueue = [{ id: "still-durable", message: "remain visible after wake" }];
+	await mkdir(join(tempDir, "web"), { recursive: true });
+	await writeFile(join(tempDir, "web", "queues.json"), JSON.stringify({ version: 2, queues: { [sessionId]: expectedQueue } }));
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({
+				type: "agent.hello",
+				session: { id: sessionId, cwd: tempDir, status: "working", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+				entries: [],
+			}));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("queue sync agent failed"));
+	});
+	const synchronized = await new Promise<unknown[]>((resolve, reject) => {
+		const socket = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+		let queueSnapshots = 0;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("queue resynchronization timed out")); }, 5_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const frame = JSON.parse(String(data)) as { type?: string; event?: { type?: string; queue?: unknown[] } };
+			if (frame.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (frame.event?.type !== "web_queue_update") return;
+			queueSnapshots++;
+			if (queueSnapshots === 1) socket.send(JSON.stringify({ type: "client.sync_queue", requestId: "wake-sync", sessionId }));
+			else {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(frame.event.queue ?? []);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("queue sync client failed")); };
+	});
+	expect(synchronized).toEqual(expectedQueue);
+	expect(await Bun.file(join(tempDir, "web", "queues.json")).json()).toEqual({ version: 2, queues: { [sessionId]: expectedQueue } });
 	agent.close();
 }, 10_000);
 
@@ -417,9 +826,8 @@ test("restored uncertain delivery is never automatic and requires explicit recon
 		{ id: "maybe-sent", message: "perform once", deliveryState: "delivering" },
 		{ id: "following", message: "must remain blocked" },
 	] } }));
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
-	child = Bun.spawn({ cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(), env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") }, stdout: "ignore", stderr: "ignore" });
-	await waitForState(statePath);
+	child = Bun.spawn({ cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(), env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") }, stdout: "ignore", stderr: "ignore" });
+	const { port } = await waitForState(statePath);
 	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
 	let prompts = 0;
 	agent.onmessage = ({ data }) => { const frame = JSON.parse(String(data)) as { command?: { type?: string } }; if (frame.command?.type === "prompt") prompts++; };
@@ -491,25 +899,30 @@ import { createInterface } from "node:readline";
 const sessionId = ${JSON.stringify(sessionId)};
 const sessionFile = ${JSON.stringify(sessionFile)};
 const entries = [{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } }];
+let reloadGeneration = 0;
+let sessionName = "named session";
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {
   const request = JSON.parse(line);
   let data;
-  if (request.type === "get_state") data = { sessionId, sessionFile, messageCount: entries.length, isStreaming: false };
+  if (request.type === "get_state") data = { sessionId, sessionFile, sessionName, messageCount: entries.length, isStreaming: false };
   else if (request.type === "get_entries") data = { entries, leafId: "managed-entry" };
   else if (request.type === "get_session_stats") data = {};
+  else if (request.type === "get_commands") data = { commands: [{ name: "web-reload", description: "generation-" + reloadGeneration, source: "extension", sourceInfo: { path: "web-sessions.ts", scope: "temporary" } }] };
+  else if (request.type === "set_session_name") sessionName = request.name || null;
+  else if (request.type === "prompt" && request.message === "/web-reload") reloadGeneration += 1;
   process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+  if (request.type === "set_session_name") process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
 }
 `);
 	await chmod(fakePi, 0o755);
 	const statePath = join(tempDir, "server.json");
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
 	child = Bun.spawn({
 		cmd: ["bun", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	const { port } = await waitForState(statePath);
 
 	const socket = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
 	let initialHistory!: () => void;
@@ -543,6 +956,64 @@ for await (const line of lines) {
 	expect(await resumedHistory).toEqual([
 		{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } },
 	]);
+	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; name?: string }> };
+	expect(initialCatalog.sessions.find((session) => session.id === sessionId)?.name).toBe("named session");
+	await sessionCommand(`ws://127.0.0.1:${port}/ws/client`, sessionId, { type: "set_session_name", name: "" });
+	let clearedName: string | undefined = "named session";
+	const clearDeadline = Date.now() + 3_000;
+	while (Date.now() < clearDeadline && clearedName !== undefined) {
+		await Bun.sleep(25);
+		const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; name?: string }> };
+		clearedName = catalog.sessions.find((session) => session.id === sessionId)?.name;
+	}
+	expect(clearedName).toBeUndefined();
+
+	const reloadResult = new Promise<{ response: unknown; confirmation: string }>((resolve, reject) => {
+		const reloadSocket = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+		const requestId = crypto.randomUUID();
+		let promptSent = false;
+		let response: unknown;
+		let confirmation: string | undefined;
+		const timeout = setTimeout(() => { reloadSocket.close(); reject(new Error("resumed managed reload timed out")); }, 5_000);
+		const finish = () => {
+			if (response === undefined || confirmation === undefined) return;
+			clearTimeout(timeout);
+			reloadSocket.close();
+			resolve({ response, confirmation });
+		};
+		reloadSocket.onopen = () => reloadSocket.send(JSON.stringify({ type: "client.hello" }));
+		reloadSocket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as {
+				type?: string;
+				requestId?: string;
+				success?: boolean;
+				data?: unknown;
+				error?: string;
+				event?: { type?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
+			};
+			if (message.type === "server.snapshot") reloadSocket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history" && !promptSent) {
+				promptSent = true;
+				reloadSocket.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "/reload", images: [] }));
+			}
+			if (message.type === "server.event" && message.event?.type === "message_end") {
+				confirmation = message.event.message?.content?.find((part) => part.type === "text")?.text;
+				finish();
+			}
+			if (message.type !== "server.response" || message.requestId !== requestId) return;
+			if (!message.success) {
+				clearTimeout(timeout);
+				reloadSocket.close();
+				reject(new Error(message.error ?? "resumed managed reload failed"));
+				return;
+			}
+			response = message.data;
+			finish();
+		};
+	});
+	expect(await reloadResult).toEqual({ response: { reloaded: true }, confirmation: "Reload complete." });
+	const afterReload = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; status: string }> };
+	expect(afterReload.sessions.find((session) => session.id === sessionId)?.status).toBe("idle");
 }, 10_000);
 
 test("managed RPC requests fail within the configured bound when Pi wedges", async () => {
@@ -555,13 +1026,12 @@ test("managed RPC requests fail within the configured bound when Pi wedges", asy
 	await writeFile(fakePi, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n");
 	await chmod(fakePi, 0o755);
 	const statePath = join(tempDir, "server.json");
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
 	child = Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
 		env: {
 			...process.env,
 			PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
-			PI_WEB_PORT: String(port),
+			PI_WEB_PORT: "0",
 			PI_WEB_ROOT: process.cwd(),
 			PI_WEB_STATE_FILE: statePath,
 			PI_WEB_RPC_TIMEOUT_MS: "50",
@@ -569,7 +1039,7 @@ test("managed RPC requests fail within the configured bound when Pi wedges", asy
 		},
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	const { port } = await waitForState(statePath);
 	const response = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
 		method: "POST",
 		headers: { "content-type": "application/json", Origin: `http://127.0.0.1:${port}` },
@@ -577,6 +1047,145 @@ test("managed RPC requests fail within the configured bound when Pi wedges", asy
 	});
 	expect(response.status).toBe(500);
 	expect(await response.text()).toContain("RPC command get_state timed out after 50ms");
+}, 10_000);
+
+test("sessions deleted from the TUI are removed from the live web catalog", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-external-session-delete-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const queuePath = join(webDir, "queues.json");
+	const repository = join(tempDir, "repository");
+	await mkdir(repository, { recursive: true });
+	await Bun.$`git -C ${repository} init -q`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "base\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+	const worktree = await createWebWorktree(repository, "tui-delete");
+	const sessionId = `tui-delete-${crypto.randomUUID()}`;
+	const survivorId = `tui-survivor-${crypto.randomUUID()}`;
+	const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
+	const survivorFile = join(sessionsDir, `${survivorId}.jsonl`);
+	await mkdir(sessionsDir, { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(sessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: worktree.path, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "managed-worktree", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: worktree }),
+	].join("\n") + "\n");
+	await writeFile(survivorFile, `${JSON.stringify({ type: "session", version: 3, id: survivorId, cwd: repository, timestamp: new Date().toISOString() })}\n`);
+	await writeFile(queuePath, `${JSON.stringify({ version: 2, queues: { [sessionId]: [{ id: "stale", message: "remove with session" }] } })}\n`);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(initialCatalog.sessions.some((session) => session.id === sessionId)).toBe(true);
+	expect(initialCatalog.sessions.some((session) => session.id === survivorId)).toBe(true);
+	const observer = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+	let resolveReady!: () => void;
+	let resolveRemoved!: () => void;
+	const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+	const removed = new Promise<void>((resolve) => { resolveRemoved = resolve; });
+	observer.onopen = () => observer.send(JSON.stringify({ type: "client.hello" }));
+	observer.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; sessions?: Array<{ id: string }> };
+		if (message.type === "server.snapshot") {
+			expect(message.sessions?.some((session) => session.id === sessionId)).toBe(true);
+			observer.send(JSON.stringify({ type: "client.subscribe", sessionId: survivorId }));
+		}
+		if (message.type === "server.history" && message.sessionId === survivorId) resolveReady();
+		if (message.type === "server.session_removed" && message.sessionId === sessionId) resolveRemoved();
+	};
+	await ready;
+
+	// Pi's built-in /resume selector deletes the JSONL directly, outside the web API.
+	await rm(sessionFile);
+	await Promise.race([
+		removed,
+		Bun.sleep(4_000).then(() => { throw new Error("externally deleted session was not removed from Pi web"); }),
+	]);
+	const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(catalog.sessions.some((session) => session.id === sessionId)).toBe(false);
+	expect(catalog.sessions.some((session) => session.id === survivorId)).toBe(true);
+	expect(await Bun.file(queuePath).json()).toEqual({ version: 2, queues: {} });
+	await expect(readFile(join(worktree.path, "README.md"), "utf8")).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} branch --list tui-delete`.text()).trim()).toBe("");
+	observer.close();
+}, 10_000);
+
+test("transient session-file access errors do not reconcile as deletion", async () => {
+	if (process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0)) return;
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-session-access-error-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const queuePath = join(webDir, "queues.json");
+	const sessionId = `access-error-${crypto.randomUUID()}`;
+	const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
+	await mkdir(sessionsDir, { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: tempDir, timestamp: new Date().toISOString() })}\n`);
+	await writeFile(queuePath, `${JSON.stringify({ version: 2, queues: { [sessionId]: [{ id: "retained", message: "keep during access error" }] } })}\n`);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const initial = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(initial.sessions.some((session) => session.id === sessionId)).toBe(true);
+
+	await chmod(sessionsDir, 0o000);
+	try {
+		await Bun.sleep(1_500);
+	} finally {
+		await chmod(sessionsDir, 0o700);
+	}
+	const afterError = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(afterError.sessions.some((session) => session.id === sessionId)).toBe(true);
+	expect(await Bun.file(queuePath).json()).toEqual({ version: 2, queues: { [sessionId]: [{ id: "retained", message: "keep during access error" }] } });
+}, 10_000);
+
+test("saved-session metadata refresh clears hydrated ownership and skips malformed markers", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-marker-clear-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const statePath = join(tempDir, "web", "server.json");
+	const clearedSessionId = `marker-clear-${crypto.randomUUID()}`;
+	const malformedSessionId = `marker-malformed-${crypto.randomUUID()}`;
+	const managedWorktree = { path: join(tempDir, "worktree"), repoRoot: tempDir, name: "worktree", branch: "feature", branchCreated: true };
+	await mkdir(sessionsDir, { recursive: true });
+	const clearedSessionFile = join(sessionsDir, `${clearedSessionId}.jsonl`);
+	await writeFile(clearedSessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: clearedSessionId, cwd: tempDir, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "owned", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: managedWorktree }),
+	].join("\n") + "\n");
+	await writeFile(join(sessionsDir, `${malformedSessionId}.jsonl`), [
+		JSON.stringify({ type: "session", version: 3, id: malformedSessionId, cwd: tempDir, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "owned", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: managedWorktree }),
+		JSON.stringify({ type: "custom", id: "malformed", parentId: "owned", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { managed: true } }),
+	].join("\n") + "\n");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown }> };
+	expect(initialCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toEqual(managedWorktree);
+	expect(initialCatalog.sessions.find((session) => session.id === malformedSessionId)?.managedWorktree).toEqual(managedWorktree);
+
+	await appendFile(clearedSessionFile,
+		`${JSON.stringify({ type: "custom", id: "cleared", parentId: "owned", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { ...managedWorktree, managed: false } })}\n`,
+	);
+	const refreshedCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown }> };
+	expect(refreshedCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toBeUndefined();
 }, 10_000);
 
 test("failed durable queue deletion leaves the session file and record retryable", async () => {
@@ -593,13 +1202,12 @@ test("failed durable queue deletion leaves the session file and record retryable
 	await mkdir(join(tempDir, "web"), { recursive: true });
 	await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: project, timestamp: new Date().toISOString() })}\n`);
 	await writeFile(queuePath, JSON.stringify({ version: 2, queues: { [sessionId]: [{ id: "retained", message: "do not lose" }] } }));
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
 	child = Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	const { port } = await waitForState(statePath);
 	await fetch(`http://127.0.0.1:${port}/api/sessions`);
 	await rm(queuePath, { force: true });
 	await mkdir(queuePath);
@@ -620,6 +1228,135 @@ test("failed durable queue deletion leaves the session file and record retryable
 	});
 	expect(retried.status).toBe(200);
 	await expect(readFile(sessionFile, "utf8")).rejects.toThrow();
+}, 10_000);
+
+test("deleting a saved managed-worktree session removes its checkout and branch", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-delete-worktree-test-"));
+	const repository = join(tempDir, "repository");
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionDirectory = join(agentDir, "sessions", "worktree");
+	await mkdir(repository, { recursive: true });
+	await mkdir(sessionDirectory, { recursive: true });
+	await Bun.$`git -C ${repository} init -q`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "base\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+	const worktree = await createWebWorktree(repository, "delete-with-session");
+	const sessionId = `worktree-${crypto.randomUUID()}`;
+	const sessionFile = join(sessionDirectory, `${sessionId}.jsonl`);
+	await writeFile(sessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: worktree.path, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "managed-worktree", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: worktree }),
+	].join("\n") + "\n");
+	const statePath = join(tempDir, "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const origin = `http://127.0.0.1:${port}`;
+	const response = await fetch(`${origin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+		method: "DELETE",
+		headers: { Origin: origin },
+	});
+	expect(response.status).toBe(200);
+	await expect(readFile(sessionFile, "utf8")).rejects.toThrow();
+	await expect(readFile(join(worktree.path, "README.md"), "utf8")).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} branch --list delete-with-session`.text()).trim()).toBe("");
+}, 10_000);
+
+test("worktree cleanup failure does not turn a completed session deletion into an error", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-delete-worktree-warning-test-"));
+	const repository = join(tempDir, "repository");
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionDirectory = join(agentDir, "sessions", "worktree");
+	await mkdir(repository, { recursive: true });
+	await mkdir(sessionDirectory, { recursive: true });
+	await Bun.$`git -C ${repository} init -q`;
+	const doomedId = `doomed-${crypto.randomUUID()}`;
+	const survivorId = `survivor-${crypto.randomUUID()}`;
+	const doomedFile = join(sessionDirectory, `${doomedId}.jsonl`);
+	const survivorFile = join(sessionDirectory, `${survivorId}.jsonl`);
+	const invalidWorktree = { path: join(repository, ".pi", "worktrees", "missing"), repoRoot: repository, branch: "missing" };
+	await writeFile(doomedFile, [
+		JSON.stringify({ type: "session", version: 3, id: doomedId, cwd: invalidWorktree.path, timestamp: new Date().toISOString() }),
+		JSON.stringify({ type: "custom", id: "managed-worktree", parentId: null, timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: invalidWorktree }),
+	].join("\n") + "\n");
+	await writeFile(survivorFile, `${JSON.stringify({ type: "session", version: 3, id: survivorId, cwd: repository, timestamp: new Date().toISOString() })}\n`);
+	const statePath = join(tempDir, "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const origin = `http://127.0.0.1:${port}`;
+	const observer = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+	let resolveReady!: () => void;
+	let resolveRemoved!: (sessionId: string) => void;
+	const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+	const removed = new Promise<string>((resolve) => { resolveRemoved = resolve; });
+	observer.onopen = () => observer.send(JSON.stringify({ type: "client.hello" }));
+	observer.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; sessionId?: string };
+		if (message.type === "server.snapshot") observer.send(JSON.stringify({ type: "client.subscribe", sessionId: survivorId }));
+		if (message.type === "server.history" && message.sessionId === survivorId) resolveReady();
+		if (message.type === "server.session_removed" && message.sessionId) resolveRemoved(message.sessionId);
+	};
+	await ready;
+	const response = await fetch(`${origin}/api/sessions/${encodeURIComponent(doomedId)}`, {
+		method: "DELETE",
+		headers: { Origin: origin },
+	});
+	expect(response.status).toBe(200);
+	expect(await removed).toBe(doomedId);
+	await expect(readFile(doomedFile, "utf8")).rejects.toThrow();
+	observer.close();
+}, 10_000);
+
+test("daemon restart completes a staged managed worktree source deletion", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-delete-recovery-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsRoot = join(agentDir, "sessions");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const sourceId = `source-${crypto.randomUUID()}`;
+	const replacementId = `replacement-${crypto.randomUUID()}`;
+	const sourceFile = join(sessionsRoot, "source", `${sourceId}.jsonl`);
+	const tombstone = `${sourceFile}.replaced-${crypto.randomUUID()}.tmp`;
+	const replacementFile = join(sessionsRoot, "replacement", `${replacementId}.jsonl`);
+	const uncommittedSourceId = `uncommitted-${crypto.randomUUID()}`;
+	const uncommittedSourceFile = join(sessionsRoot, "uncommitted", `${uncommittedSourceId}.jsonl`);
+	const uncommittedTombstone = `${uncommittedSourceFile}.replaced-${crypto.randomUUID()}.tmp`;
+	await mkdir(dirname(sourceFile), { recursive: true });
+	await mkdir(dirname(uncommittedSourceFile), { recursive: true });
+	await mkdir(dirname(replacementFile), { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(tombstone, `${JSON.stringify({ type: "session", version: 3, id: sourceId, timestamp: new Date().toISOString(), cwd: tempDir })}\n`);
+	await writeFile(uncommittedTombstone, `${JSON.stringify({ type: "session", version: 3, id: uncommittedSourceId, timestamp: new Date().toISOString(), cwd: tempDir })}\n`);
+	await writeFile(replacementFile, [
+		JSON.stringify({ type: "session", version: 3, id: replacementId, timestamp: new Date().toISOString(), cwd: tempDir }),
+		JSON.stringify({ type: "custom", id: crypto.randomUUID(), parentId: null, timestamp: new Date().toISOString(), customType: "vessup-replaced-session", data: { previousSessionId: sourceId, previousSessionFile: sourceFile, replacementSessionId: replacementId } }),
+	].join("\n") + "\n");
+	await writeFile(join(webDir, "managed-sessions.json"), `${JSON.stringify({ version: 1, files: [sourceFile, uncommittedSourceFile] })}\n`);
+	await writeFile(join(webDir, "queues.json"), `${JSON.stringify({ version: 2, queues: { [sourceId]: [{ id: "queued", message: "preserve queue" }] } })}\n`);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	expect(await Bun.file(tombstone).exists()).toBe(false);
+	expect(await Bun.file(sourceFile).exists()).toBe(false);
+	expect(await Bun.file(uncommittedTombstone).exists()).toBe(false);
+	expect(await Bun.file(uncommittedSourceFile).exists()).toBe(true);
+	const managed = await Bun.file(join(webDir, "managed-sessions.json")).json() as { version: number; files: string[] };
+	expect(managed.version).toBe(1);
+	expect([...managed.files].sort()).toEqual([await realpath(uncommittedSourceFile), await realpath(replacementFile)].sort());
+	expect(await Bun.file(join(webDir, "queues.json")).json()).toEqual({ version: 2, queues: { [replacementId]: [{ id: "queued", message: "preserve queue" }] } });
 }, 10_000);
 
 test("managed startup failure retains an initialized worktree and setup output", async () => {
@@ -661,23 +1398,21 @@ for await (const line of lines) {
 `);
 	await chmod(fakePi, 0o755);
 	const statePath = join(tempDir, "server.json");
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
 	child = Bun.spawn({
 		cmd: ["bun", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	const { port } = await waitForState(statePath);
 	const origin = `http://127.0.0.1:${port}`;
 	const baseResponse = await fetch(`${origin}/api/sessions`, {
 		method: "POST", headers: { "content-type": "application/json", Origin: origin }, body: JSON.stringify({ cwd: repository }),
 	});
 	expect(baseResponse.status).toBe(201);
 	expect(await readFile(piStartedMarker, "utf8")).toBe("started");
-	const base = await baseResponse.json() as { session: WebSession };
 	const failed = await fetch(`${origin}/api/sessions`, {
 		method: "POST", headers: { "content-type": "application/json", Origin: origin },
-		body: JSON.stringify({ worktreeName: "startup-fails", worktreeBaseSessionId: base.session.id }),
+		body: JSON.stringify({ cwd: repository, worktreeName: "startup-fails" }),
 	});
 	expect(failed.status).toBe(500);
 	const worktree = join(repository, ".pi", "worktrees", "startup-fails");
@@ -686,16 +1421,336 @@ for await (const line of lines) {
 	expect((await Bun.$`git -C ${repository} branch --list startup-fails`.text()).trim()).toContain("startup-fails");
 }, 15_000);
 
+test("web reload survives a native bridge reconnect", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-reload-test-"));
+	const statePath = join(tempDir, "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const sessionId = `reload-${crypto.randomUUID()}`;
+	const socketUrl = `ws://127.0.0.1:${port}`;
+	const connectAgent = async () => {
+		const agent = new WebSocket(`${socketUrl}/ws/agent`);
+		await new Promise<void>((resolve, reject) => {
+			agent.onopen = () => {
+				agent.send(JSON.stringify({
+					type: "agent.hello",
+					session: { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+					entries: [],
+				}));
+				resolve();
+			};
+			agent.onerror = () => reject(new Error("reload agent websocket failed"));
+		});
+		return agent;
+	};
+	const firstAgent = await connectAgent();
+	await Bun.sleep(25);
+	const result = new Promise<unknown>((resolve, reject) => {
+		const client = browserSocket(`${socketUrl}/ws/client`);
+		const clientRequestId = crypto.randomUUID();
+		const timeout = setTimeout(() => { client.close(); reject(new Error("native reload response timed out")); }, 5_000);
+		client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+		client.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; data?: unknown };
+			if (message.type === "server.snapshot") {
+				client.send(JSON.stringify({ type: "client.prompt", requestId: clientRequestId, sessionId, message: "/reload", images: [] }));
+			}
+			if (message.type !== "server.response" || message.requestId !== clientRequestId) return;
+			clearTimeout(timeout);
+			client.close();
+			message.success ? resolve(message.data) : reject(new Error("native reload failed"));
+		};
+	});
+	const agentCommand = await new Promise<{ requestId: string; command: { type: string } }>((resolve, reject) => {
+		const timeout = setTimeout(() => reject(new Error("reload command was not routed to native Pi")), 3_000);
+		firstAgent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+			if (message.type !== "agent.command" || !message.requestId || message.command?.type !== "reload") return;
+			clearTimeout(timeout);
+			resolve({ requestId: message.requestId, command: { type: message.command.type } });
+		};
+	});
+	firstAgent.close();
+	await Bun.sleep(25);
+	const replacementAgent = await connectAgent();
+	replacementAgent.send(JSON.stringify({ type: "agent.response", requestId: agentCommand.requestId, success: true, data: { reloaded: true } }));
+	expect(await result).toEqual({ reloaded: true });
+	replacementAgent.close();
+}, 10_000);
+
+test("queued web reload waits for active subagents and executes as a control command", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queued-reload-test-"));
+	const statePath = join(tempDir, "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const sessionId = `queued-reload-${crypto.randomUUID()}`;
+	const socketUrl = `ws://127.0.0.1:${port}`;
+	const agent = new WebSocket(`${socketUrl}/ws/agent`);
+	let reloadCommand: { requestId: string } | undefined;
+	let resolveReload!: (value: { requestId: string }) => void;
+	const reloadReceived = new Promise<{ requestId: string }>((resolve) => { resolveReload = resolve; });
+	agent.onmessage = ({ data }) => {
+		const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+		if (frame.type === "agent.command" && frame.requestId && frame.command?.type === "reload") {
+			reloadCommand = { requestId: frame.requestId };
+			resolveReload(reloadCommand);
+		}
+	};
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({
+				type: "agent.hello",
+				session: { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+				entries: [],
+			}));
+			agent.send(JSON.stringify({
+				type: "agent.subagents",
+				sessionId,
+				agents: [{ id: "worker", status: "working", model: "test/model", effort: "high", turns: 1, currentTool: null, queued: 0, createdAt: 1, updatedAt: 2, completedAt: null, error: null }],
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			}));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("queued reload agent failed"));
+	});
+	const client = browserSocket(`${socketUrl}/ws/client`);
+	const requestId = crypto.randomUUID();
+	let sawQueued = false;
+	let reloadCompletions = 0;
+	let resolveAdmission!: () => void;
+	let resolveEmpty!: () => void;
+	const admitted = new Promise<void>((resolve) => { resolveAdmission = resolve; });
+	const emptied = new Promise<void>((resolve) => { resolveEmpty = resolve; });
+	client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+	client.onmessage = ({ data }) => {
+		const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; event?: { type?: string; queue?: Array<{ id?: string }>; message?: { content?: Array<{ text?: string }> } } };
+		if (frame.type === "server.snapshot") {
+			client.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			client.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "/reload", images: [], streamingBehavior: "followUp" }));
+		}
+		if (frame.type === "server.response" && frame.requestId === requestId && frame.success) resolveAdmission();
+		if (frame.event?.type === "message_end" && frame.event.message?.content?.some((part) => part.text === "Reload complete.")) reloadCompletions += 1;
+		if (frame.event?.type === "web_queue_update" && frame.event.queue?.some((item) => item.id === requestId)) sawQueued = true;
+		if (sawQueued && frame.event?.type === "web_queue_update" && frame.event.queue?.length === 0) resolveEmpty();
+	};
+	await admitted;
+	await Bun.sleep(50);
+	expect(sawQueued).toBe(true);
+	expect(reloadCommand).toBeUndefined();
+	expect(reloadCompletions).toBe(0);
+	await expect(sessionCommand(`${socketUrl}/ws/client`, sessionId, {
+		type: "create_worktree", name: "blocked", repository: tempDir,
+	})).rejects.toThrow("subagents to become idle");
+	agent.send(JSON.stringify({
+		type: "agent.subagents",
+		sessionId,
+		agents: [{ id: "worker", status: "completed", model: "test/model", effort: "high", turns: 2, currentTool: null, queued: 0, createdAt: 1, updatedAt: 3, completedAt: 3, error: null }],
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	}));
+	const command = await Promise.race([
+		reloadReceived,
+		Bun.sleep(3_000).then(() => { throw new Error("queued reload was not delivered after settlement"); }),
+	]);
+	agent.send(JSON.stringify({ type: "agent.response", requestId: command.requestId, success: true, data: { reloaded: true } }));
+	await Promise.race([emptied, Bun.sleep(3_000).then(() => { throw new Error("accepted queued reload was not removed"); })]);
+	expect(reloadCompletions).toBe(1);
+	client.close();
+	agent.close();
+}, 10_000);
+
+test("native replacement recovery redirects a queue-free source session", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-worktree-queue-recovery-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const sourceId = `source-${crypto.randomUUID()}`;
+	const replacementId = `replacement-${crypto.randomUUID()}`;
+	const sourceFile = join(agentDir, "sessions", "source", `${sourceId}.jsonl`);
+	const replacementFile = join(agentDir, "sessions", "replacement", `${replacementId}.jsonl`);
+	await mkdir(dirname(replacementFile), { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(replacementFile, [
+		JSON.stringify({ type: "session", version: 3, id: replacementId, timestamp: new Date().toISOString(), cwd: tempDir }),
+		JSON.stringify({ type: "custom", id: crypto.randomUUID(), parentId: null, timestamp: new Date().toISOString(), customType: "vessup-replaced-session", data: { previousSessionId: sourceId, previousSessionFile: sourceFile, replacementSessionId: replacementId } }),
+	].join("\n") + "\n");
+	await writeFile(join(webDir, "queues.json"), `${JSON.stringify({ version: 2, queues: {
+		[replacementId]: [{ id: "replacement-queue", message: "from replacement" }],
+	} })}\n`);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const socketUrl = `ws://127.0.0.1:${port}`;
+	const agent = new WebSocket(`${socketUrl}/ws/agent`);
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({ type: "agent.hello", session: { id: replacementId, file: replacementFile, cwd: tempDir, status: "working", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 }, entries: [] }));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("replacement recovery agent failed"));
+	});
+	await Bun.sleep(25);
+	const redirected = new Promise<string | undefined>((resolve, reject) => {
+		const observer = browserSocket(`${socketUrl}/ws/client`);
+		const timeout = setTimeout(() => { observer.close(); reject(new Error("queue-free replacement redirect timed out")); }, 3_000);
+		observer.onopen = () => observer.send(JSON.stringify({ type: "client.hello" }));
+		observer.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; replacementSessionId?: string };
+			if (message.type === "server.snapshot") {
+				observer.send(JSON.stringify({ type: "client.subscribe", sessionId: replacementId }));
+				setTimeout(() => agent.send(JSON.stringify({ type: "agent.session_replaced", previousSessionId: sourceId, previousSessionFile: sourceFile, replacementSessionId: replacementId })), 25);
+			}
+			if (message.type !== "server.session_removed" || message.sessionId !== sourceId) return;
+			clearTimeout(timeout);
+			observer.close();
+			resolve(message.replacementSessionId);
+		};
+	});
+	expect(await redirected).toBe(replacementId);
+	expect(await Bun.file(join(webDir, "queues.json")).json()).toEqual({ version: 2, queues: { [replacementId]: [
+		{ id: "replacement-queue", message: "from replacement" },
+	] } });
+	agent.close();
+}, 10_000);
+
+test("native worktree switches survive the replacement bridge reconnect", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-worktree-test-"));
+	const statePath = join(tempDir, "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const originalSessionId = `worktree-${crypto.randomUUID()}`;
+	const replacementSessionId = `replacement-${crypto.randomUUID()}`;
+	const originalSessionFile = join(tempDir, "pi-agent", "sessions", "source", `${originalSessionId}.jsonl`);
+	const replacementSessionFile = join(tempDir, "pi-agent", "sessions", "replacement", `${replacementSessionId}.jsonl`);
+	await mkdir(dirname(originalSessionFile), { recursive: true });
+	await mkdir(dirname(replacementSessionFile), { recursive: true });
+	await writeFile(originalSessionFile, `${JSON.stringify({ type: "session", version: 3, id: originalSessionId, timestamp: new Date().toISOString(), cwd: tempDir })}\n`);
+	await writeFile(replacementSessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: replacementSessionId, timestamp: new Date().toISOString(), cwd: tempDir }),
+		JSON.stringify({ type: "custom", id: crypto.randomUUID(), parentId: null, timestamp: new Date().toISOString(), customType: "vessup-replaced-session", data: { previousSessionId: originalSessionId, previousSessionFile: originalSessionFile, replacementSessionId } }),
+	].join("\n") + "\n");
+	const socketUrl = `ws://127.0.0.1:${port}`;
+	const connectAgent = async (sessionId: string, file?: string) => {
+		const agent = new WebSocket(`${socketUrl}/ws/agent`);
+		await new Promise<void>((resolve, reject) => {
+			agent.onopen = () => {
+				agent.send(JSON.stringify({
+					type: "agent.hello",
+					session: { id: sessionId, file, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+					entries: [],
+				}));
+				resolve();
+			};
+			agent.onerror = () => reject(new Error("worktree agent websocket failed"));
+		});
+		return agent;
+	};
+	const firstAgent = await connectAgent(originalSessionId, originalSessionFile);
+	await Bun.sleep(25);
+	const command = new Promise<{ requestId: string; command: { type: string; name?: string; repository?: string; branch?: string; startPoint?: string } }>((resolve, reject) => {
+		const timeout = setTimeout(() => reject(new Error("worktree command was not routed to native Pi")), 3_000);
+		firstAgent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; name?: string; repository?: string; branch?: string; startPoint?: string } };
+			if (message.type !== "agent.command" || !message.requestId || message.command?.type !== "create_worktree_v2") return;
+			clearTimeout(timeout);
+			resolve({ requestId: message.requestId, command: { ...message.command, type: message.command.type } });
+		};
+	});
+	const result = new Promise<unknown>((resolve, reject) => {
+		const client = browserSocket(`${socketUrl}/ws/client`);
+		const clientRequestId = crypto.randomUUID();
+		const timeout = setTimeout(() => { client.close(); reject(new Error("native worktree response timed out")); }, 5_000);
+		client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+		client.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; data?: unknown; error?: string };
+			if (message.type === "server.snapshot") {
+				client.send(JSON.stringify({ type: "client.prompt", requestId: clientRequestId, sessionId: originalSessionId, message: `/worktree pr-30 --repo ${tempDir} --branch tembo/cancel-builds --start-point origin/tembo/cancel-builds`, images: [] }));
+			}
+			if (message.type !== "server.response" || message.requestId !== clientRequestId) return;
+			clearTimeout(timeout);
+			client.close();
+			message.success ? resolve(message.data) : reject(new Error(message.error ?? "native worktree failed"));
+		};
+	});
+	const routed = await command;
+	expect(routed.command).toEqual({
+		type: "create_worktree_v2",
+		name: "pr-30",
+		repository: tempDir,
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
+	});
+	firstAgent.close();
+	await Bun.sleep(25);
+	const replacementAgent = await connectAgent(replacementSessionId, replacementSessionFile);
+	let markObserverReady!: () => void;
+	const observerReady = new Promise<void>((resolve) => { markObserverReady = resolve; });
+	const removed = new Promise<{ type?: string; sessionId?: string; replacementSessionId?: string }>((resolve, reject) => {
+		const observer = browserSocket(`${socketUrl}/ws/client`);
+		const timeout = setTimeout(() => { observer.close(); reject(new Error("source session removal was not broadcast")); }, 5_000);
+		observer.onopen = () => observer.send(JSON.stringify({ type: "client.hello" }));
+		observer.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; replacementSessionId?: string };
+			if (message.type === "server.snapshot") observer.send(JSON.stringify({ type: "client.subscribe", sessionId: replacementSessionId }));
+			if (message.type === "server.history" && message.sessionId === replacementSessionId) markObserverReady();
+			if (message.type !== "server.session_removed" || message.sessionId !== originalSessionId) return;
+			clearTimeout(timeout);
+			observer.close();
+			resolve(message);
+		};
+	});
+	await observerReady;
+	await rm(originalSessionFile);
+	// The missing-file reconciler must leave durable worktree replacements to the
+	// replacement handshake so queued work can migrate instead of being discarded.
+	await Bun.sleep(1_100);
+	const beforeReplacement = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(beforeReplacement.sessions.some((session) => session.id === originalSessionId)).toBe(true);
+	replacementAgent.send(JSON.stringify({
+		type: "agent.session_replaced",
+		previousSessionId: originalSessionId,
+		previousSessionFile: originalSessionFile,
+		replacementSessionId,
+	}));
+	expect(await removed).toEqual({ type: "server.session_removed", sessionId: originalSessionId, replacementSessionId });
+	// Durable replacement markers are replayed after daemon/native reconnects.
+	replacementAgent.send(JSON.stringify({
+		type: "agent.session_replaced",
+		previousSessionId: originalSessionId,
+		previousSessionFile: originalSessionFile,
+		replacementSessionId,
+	}));
+	replacementAgent.send(JSON.stringify({ type: "agent.response", requestId: routed.requestId, success: true, data: { sessionId: replacementSessionId } }));
+	expect(await result).toEqual({ sessionId: replacementSessionId });
+	const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(catalog.sessions.some((session) => session.id === originalSessionId)).toBe(false);
+	expect(catalog.sessions.some((session) => session.id === replacementSessionId)).toBe(true);
+	replacementAgent.close();
+}, 10_000);
+
 test("native sessions expose queued-delivery ordering and context compaction lifecycle", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queued-delivery-test-"));
 	const statePath = join(tempDir, "server.json");
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
 	child = Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	const { port } = await waitForState(statePath);
 	const sessionId = `queued-${crypto.randomUUID()}`;
 	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
 	await new Promise<void>((resolve, reject) => {
@@ -711,46 +1766,85 @@ test("native sessions expose queued-delivery ordering and context compaction lif
 	});
 	await Bun.sleep(25);
 	const socketUrl = `ws://127.0.0.1:${port}/ws/client`;
+	expect(await steerQueuedFollowUpNow(socketUrl, sessionId, agent)).toEqual({
+		behavior: "steer",
+		transcriptBeforePrompt: true,
+		queueCleared: true,
+	});
 	expect(await queuedFollowUpDeliveryOrder(socketUrl, sessionId, agent)).toEqual([
 		"transcript",
 		"prompt-after-transcript",
 		"queue-cleared",
 	]);
+	// Compatibility path for native bridges loaded before agent_settled forwarding
+	// was added: agent_end still advances the durable queue after a short grace.
+	expect(await queuedFollowUpDeliveryOrder(socketUrl, sessionId, agent, "agent_end")).toEqual([
+		"transcript",
+		"prompt-after-transcript",
+		"queue-cleared",
+	]);
+	expect(await idleQueueReplacementStartsAutomatically(socketUrl, sessionId, agent)).toBe("followUp");
+	expect(await rejectedPromptPreservesLegacyQueueFallback(socketUrl, sessionId, agent)).toBe("followUp");
+	expect(await lateSettlementDoesNotBurstQueue(socketUrl, sessionId, agent)).toEqual([1, 2]);
+	expect(await promptAdmissionStatus(socketUrl, sessionId, agent)).toEqual(["idle", "working"]);
 	expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual([
 		{ reason: "overflow", status: "working" },
-		{ status: "working" },
+		{ status: "idle" },
 	]);
+	agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_start" } }));
+	await Bun.sleep(25);
+	expect(await promptAcknowledgementLossBecomesUncertain(socketUrl, sessionId, agent)).toBe(true);
 	agent.close();
-}, 15_000);
+}, 100_000);
 
-test("browser sessions start as semantic Pi RPC sessions", async () => {
+test("browser sessions stay managed and idle across daemon restarts", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-semantic-test-"));
 	const statePath = join(tempDir, "server.json");
+	const agentDir = join(tempDir, "pi-agent");
 	const cwd = join(tempDir, "project");
 	await Bun.write(join(cwd, ".keep"), "");
-	const port = 40_000 + Math.floor(Math.random() * 5_000);
-	child = Bun.spawn({
+	const startServer = () => Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
 		stdout: "ignore", stderr: "ignore",
 	});
-	await waitForState(statePath);
+	child = startServer();
+	let { port } = await waitForState(statePath);
 	const response = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
 		method: "POST", headers: { "content-type": "application/json", Origin: `http://127.0.0.1:${port}` }, body: JSON.stringify({ cwd, name: "semantic-test" }),
 	});
-	expect(response.status).toBe(201);
-	const payload = await response.json() as { session: { id: string; source: string } };
+	const responseText = await response.text();
+	if (response.status !== 201) throw new Error(`Session creation failed with ${response.status}: ${responseText}`);
+	const payload = JSON.parse(responseText) as { session: { id: string; file?: string; source: string } };
 	expect(payload.session.source).toBe("web");
+	expect(payload.session.file).toBeString();
+	expect(await Bun.file(join(tempDir, "managed-sessions.json")).json()).toEqual({ version: 1, files: [await realpath(payload.session.file!)] });
 	const socketUrl = `ws://127.0.0.1:${port}/ws/client`;
 	const semanticHistory = await waitForSemanticHistory(socketUrl, payload.session.id);
 	expect(Array.isArray(semanticHistory)).toBe(true);
-	expect(await replaceQueueAndReadBack(socketUrl, payload.session.id)).toEqual([{ id: "queued-1", message: "editable follow-up" }]);
+	await writeFile(payload.session.file!, `${JSON.stringify({ id: crypto.randomUUID(), type: "message", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", timestamp: Date.now(), content: [{ type: "text", text: "persist me" }] } })}\n`, { flag: "a" });
+
+	child.kill("SIGTERM");
+	await child.exited;
+	child = startServer();
+	({ port } = await waitForState(statePath));
+	let restored: { id: string; source: string; status: string } | undefined;
+	const deadline = Date.now() + 8_000;
+	while (Date.now() < deadline) {
+		const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; source: string; status: string }> };
+		restored = catalog.sessions.find((session) => session.id === payload.session.id);
+		if (restored?.source === "web" && restored.status === "idle") break;
+		await Bun.sleep(50);
+	}
+	expect(restored).toEqual(expect.objectContaining({ id: payload.session.id, source: "web", status: "idle" }));
+
 	const deleted = await fetch(`http://127.0.0.1:${port}/api/sessions/${encodeURIComponent(payload.session.id)}`, {
 		method: "DELETE",
 		headers: { Origin: `http://127.0.0.1:${port}` },
 	});
 	expect(deleted.status).toBe(200);
-}, 15_000);
+	expect(await Bun.file(join(tempDir, "managed-sessions.json")).json()).toEqual({ version: 1, files: [] });
+}, 20_000);
 
 async function waitForMirroredSession(port: number): Promise<string> {
 	const deadline = Date.now() + 10_000;
@@ -770,9 +1864,8 @@ test("native Pi sessions expose semantic history without replacing their physica
 	await mkdir(join(agentDir, "prompts"), { recursive: true });
 	await writeFile(join(agentDir, "prompts", "address-pr.md"), "---\ndescription: Get PR ready to merge\n---\nAddress the pull request.\n");
 	const statePath = join(agentDir, "web", "server.json");
-	const port = 45_000 + Math.floor(Math.random() * 2_000);
-	child = Bun.spawn({ cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(), env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir }, stdout: "ignore", stderr: "ignore" });
-	await waitForState(statePath);
+	child = Bun.spawn({ cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(), env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir }, stdout: "ignore", stderr: "ignore" });
+	const { port } = await waitForState(statePath);
 	const terminal = new Bun.Terminal({ cols: 90, rows: 28, data() {} });
 	const pi = Bun.spawn({
 		cmd: ["pi", "-ne", "-e", join(process.cwd(), "extensions", "session-footer.ts"), "-e", join(process.cwd(), "extensions", "web-sessions.ts"), "--approve", "--no-session"],

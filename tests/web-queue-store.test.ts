@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoalescedQueueStoreWriter, readQueueStore, writeQueueStore } from "../web/server/queue-store.ts";
@@ -84,6 +84,20 @@ test("shared queue-map mutations roll back globally before a later session snaps
 
 	expect(Array.from(queues.keys())).toEqual(["session-b"]);
 	expect(JSON.parse(durable).queues).toEqual({ "session-b": [{ id: "b", message: "accepted" }] });
+});
+
+test("failed atomic queue-store renames clean up temporary files", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queue-store-"));
+	const directPath = join(tempDir, "direct.json");
+	await mkdir(directPath);
+	await expect(writeQueueStore(directPath, new Map([["session", [{ id: "one", message: "first" }]]]))).rejects.toThrow();
+	expect((await readdir(tempDir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+
+	const coalescedPath = join(tempDir, "coalesced.json");
+	await mkdir(coalescedPath);
+	const writer = new CoalescedQueueStoreWriter(coalescedPath);
+	await expect(writer.write(new Map([["session", [{ id: "two", message: "second" }]]]))).rejects.toThrow();
+	expect((await readdir(tempDir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 });
 
 test("coalesced queue writes durably preserve the newest snapshot", async () => {

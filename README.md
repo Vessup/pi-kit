@@ -14,7 +14,9 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 
 ### Requirements
 
-- Pi
+- Pi 0.84.1
+- Git 2.36.0 or newer
+- `lsof` for exclusive source-session verification during worktree replacement
 - GitHub CLI (`gh`), authenticated with `gh auth login`
 - A terminal that supports OSC 8 hyperlinks for clickable links
 - A Nerd Font for the branch icon
@@ -30,6 +32,24 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 - Terminate subagents and release their resources
 
 The subagent extension independently contributes its token use and status to `extensions/session-footer.ts`, the package's generic composable footer. When subagents are involved, a third footer line shows their aggregate status. With an empty editor, press Option+Down (Alt+Down) to select that line and Enter to open the manager; `/subagents` opens it directly. The manager shows individual status and transcripts and supports model, effort, messaging, and termination controls. Run `/subagents-cleanup` to stop and remove every retained subagent.
+
+## Worktrees
+
+Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the managed checkout. The backward-compatible default creates or reuses local branch `<name>`; a missing branch starts at the selected checkout's `HEAD`.
+
+The managed directory name, local branch, and new-branch start point can be selected independently:
+
+```sh
+/worktree pr-30 --repo /path/to/repo \
+  --branch tembo/cancel-builds \
+  --start-point origin/tembo/cancel-builds
+```
+
+That creates `.pi/worktrees/pr-30` without creating a `pr-30` branch. If `tembo/cancel-builds` does not exist locally, it is created at `origin/tembo/cancel-builds` and tracks that remote branch. If the local branch already exists, omit `--start-point`; Pi reuses it without moving it or taking ownership of it. A branch already checked out in any registered worktree is rejected. To enter an already registered worktree without modifying its checkout or branch, run `/worktree --existing <worktree-path>`.
+
+Managed ownership records the directory name and whether Pi created the local branch. Final-session cleanup removes the managed checkout, while automatic rollback removes it only when clean so unrelated uncommitted files are never discarded. Both paths delete only a branch created by Pi; reused branches are preserved. Switching completes only after the replacement CWD and actual branch or detached HEAD are verified; the replacement is then made self-contained and the source session is deleted automatically.
+
+The LLM-callable `worktree` tool provides the same `name`, `repository`, `branch`, `startPoint`, and `existing` flows. For a pull request URL, agents must resolve the PR's real head branch and fetched remote-tracking ref and pass them explicitly rather than deriving a branch from a directory such as `pr-30`. The tool queues a correlated `/worktree` follow-up, ends the old run, verifies the replacement, and resumes its continuation there. Create-only requests that should not enter the checkout remain ordinary Git operations.
 
 ## Web sessions
 
@@ -109,5 +129,5 @@ bun install --frozen-lockfile
 bun run check
 bun test
 bun run web:build
-pi -e ./extensions/session-footer.ts -e ./extensions/pr-footer.ts -e ./extensions/subagents.ts -e ./extensions/web-sessions.ts
+pi -e ./extensions/session-footer.ts -e ./extensions/pr-footer.ts -e ./extensions/subagents.ts -e ./extensions/worktree.ts -e ./extensions/web-sessions.ts
 ```
