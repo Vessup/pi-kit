@@ -17,8 +17,16 @@ test("an explicit user scroll away from the bottom remains unfollowed", () => {
 	});
 });
 
-test("reaching the bottom resumes following and hides the down arrow", () => {
+test("an unpinned reader near the bottom remains frozen during layout changes", () => {
 	expect(resolveScrollFollow(false, 20)).toEqual({
+		following: false,
+		showButton: true,
+		pinToBottom: false,
+	});
+});
+
+test("reaching the actual bottom resumes following and hides the down arrow", () => {
+	expect(resolveScrollFollow(false, 0)).toEqual({
 		following: true,
 		showButton: false,
 		pinToBottom: false,

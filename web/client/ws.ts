@@ -11,6 +11,8 @@ export class SessionSocket {
   private attempts = 0;
   private readonly candidates = getSocketCandidates();
 
+  constructor(private readonly helloType: "client.hello" | "client.command_hello" = "client.hello") {}
+
   onMessage(listener: Listener<unknown>): () => void {
     this.messageListeners.add(listener);
     return () => this.messageListeners.delete(listener);
@@ -52,7 +54,7 @@ export class SessionSocket {
         socket.addEventListener("open", (event) => {
           connected = true;
           for (const listener of this.openListeners) listener(event);
-          socket.send(JSON.stringify({ type: "client.hello" }));
+          socket.send(JSON.stringify({ type: this.helloType }));
           resolve();
         }, { once: true });
         socket.addEventListener("message", (event) => {

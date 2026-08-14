@@ -3,6 +3,7 @@ import { basename, dirname, normalize, resolve } from "node:path";
 export type SessionProject = {
 	id: string;
 	name: string;
+	root: string;
 };
 
 const projectCache = new Map<string, SessionProject>();
@@ -12,6 +13,7 @@ function fallbackProject(cwd: string): SessionProject {
 	return {
 		id: `dir:${path}`,
 		name: basename(path) || path,
+		root: path,
 	};
 }
 
@@ -40,6 +42,7 @@ export function resolveSessionProject(cwd: string): SessionProject {
 				project = {
 					id: `git:${commonDir}`,
 					name: projectNameFromCommonDir(commonDir) || basename(path) || path,
+					root: dirname(commonDir),
 				};
 			}
 		}

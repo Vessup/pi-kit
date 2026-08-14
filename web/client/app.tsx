@@ -39,11 +39,15 @@ import {
   resumeSession,
   sendSessionCommand,
 } from "./api";
-import { compareWebSessions, mergeWebSubagentUpdates, moveWebSessionRelative, orderWebSessions, type CreateSessionRequest, type SemanticImage, type WebQueuedMessage, type WebQueueReplacement, type WebSession, type WebSessionOptions, type WebSlashCommand, type WebSubagentUpdate, type WebUsage } from "../protocol";
+import { compareWebSessions, mergeWebSubagentUpdates, moveWebSessionRelative, orderWebSessions, type ClientPromptMessage, type CreateSessionRequest, type SemanticImage, type WebQueuedMessage, type WebQueueReplacement, type WebSession, type WebSessionOptions, type WebSlashCommand, type WebSubagentUpdate, type WebUsage } from "../protocol";
 import { SessionSocket } from "./ws";
 import { SemanticSession, updateStreamingMessage, type ActiveTool, type SemanticEntry } from "./semantic-session";
 import { preserveSessionTelemetry, preserveSessionsTelemetry } from "./session-telemetry";
 import { cn } from "./lib/utils";
+import { recentRepositories, type RecentRepository } from "./recent-repositories";
+import { includeWebReloadCommand, isWebReloadCommand } from "../reload-command";
+import { assertClientPromptPayloadFits } from "./image-payload";
+import { displaySessionStatus } from "./session-status";
 
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
@@ -61,8 +65,12 @@ function loadSessionOrder(): string[] {
 }
 
 function loadSessionSort(): SessionSort {
-  const value = localStorage.getItem(SESSION_SORT_KEY);
-  return value === "oldest" || value === "custom" ? value : "newest";
+  try {
+    const value = localStorage.getItem(SESSION_SORT_KEY);
+    return value === "oldest" || value === "custom" ? value : "newest";
+  } catch {
+    return "newest";
+  }
 }
 
 function loadCollapsedProjects(): string[] {
@@ -71,6 +79,14 @@ function loadCollapsedProjects(): string[] {
     return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function savePreference(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Preferences are best-effort when browser storage is denied or full.
   }
 }
 
@@ -119,17 +135,17 @@ function preserveOptimisticAttachments(
 }
 
 function sessionStatusClasses(session: WebSession): string {
-  switch (session.status) {
+  switch (displaySessionStatus(session)) {
     case "working": return "border-emerald-400/25 bg-emerald-400/10 text-emerald-300";
     case "starting": return "border-amber-400/25 bg-amber-400/10 text-amber-300";
-    case "offline": return "border-zinc-600/60 bg-zinc-800/70 text-zinc-400";
+    case "inactive": return "border-zinc-600/60 bg-zinc-800/70 text-zinc-400";
     case "error": return "border-red-400/25 bg-red-400/10 text-red-300";
     case "idle": return "border-sky-400/25 bg-sky-400/10 text-sky-300";
   }
 }
 
 function sessionStatusLabel(session: WebSession): string {
-  return session.status === "offline" ? "inactive" : session.status;
+  return displaySessionStatus(session);
 }
 
 function sessionTitle(session: WebSession): string {
@@ -181,53 +197,54 @@ function projectGroups(sessions: WebSession[]): ProjectSessionGroup[] {
   return Array.from(groups.values());
 }
 
-function NewSessionDialog({ open, baseSession, onOpenChange, onCreate }: { open: boolean; baseSession: WebSession | null; onOpenChange: (open: boolean) => void; onCreate: (value: CreateSessionRequest) => Promise<void> }) {
-  const [mode, setMode] = React.useState<"cwd" | "worktree">("cwd");
-  const [cwd, setCwd] = React.useState("");
+function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCreate }: { open: boolean; baseSession: WebSession | null; repositories: RecentRepository[]; onOpenChange: (open: boolean) => void; onCreate: (value: CreateSessionRequest) => Promise<void> }) {
+  const [repository, setRepository] = React.useState("");
   const [name, setName] = React.useState("");
   const [worktreeName, setWorktreeName] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [createError, setCreateError] = React.useState<string | null>(null);
-  const canCreateWorktree = Boolean(baseSession?.projectId?.startsWith("git:"));
+  const repositoryListId = React.useId();
   React.useEffect(() => {
     if (!open) return;
-    setMode("cwd");
-    setCwd("");
+    setRepository(baseSession?.repositoryRoot ?? baseSession?.cwd ?? "");
     setName("");
     setWorktreeName("");
     setBusy(false);
     setCreateError(null);
-  }, [open]);
+  }, [baseSession?.cwd, baseSession?.repositoryRoot, open]);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New session</DialogTitle>
-          <DialogDescription>Start in a directory or create a worktree from the selected project.</DialogDescription>
+          <DialogDescription>Choose a repository or directory. Add a worktree name to create a linked checkout first.</DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
-          <div className="grid grid-cols-2 gap-2 rounded-lg bg-zinc-900 p-1">
-            <Button type="button" size="sm" variant={mode === "cwd" ? "secondary" : "ghost"} onClick={() => { setMode("cwd"); setCreateError(null); }}>Directory</Button>
-            <Button type="button" size="sm" variant={mode === "worktree" ? "secondary" : "ghost"} disabled={!canCreateWorktree} onClick={() => { setMode("worktree"); setCreateError(null); }}>New worktree</Button>
+          <div className="space-y-2">
+            <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-input`}>repository</label>
+            <Input
+              id={`${repositoryListId}-input`}
+              list={repositoryListId}
+              autoComplete="off"
+              value={repository}
+              onChange={(event) => { setRepository(event.target.value); setCreateError(null); }}
+              placeholder="~/path/to/repository"
+              role="combobox"
+              aria-autocomplete="list"
+            />
+            <datalist id={repositoryListId}>
+              {repositories.map((item) => <option key={item.id} value={item.path}>{item.name}</option>)}
+            </datalist>
+            <p className="text-xs text-zinc-500">Recently used repositories appear as you type.</p>
           </div>
-          {!canCreateWorktree && <p className="text-xs text-zinc-500">Select a session in a Git repository to create a worktree.</p>}
-          {mode === "cwd" ? (
-            <div className="space-y-2">
-              <label className="text-xs uppercase tracking-wider text-zinc-500">cwd</label>
-              <Input value={cwd} onChange={(e) => { setCwd(e.target.value); setCreateError(null); }} placeholder="~/path/to/project" />
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <label className="text-xs uppercase tracking-wider text-zinc-500">worktree name</label>
-              <Input value={worktreeName} onChange={(e) => { setWorktreeName(e.target.value); setCreateError(null); }} placeholder="feature-name" />
-              <p className="text-xs text-zinc-500">
-                From <strong className="text-zinc-400">{baseSession?.projectName ?? baseSession?.name ?? "selected project"}</strong>; creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code> and a branch with the same name.
-              </p>
-            </div>
-          )}
+          <div className="space-y-2">
+            <label className="text-xs uppercase tracking-wider text-zinc-500">worktree name</label>
+            <Input value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional branch and worktree name" />
+            <p className="text-xs text-zinc-500">When set, the repository must be Git-backed. Creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code> from its current <code>HEAD</code>.</p>
+          </div>
           <div className="space-y-2">
             <label className="text-xs uppercase tracking-wider text-zinc-500">session name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Optional display name" />
+            <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Optional display name" />
           </div>
           {createError && <p role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{createError}</p>}
         </DialogBody>
@@ -238,13 +255,11 @@ function NewSessionDialog({ open, baseSession, onOpenChange, onCreate }: { open:
               setBusy(true);
               setCreateError(null);
               try {
-                const sessionName = name.trim() || undefined;
-                if (mode === "worktree") {
-                  if (!baseSession || !canCreateWorktree) throw new Error("Select a repository-backed session before creating a worktree");
-                  await onCreate({ worktreeName: worktreeName.trim(), worktreeBaseSessionId: baseSession.id, name: sessionName });
-                } else {
-                  await onCreate({ cwd: cwd.trim(), name: sessionName });
-                }
+                await onCreate({
+                  cwd: repository.trim(),
+                  name: name.trim() || undefined,
+                  worktreeName: worktreeName.trim() || undefined,
+                });
                 onOpenChange(false);
               } catch (cause) {
                 setCreateError(cause instanceof Error ? cause.message : String(cause));
@@ -252,7 +267,7 @@ function NewSessionDialog({ open, baseSession, onOpenChange, onCreate }: { open:
                 setBusy(false);
               }
             }}
-            disabled={busy || (mode === "cwd" ? !cwd.trim() : !canCreateWorktree || !worktreeName.trim())}
+            disabled={busy || !repository.trim()}
           >
             {busy ? "Creating…" : "Create"}
           </Button>
@@ -348,12 +363,13 @@ function DeleteSessionDialog({
           <DialogTitle>Delete session?</DialogTitle>
           <DialogDescription>
             {session
-              ? `Delete ${sessionTitle(session)}?${session.status !== "offline" ? " Its Pi process will be stopped." : ""}`
+              ? `Delete ${sessionTitle(session)}?${session.status !== "offline" ? " Its Pi process will be stopped." : ""}${session.managedWorktree ? " Its managed worktree will also be removed when this is its final saved session." : ""}`
               : "Delete this session?"}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3 text-sm text-zinc-400">
           <p>{session?.file ? "Its saved session file will be permanently removed." : "This unsaved session will be permanently removed."}</p>
+          {session?.managedWorktree && <p className="break-all rounded-md bg-zinc-900 p-2 font-mono text-xs text-zinc-500">Managed worktree: {session.managedWorktree.path}</p>}
           {session?.file && <p className="break-all rounded-md bg-zinc-900 p-2 font-mono text-xs text-zinc-500">{session.file}</p>}
           {deleteError && <p role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-red-300">{deleteError}</p>}
         </DialogBody>
@@ -659,17 +675,19 @@ function SessionListItem({
           {sessionStatusLabel(session)}
         </span>
         {session.pullRequest && (
-          <a
-            className="col-span-2 mt-0.5 inline-flex min-w-0 items-center gap-1.5 text-xs text-sky-300 hover:text-sky-200 hover:underline"
-            href={session.pullRequest.url}
-            target="_blank"
-            rel="noreferrer"
-            onClick={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">PR #{session.pullRequest.number}</span>
-          </a>
+          <div className="col-span-2 mt-0.5 flex min-w-0 items-center gap-1.5 text-xs">
+            <ExternalLink className="h-3.5 w-3.5 shrink-0 text-sky-300" aria-hidden="true" />
+            <a
+              className="min-w-0 truncate text-sky-300 hover:text-sky-200 hover:underline"
+              href={session.pullRequest.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              PR #{session.pullRequest.number}
+            </a>
+          </div>
         )}
       </div>
       <span
@@ -723,11 +741,11 @@ export function App() {
   const reconnectTimerRef = React.useRef<number | null>(null);
   const connectionGenerationRef = React.useRef(0);
   const optionsGenerationRef = React.useRef(0);
-  const pendingRequestsRef = React.useRef(new Map<string, { socket: SessionSocket; optimisticId: string; resolve: () => void; reject: (error: Error) => void }>());
+  const pendingRequestsRef = React.useRef(new Map<string, { socket: SessionSocket; optimisticId: string; resolve: (data?: unknown) => void; reject: (error: Error) => void }>());
 
-  React.useEffect(() => { localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(sessionOrder)); }, [sessionOrder]);
-  React.useEffect(() => { localStorage.setItem(SESSION_SORT_KEY, sessionSort); }, [sessionSort]);
-  React.useEffect(() => { localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects)); }, [collapsedProjects]);
+  React.useEffect(() => { savePreference(SESSION_ORDER_KEY, JSON.stringify(sessionOrder)); }, [sessionOrder]);
+  React.useEffect(() => { savePreference(SESSION_SORT_KEY, sessionSort); }, [sessionSort]);
+  React.useEffect(() => { savePreference(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects)); }, [collapsedProjects]);
   React.useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
   const loadAllSessions = React.useCallback(async () => {
@@ -816,9 +834,12 @@ export function App() {
         return;
       }
       if (type === "server.session_removed") {
-        const payload = message as unknown as { sessionId: string };
+        const payload = message as unknown as { sessionId: string; replacementSessionId?: string };
         setSessions((prev) => prev.filter((s) => s.id !== payload.sessionId));
-        if (payload.sessionId === selectedIdRef.current) setSelectedId(null);
+        if (payload.sessionId === selectedIdRef.current) {
+          setSelectedId(payload.replacementSessionId ?? null);
+          if (payload.replacementSessionId) setHashSessionId(payload.replacementSessionId);
+        }
         return;
       }
       if (type === "server.history") {
@@ -830,12 +851,12 @@ export function App() {
         return;
       }
       if (type === "server.response") {
-        const payload = message as unknown as { requestId?: string; success: boolean; error?: string };
+        const payload = message as unknown as { requestId?: string; success: boolean; error?: string; data?: unknown };
         if (!payload.requestId) return;
         const pending = pendingRequestsRef.current.get(payload.requestId);
         if (!pending) return;
         pendingRequestsRef.current.delete(payload.requestId);
-        if (payload.success) pending.resolve();
+        if (payload.success) pending.resolve(payload.data);
         else {
           setEntries((previous) => previous.filter((entry) => entry.id !== pending.optimisticId));
           pending.reject(new Error(payload.error ?? "Request failed"));
@@ -847,6 +868,15 @@ export function App() {
       if (payload.sessionId !== selectedIdRef.current) return;
       const event = payload.event;
       const eventType = String(event.type ?? "");
+      if (eventType === "agent_start" || eventType === "turn_start" || eventType === "agent_end" || eventType === "agent_settled") {
+        const applyLifecycle = (session: WebSession): WebSession => {
+          if (eventType === "agent_start" || eventType === "turn_start") return { ...session, status: "working" };
+          if (eventType === "agent_end" && session.compaction) return session;
+          return { ...session, status: "idle" };
+        };
+        setCurrentSession((current) => current?.id === payload.sessionId ? applyLifecycle(current) : current);
+        setSessions((previous) => previous.map((session) => session.id === payload.sessionId ? applyLifecycle(session) : session));
+      }
       if (eventType === "subagents_update") {
         const updates = Array.isArray(event.agents) ? event.agents as WebSubagentUpdate[] : [];
         const usage = event.usage as WebUsage | undefined;
@@ -983,7 +1013,7 @@ export function App() {
       setSessionOptions((current) => ({
         models: Array.isArray(options.models) ? options.models : [],
         thinkingLevels: Array.isArray(options.thinkingLevels) ? options.thinkingLevels : [],
-        commands: Array.isArray(options.commands) ? options.commands : current.commands,
+        commands: includeWebReloadCommand(Array.isArray(options.commands) ? options.commands : current.commands),
       }));
     } catch {
       if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) setSessionOptions((current) => ({ ...current, models: [], thinkingLevels: [] }));
@@ -994,9 +1024,11 @@ export function App() {
     try {
       const response = await sendSessionCommand(sessionId, { type: "get_commands" }) as { commands?: WebSlashCommand[] } | undefined;
       if (selectedIdRef.current !== sessionId || optionsGenerationRef.current !== generation) return;
-      setSessionOptions((current) => ({ ...current, commands: Array.isArray(response?.commands) ? response.commands : [] }));
+      setSessionOptions((current) => ({ ...current, commands: includeWebReloadCommand(Array.isArray(response?.commands) ? response.commands : []) }));
     } catch {
-      if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) setSessionOptions((current) => ({ ...current, commands: [] }));
+      if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) {
+        setSessionOptions((current) => ({ ...current, commands: includeWebReloadCommand(current.commands) }));
+      }
     }
   }, []);
 
@@ -1031,6 +1063,7 @@ export function App() {
     () => orderedSessions.filter((session) => sessionMatches(session, filterQuery)),
     [filterQuery, orderedSessions],
   );
+  const repositorySuggestions = React.useMemo(() => recentRepositories(sessions), [sessions]);
 
   const sendSemanticPrompt = React.useCallback(async (
     message: string,
@@ -1041,6 +1074,8 @@ export function App() {
     const socket = socketRef.current;
     if (!sessionId || !socket) throw new Error("Session is disconnected");
     const requestId = crypto.randomUUID();
+    const promptFrame = { type: "client.prompt", requestId, sessionId, message, images, streamingBehavior } satisfies ClientPromptMessage;
+    assertClientPromptPayloadFits(promptFrame);
     const queuedFollowUp = streamingBehavior === "followUp" && selectedSession?.status === "working";
     const optimisticId = `optimistic-${requestId}`;
     const optimistic: SemanticEntry = {
@@ -1057,17 +1092,33 @@ export function App() {
       },
     };
     if (!queuedFollowUp) setEntries((previous) => [...previous, optimistic].slice(-600));
-    await new Promise<void>((resolve, reject) => {
+    const responseData = await new Promise<unknown>((resolve, reject) => {
       pendingRequestsRef.current.set(requestId, { socket, optimisticId, resolve, reject });
       try {
-        socket.send({ type: "client.prompt", requestId, sessionId, message, images, streamingBehavior });
+        socket.send(promptFrame);
       } catch (cause) {
         pendingRequestsRef.current.delete(requestId);
         if (!queuedFollowUp) setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
         reject(cause instanceof Error ? cause : new Error(String(cause)));
       }
     });
-  }, [selectedSession?.status]);
+    if (isWebReloadCommand(message)) {
+      setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+      const generation = ++optionsGenerationRef.current;
+      await Promise.all([
+        loadSessionOptions(sessionId, generation),
+        loadSessionCommands(sessionId, generation),
+      ]);
+      return;
+    }
+    if (message.trimStart().startsWith("/worktree") && responseData && typeof responseData === "object") {
+      const replacementId = (responseData as { sessionId?: unknown }).sessionId;
+      if (typeof replacementId === "string") {
+        setSelectedId(replacementId);
+        setHashSessionId(replacementId);
+      }
+    }
+  }, [loadSessionCommands, loadSessionOptions, selectedSession?.status]);
 
   const replaceQueuedMessages = React.useCallback(async (queue: WebQueueReplacement[]) => {
     const sessionId = selectedIdRef.current;
@@ -1075,6 +1126,12 @@ export function App() {
     // Keep the visible queue authoritative: the subscribed socket applies the
     // server's web_queue_update only after replace_queue has been accepted.
     await sendSessionCommand(sessionId, { type: "replace_queue", queue });
+  }, []);
+
+  const steerQueuedMessage = React.useCallback(async (itemId: string) => {
+    const sessionId = selectedIdRef.current;
+    if (!sessionId) throw new Error("No session selected");
+    await sendSessionCommand(sessionId, { type: "steer_queue_item", itemId });
   }, []);
 
   const reconcileQueuedMessage = React.useCallback(async (itemId: string, action: "discard" | "resubmit") => {
@@ -1252,7 +1309,7 @@ export function App() {
 
   return (
     <div className="pi-web-shell bg-[#09090b] text-zinc-100">
-      <NewSessionDialog open={newSessionOpen} baseSession={selectedSession} onOpenChange={setNewSessionOpen} onCreate={handleCreate} />
+      <NewSessionDialog open={newSessionOpen} baseSession={selectedSession} repositories={repositorySuggestions} onOpenChange={setNewSessionOpen} onCreate={handleCreate} />
       <RenameSessionDialog
         session={renameCandidate}
         onOpenChange={(open) => { if (!open) setRenameCandidate(null); }}
@@ -1343,6 +1400,7 @@ export function App() {
             onSelectThinkingLevel={selectThinkingLevel}
             onSend={sendSemanticPrompt}
             onReplaceQueue={replaceQueuedMessages}
+            onSteerQueuedMessage={steerQueuedMessage}
             onReconcileQueue={reconcileQueuedMessage}
             onAbort={abortSemanticSession}
           />

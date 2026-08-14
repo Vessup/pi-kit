@@ -5,6 +5,7 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from "@dnd-kit/utilities";
 import {
   ArrowDown,
+  ArrowUp,
   Bot,
   Check,
   CheckCircle2,
@@ -70,8 +71,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./comp
 import { AnchoredPopover } from "./components/anchored-popover";
 import { resolveScrollFollow } from "./scroll-follow";
 import { totalSubagentUsage } from "./usage";
+import { toolHasArgumentDetails } from "./tool-expansion";
 import { cn } from "./lib/utils";
 import { moveWebQueuedMessage, type SemanticImage, type WebQueuedMessage, type WebQueueReplacement, type WebSession, type WebSessionOptions, type WebSlashCommand, type WebSubagent, type WebUsage } from "../protocol";
+import { assertClientPromptPayloadFits } from "./image-payload";
 
 export type SemanticEntry = {
   id?: string;
@@ -113,6 +116,7 @@ type SemanticSessionProps = {
   onSelectThinkingLevel: (level: string) => Promise<void>;
   onSend: (message: string, images: SemanticImage[], behavior?: "steer" | "followUp") => Promise<void>;
   onReplaceQueue: (queue: WebQueueReplacement[]) => Promise<void>;
+  onSteerQueuedMessage: (itemId: string) => Promise<void>;
   onReconcileQueue: (itemId: string, action: "discard" | "resubmit") => Promise<void>;
   onAbort: () => Promise<void>;
 };
@@ -783,12 +787,15 @@ export function updateStreamingMessage(
   return next;
 }
 
-function QueuedMessageRow({ item, overlay = false, blocked = false, onEdit, onRemove, onReconcile }: {
+function QueuedMessageRow({ item, overlay = false, blocked = false, steering = false, steerDisabled = false, onEdit, onRemove, onSteer, onReconcile }: {
   item: WebQueuedMessage;
   overlay?: boolean;
   blocked?: boolean;
+  steering?: boolean;
+  steerDisabled?: boolean;
   onEdit: () => void;
   onRemove: () => void;
+  onSteer: () => void;
   onReconcile: (action: "discard" | "resubmit") => void;
 }) {
   const uncertain = item.deliveryState === "delivering";
@@ -798,29 +805,33 @@ function QueuedMessageRow({ item, overlay = false, blocked = false, onEdit, onRe
     <div
       ref={overlay ? undefined : sortable.setNodeRef}
       style={style}
-      {...(overlay ? {} : sortable.attributes)}
-      {...(overlay ? {} : sortable.listeners)}
       className={cn("semantic-queue-item", sortable.isDragging && "is-sortable-dragging", overlay && "is-overlay", uncertain && "is-uncertain", blocked && "is-blocked")}
     >
-      <GripVertical className="semantic-queue-grip h-4 w-4" aria-hidden="true" />
+      {overlay
+        ? <GripVertical className="semantic-queue-grip h-4 w-4" aria-hidden="true" />
+        : <button type="button" className="semantic-queue-grip" title="Drag to reorder" aria-label="Drag queued message" {...sortable.attributes} {...sortable.listeners}><GripVertical className="h-4 w-4" /></button>}
       {item.images?.[0] && <img draggable={false} src={`data:${item.images[0].mimeType};base64,${item.images[0].data}`} alt="Queued attachment" />}
       <span>{item.message || "Image attachment"}{uncertain ? " · delivery uncertain" : blocked ? " · blocked by uncertain item" : ""}</span>
       {!overlay && uncertain && <button type="button" title="Discard uncertain message" onClick={() => onReconcile("discard")}><Trash2 className="h-4 w-4" /></button>}
       {!overlay && uncertain && <button type="button" title="Confirm and resubmit uncertain message" onClick={() => onReconcile("resubmit")}><Send className="h-4 w-4" /></button>}
-      {!overlay && !uncertain && !blocked && <button type="button" title="Edit queued message" onPointerDown={(event) => event.stopPropagation()} onClick={onEdit}><Pencil className="h-4 w-4" /></button>}
-      {!overlay && !uncertain && !blocked && <button type="button" title="Remove queued message" onPointerDown={(event) => event.stopPropagation()} onClick={onRemove}><Trash2 className="h-4 w-4" /></button>}
+      {!overlay && !uncertain && !blocked && <button type="button" title="Edit queued message" aria-label="Edit queued message" onPointerDown={(event) => event.stopPropagation()} onClick={onEdit}><Pencil className="h-4 w-4" /></button>}
+      {!overlay && !uncertain && !blocked && <button type="button" title="Remove queued message" aria-label="Remove queued message" onPointerDown={(event) => event.stopPropagation()} onClick={onRemove}><Trash2 className="h-4 w-4" /></button>}
+      {!overlay && !uncertain && !blocked && <button type="button" title="Send now to steer Pi" aria-label="Send queued message now to steer Pi" disabled={steerDisabled} onPointerDown={(event) => event.stopPropagation()} onClick={onSteer}>{steering ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}</button>}
     </div>
   );
 }
 
-export function SemanticSession({ session, entries, streamingMessage, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onReconcileQueue, onAbort }: SemanticSessionProps) {
+export function SemanticSession({ session, entries, streamingMessage, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
   const [sendError, setSendError] = React.useState<string | null>(null);
+  const [sendNotice, setSendNotice] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
+  const [aborting, setAborting] = React.useState(false);
   const [draggingAttachments, setDraggingAttachments] = React.useState(false);
   const [editingQueueId, setEditingQueueId] = React.useState<string | null>(null);
   const [draggingQueueId, setDraggingQueueId] = React.useState<string | null>(null);
+  const [steeringQueueId, setSteeringQueueId] = React.useState<string | null>(null);
   const queueSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -828,6 +839,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
   const [sendMenuOpen, setSendMenuOpen] = React.useState(false);
   const [selectedSubagentId, setSelectedSubagentId] = React.useState<string | null>(null);
+  const [subagentsMinimized, setSubagentsMinimized] = React.useState(false);
   const [slashMenuDismissed, setSlashMenuDismissed] = React.useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = React.useState(0);
   const [showScrollToBottom, setShowScrollToBottom] = React.useState(false);
@@ -844,6 +856,15 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   const initialScrollPendingRef = React.useRef(true);
   const followOutputRef = React.useRef(true);
   const autoScrollFrameRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    setSendNotice(null);
+    setAborting(false);
+  }, [session?.id]);
+
+  React.useEffect(() => {
+    if (session?.status !== "working") setAborting(false);
+  }, [session?.status]);
 
   React.useEffect(() => {
     if (session?.id && !editingQueueId) saveSessionDraft(session.id, draft);
@@ -935,7 +956,11 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
         if (part.type === "toolCall") {
           const callId = String(part.id ?? `${messageKey}:${partIndex}`);
           const result = streamingToolResults.get(callId);
-          return { key: `call:${callId}`, expandable: Boolean(result && (result.output.trim() || result.details !== undefined)) };
+          return {
+            key: `call:${callId}`,
+            expandable: toolHasArgumentDetails(String(part.name ?? "tool"), part.arguments)
+              || Boolean(result && (result.output.trim() || result.details !== undefined)),
+          };
         }
         if (part.type === "thinking") {
           return { key: `thinking:${String(message.timestamp ?? messageKey)}:${partIndex}`, expandable: false };
@@ -947,7 +972,11 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
     const orphan = orphanTools.at(-1);
     if (orphan) {
       const result = streamingToolResults.get(orphan.id);
-      return { key: `call:${orphan.id}`, expandable: Boolean(result && (result.output.trim() || result.details !== undefined)) };
+      return {
+        key: `call:${orphan.id}`,
+        expandable: toolHasArgumentDetails(orphan.name, orphan.args)
+          || Boolean(result && (result.output.trim() || result.details !== undefined)),
+      };
     }
     for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
       const candidate = card(messages[messageIndex].message, messages[messageIndex].key);
@@ -1014,7 +1043,17 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   const addFiles = async (files: File[]) => {
     try {
       const next = await Promise.all(files.slice(0, 4).map(fileAsImage));
-      setImages((previous) => [...previous, ...next].slice(0, 4));
+      const combined = [...images, ...next].slice(0, 4);
+      if (session) {
+        assertClientPromptPayloadFits({
+          type: "client.prompt",
+          requestId: "00000000-0000-4000-8000-000000000000",
+          sessionId: session.id,
+          message: draft.trim(),
+          images: combined,
+        });
+      }
+      setImages(combined);
       setSendError(null);
     } catch (cause) {
       setSendError(cause instanceof Error ? cause.message : String(cause));
@@ -1041,6 +1080,20 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
 
   const removeQueuedMessage = async (item: WebQueuedMessage) => {
     await onReplaceQueue(queuedMessages.filter((queued) => queued.id !== item.id));
+  };
+
+  const steerQueuedMessage = async (item: WebQueuedMessage) => {
+    if (steeringQueueId) return;
+    setSteeringQueueId(item.id);
+    try {
+      await onSteerQueuedMessage(item.id);
+      if (editingQueueId === item.id) finishQueueEditing();
+      setSendError(null);
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSteeringQueueId(null);
+    }
   };
 
   const reconcileQueuedMessage = async (item: WebQueuedMessage, action: "discard" | "resubmit") => {
@@ -1148,10 +1201,41 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
     [session?.subagents],
   );
 
+  const stopAction = !editingQueueId && session?.status === "working" && !draft.trim() && images.length === 0;
+
+  const requestAbort = async () => {
+    if (!session || aborting) return;
+    setAborting(true);
+    setSendError(null);
+    setSendNotice("Stopping…");
+    try {
+      await onAbort();
+      setSendNotice("Stop requested");
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : String(cause));
+      setSendNotice(null);
+      setAborting(false);
+    }
+  };
+
   const submit = async (behavior?: "steer" | "followUp", messageOverride?: string) => {
     const message = (messageOverride ?? draft).trim();
     if ((!message && images.length === 0) || sending || !session) return;
+    try {
+      assertClientPromptPayloadFits({
+        type: "client.prompt",
+        requestId: "00000000-0000-4000-8000-000000000000",
+        sessionId: session.id,
+        message,
+        images,
+        streamingBehavior: behavior,
+      });
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
     setSending(true);
+    setSendNotice(null);
     try {
       if (editingQueueId) {
         await onReplaceQueue(queuedMessages.map((item) => item.id === editingQueueId ? { ...item, message, images } : item));
@@ -1174,7 +1258,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
       <SubagentOutputDialog agent={selectedSubagent} onOpenChange={(open) => { if (!open) setSelectedSubagentId(null); }} />
       <div
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
         onWheel={(event) => {
           if (event.deltaY < 0) {
             followOutputRef.current = false;
@@ -1241,9 +1325,21 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
       <div className="semantic-session-composer bg-zinc-950/95 p-3 backdrop-blur sm:p-4">
         <div className="w-full">
           {session?.subagents && session.subagents.length > 0 && (
-            <div className="semantic-live-subagents">
-              <div className="semantic-queue-label">Subagents · {usageSummary(displayedSubagentUsage)}</div>
-              <SubagentRows agents={session.subagents} onSelect={(agent) => setSelectedSubagentId(agent.id)} />
+            <div className={cn("semantic-live-subagents", subagentsMinimized && "is-minimized")}>
+              <div className="semantic-live-subagents-header">
+                <div className="semantic-queue-label">Subagents · {usageSummary(displayedSubagentUsage)}</div>
+                <button
+                  type="button"
+                  className="semantic-subagents-minimize"
+                  title={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
+                  aria-label={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
+                  aria-expanded={!subagentsMinimized}
+                  onClick={() => setSubagentsMinimized((minimized) => !minimized)}
+                >
+                  {subagentsMinimized ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </button>
+              </div>
+              {!subagentsMinimized && <SubagentRows agents={session.subagents} onSelect={(agent) => setSelectedSubagentId(agent.id)} />}
             </div>
           )}
           {queuedMessages.length > 0 && (
@@ -1260,7 +1356,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
                   <div className="grid gap-1.5">
                     {queuedMessages.map((item, index) => {
                       const blocked = queuedMessages.slice(0, index).some((queued) => queued.deliveryState === "delivering");
-                      return <QueuedMessageRow key={item.id} item={item} blocked={blocked} onEdit={() => editQueuedMessage(item)} onRemove={() => void removeQueuedMessage(item)} onReconcile={(action) => void reconcileQueuedMessage(item, action)} />;
+                      return <QueuedMessageRow key={item.id} item={item} blocked={blocked} steering={steeringQueueId === item.id} steerDisabled={steeringQueueId !== null || editingQueueId === item.id} onEdit={() => editQueuedMessage(item)} onRemove={() => void removeQueuedMessage(item)} onSteer={() => void steerQueuedMessage(item)} onReconcile={(action) => void reconcileQueuedMessage(item, action)} />;
                     })}
                   </div>
                 </SortableContext>
@@ -1269,7 +1365,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
                 <DragOverlay dropAnimation={null}>
                   {draggingQueueId ? (() => {
                     const item = queuedMessages.find((queued) => queued.id === draggingQueueId);
-                    return item ? <QueuedMessageRow item={item} overlay onEdit={() => {}} onRemove={() => {}} onReconcile={() => {}} /> : null;
+                    return item ? <QueuedMessageRow item={item} overlay onEdit={() => {}} onRemove={() => {}} onSteer={() => {}} onReconcile={() => {}} /> : null;
                   })() : null}
                 </DragOverlay>,
                 document.body,
@@ -1298,7 +1394,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
                 ))}
               </div>
             )}
-            {activeSkillInvocation && <div className="semantic-skill-invocation"><span>skill</span><code>/{activeSkillInvocation.name}</code><small>arguments stay verbatim</small></div>}
+            {activeSkillInvocation && <div className="semantic-skill-invocation"><span>skill</span><code>/{activeSkillInvocation.name}</code></div>}
             {images.length > 0 && <div className="flex gap-2 overflow-x-auto px-3 pt-3">{images.map((image, index) => <div key={index} className="relative shrink-0"><img className="h-16 w-16 rounded-lg border border-zinc-700 object-cover" src={`data:${image.mimeType};base64,${image.data}`} alt={image.name ?? "Attachment"} /><button type="button" className="absolute -right-1 -top-1 rounded-full bg-zinc-800 p-0.5" onMouseDown={(event) => event.preventDefault()} onClick={() => { setImages((current) => current.filter((_, item) => item !== index)); textareaRef.current?.focus({ preventScroll: true }); }}><X className="h-3 w-3" /></button></div>)}</div>}
             <textarea
               ref={textareaRef}
@@ -1396,15 +1492,17 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
                 <div className="flex items-center overflow-hidden rounded-xl shadow-sm">
                   <Button
                     className={cn("h-9 w-9 rounded-xl", !editingQueueId && session?.status === "working" && "rounded-r-none")}
-                    title={editingQueueId ? "Save queued message" : session?.status === "working" && !draft.trim() && images.length === 0 ? "Stop" : "Send"}
+                    title={editingQueueId ? "Save queued message" : stopAction ? aborting ? "Stopping" : "Stop" : "Send"}
                     size="icon"
-                    disabled={sending || !connected || (!editingQueueId && session?.status !== "working" && !draft.trim() && images.length === 0)}
+                    disabled={stopAction
+                      ? aborting || !session
+                      : sending || !connected || (!editingQueueId && session?.status !== "working" && !draft.trim() && images.length === 0)}
                     onClick={() => {
-                      if (!editingQueueId && session?.status === "working" && !draft.trim() && images.length === 0) void onAbort();
+                      if (stopAction) void requestAbort();
                       else void submit(editingQueueId ? undefined : session?.status === "working" ? "steer" : undefined);
                     }}
                   >
-                    {!editingQueueId && session?.status === "working" && !draft.trim() && images.length === 0 ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+                    {stopAction ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
                   </Button>
                   {!editingQueueId && session?.status === "working" && (
                     <Button
@@ -1425,6 +1523,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
             </div>
           </div>
           {(sendError || error) && <p className="mt-2 text-sm text-red-300">{sendError ?? error}</p>}
+          {!sendError && !error && sendNotice && <p className="mt-2 text-sm text-zinc-400" role="status" aria-live="polite">{sendNotice}</p>}
         </div>
       </div>
     </section>

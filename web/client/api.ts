@@ -13,9 +13,31 @@ const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 const SOCKET_PATHS = ["/ws/client"] as const;
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 const FORK_COMMAND_TIMEOUT_MS = 35_000;
+const WORKTREE_COMMAND_TIMEOUT_MS = 11 * 60_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 11 * 60_000;
+let commandHelloCapability: Promise<boolean> | undefined;
+
+export function commandHelloType(health: unknown): "client.hello" | "client.command_hello" {
+  const capabilities = health && typeof health === "object" && "capabilities" in health
+    ? (health as { capabilities?: unknown }).capabilities
+    : undefined;
+  return capabilities && typeof capabilities === "object" && "commandHello" in capabilities && (capabilities as { commandHello?: unknown }).commandHello === true
+    ? "client.command_hello"
+    : "client.hello";
+}
+
+async function supportsCommandHello(): Promise<boolean> {
+  commandHelloCapability ??= fetch("/api/health", { cache: "no-store" })
+    .then(async (response) => {
+      if (!response.ok) return false;
+      return commandHelloType(await response.json()) === "client.command_hello";
+    })
+    .catch(() => false);
+  return await commandHelloCapability;
+}
 
 export function sessionCommandTimeout(command: AgentCommand | RpcSessionCommand): number {
+  if (command.type === "create_worktree" || command.type === "reload") return WORKTREE_COMMAND_TIMEOUT_MS;
   if (command.type === "clone" || command.type === "fork") return FORK_COMMAND_TIMEOUT_MS;
   return command.type === "compact" || command.type === "bash"
     ? LONG_RUNNING_COMMAND_TIMEOUT_MS
@@ -118,20 +140,27 @@ export function isServerMessage(message: unknown): message is ServerToClientMess
 }
 
 export async function sendSessionCommand(sessionId: string, command: AgentCommand | RpcSessionCommand): Promise<unknown> {
-  const socket = new SessionSocket();
+  // New daemons avoid a full session-catalog snapshot on one-shot command sockets.
+  // Fall back to client.hello when an older daemon is still serving a freshly built
+  // client bundle; this protocol skew previously broke Stop and every queue action.
+  const socket = new SessionSocket(await supportsCommandHello() ? "client.command_hello" : "client.hello");
   await socket.connect();
   return new Promise<unknown>((resolve, reject) => {
     const requestId = crypto.randomUUID();
     let settled = false;
+    let timeout: number | undefined;
+    let unsubscribeMessage = () => {};
+    let unsubscribeClose = () => {};
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
-      window.clearTimeout(timeout);
-      unsubscribe();
+      if (timeout !== undefined) window.clearTimeout(timeout);
+      unsubscribeMessage();
+      unsubscribeClose();
       socket.close();
       callback();
     };
-    const unsubscribe = socket.onMessage((message) => {
+    unsubscribeMessage = socket.onMessage((message) => {
       if (!message || typeof message !== "object" || !("requestId" in message) || message.requestId !== requestId) return;
       const response = message as unknown as { success?: boolean; error?: string; data?: unknown };
       finish(() => {
@@ -139,11 +168,18 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
         else resolve(response.data);
       });
     });
-    const timeout = window.setTimeout(
+    unsubscribeClose = socket.onClose((event) => {
+      finish(() => reject(new Error(`Command socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`)));
+    });
+    timeout = window.setTimeout(
       () => finish(() => reject(new Error(`Command timed out after ${sessionCommandTimeout(command)}ms`))),
       sessionCommandTimeout(command),
     );
-    socket.send({ type: "client.command", requestId, sessionId, command } satisfies ClientToServerMessage as Record<string, unknown>);
+    try {
+      socket.send({ type: "client.command", requestId, sessionId, command } satisfies ClientToServerMessage as Record<string, unknown>);
+    } catch (error) {
+      finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+    }
   });
 }
 
@@ -174,6 +210,10 @@ export async function cloneSessionViaCommand(sessionId: string): Promise<unknown
 
 export async function forkSessionViaCommand(sessionId: string, entryId: string): Promise<unknown> {
   return sendSessionCommand(sessionId, { type: "fork", entryId });
+}
+
+export async function createSessionWorktreeViaCommand(sessionId: string, repository: string, name: string): Promise<unknown> {
+  return sendSessionCommand(sessionId, { type: "create_worktree", repository, name });
 }
 
 export async function openSessionSocket(onMessage: (message: unknown) => void): Promise<SessionSocket> {

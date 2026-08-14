@@ -13,7 +13,9 @@ import {
 	type FooterContribution,
 } from "./footer-events.js";
 import {
+	SUBAGENT_ABORT_EVENT,
 	SUBAGENT_STATUS_EVENT,
+	type SubagentAbortRequest,
 	type SubagentStatusEvent,
 } from "./subagent-events.js";
 import type {
@@ -32,6 +34,7 @@ import type {
 import { WEB_STATE_VERSION } from "../web/protocol.js";
 import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.js";
 import { readWebTailscaleSetting, writeWebTailscaleSetting } from "./web-settings.js";
+import { consumeWorktreeReplacement, runWorktreeCommand } from "./worktree.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_ENTRY = join(PACKAGE_ROOT, "web", "server", "index.ts");
@@ -54,16 +57,70 @@ export function isScopedModelAllowed(
 ): boolean {
 	return scopedModels.length === 0 || scopedModels.some(({ model }) => model.provider === provider && model.id === modelId);
 }
+
+/** Apply a route change and roll it back if the matching settings write fails. */
+export async function abortSessionAndSubagents(options: {
+	sessionId: string;
+	abortMain(): void;
+	emit(request: SubagentAbortRequest): void;
+}): Promise<void> {
+	const operations: Promise<unknown>[] = [];
+	const request: SubagentAbortRequest = {
+		sessionId: options.sessionId,
+		waitUntil(operation) {
+			operations.push(operation);
+		},
+	};
+	try {
+		options.emit(request);
+	} catch {
+		// A broken optional listener must never prevent the main Stop request.
+	}
+	options.abortMain();
+	await Promise.allSettled(operations);
+}
+
+export async function applyTailscaleSettingTransaction<TSetting, TStatus>(options: {
+	current: TSetting;
+	next: TSetting;
+	apply: (setting: TSetting) => Promise<TStatus>;
+	persist: (setting: TSetting) => Promise<void>;
+}): Promise<TStatus> {
+	const status = await options.apply(options.next);
+	try {
+		await options.persist(options.next);
+		return status;
+	} catch (persistError) {
+		try {
+			await options.apply(options.current);
+		} catch (rollbackError) {
+			throw new AggregateError(
+				[persistError, rollbackError],
+				`Could not persist Tailscale settings and route rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+			);
+		}
+		throw persistError;
+	}
+}
 const START_TIMEOUT_MS = 8_000;
 const FORK_TIMEOUT_MS = 30_000;
+const WORKTREE_TIMEOUT_MS = 10 * 60_000;
 type ForkResult = { cancelled: boolean; sessionId?: string };
-const pendingForks = new Map<string, {
+type WorktreeResult = { cancelled: boolean; sessionId?: string; path?: string; branch?: string };
+type PendingFork = {
 	owner: BridgeState;
 	expectingReplacement: boolean;
 	timer: ReturnType<typeof setTimeout>;
 	resolve: (result: ForkResult) => void;
 	reject: (error: Error) => void;
-}>();
+};
+const PENDING_FORKS_KEY = Symbol.for("@vessup/pi-kit/web-pending-forks");
+type PendingForkGlobal = typeof globalThis & { [PENDING_FORKS_KEY]?: Map<string, PendingFork> };
+const pendingForks = ((globalThis as PendingForkGlobal)[PENDING_FORKS_KEY] ??= new Map<string, PendingFork>());
+const PENDING_RELOADS_KEY = Symbol.for("@vessup/pi-kit/web-pending-reloads");
+type PendingReloadGlobal = typeof globalThis & { [PENDING_RELOADS_KEY]?: Set<string> };
+const pendingReloads = ((globalThis as PendingReloadGlobal)[PENDING_RELOADS_KEY] ??= new Set<string>());
+const WEB_RELOAD_GENERATION = crypto.randomUUID();
 
 type SocketLike = WebSocket;
 type BridgeState = {
@@ -116,13 +173,14 @@ function publishedServerBase(state: ServerStateFile): string {
 
 async function updateTailscaleServer(
 	state: ServerStateFile,
-	setting: { enabled: boolean; httpsPort: number },
+	setting: { enabled: boolean; httpsPort: number; serviceName?: string },
+	currentSetting?: { enabled: boolean; httpsPort: number; serviceName?: string },
 ): Promise<NonNullable<ServerStateFile["tailscale"]>> {
 	const url = new URL("/api/tailscale", serverBase(state));
 	const response = await fetch(url, {
 		method: "POST",
 		headers: { "content-type": "application/json", origin: serverBase(state) },
-		body: JSON.stringify(setting),
+		body: JSON.stringify({ ...setting, ...(currentSetting ? { current: currentSetting } : {}) }),
 		signal: AbortSignal.timeout(10_000),
 	});
 	const payload: unknown = await response.json().catch(() => undefined);
@@ -415,7 +473,11 @@ async function executeAgentCommand(
 				return;
 			}
 			case "abort":
-				state.ctx.abort();
+				await abortSessionAndSubagents({
+					sessionId: state.session.id,
+					abortMain: () => state.ctx.abort(),
+					emit: (request) => pi.events.emit(SUBAGENT_ABORT_EVENT, request),
+				});
 				respond(state, requestId, true);
 				return;
 			case "replace_queue":
@@ -433,25 +495,31 @@ async function executeAgentCommand(
 					thinkingLevels: modelThinkingLevels(model),
 				}));
 				const commands = pi.getCommands()
-					.filter((command) => command.source === "prompt" || command.source === "skill")
+					.filter((command) => command.source === "prompt" || command.source === "skill" || command.name === "worktree")
 					.map((command) => ({
 						name: command.name,
 						description: command.description,
 						source: command.source,
 						location: command.sourceInfo.scope,
 					}));
+				if (!commands.some((command) => command.name === "reload")) {
+					commands.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
+				}
 				respond(state, requestId, true, { models, thinkingLevels: modelThinkingLevels(state.ctx.model ?? {}), commands });
 				return;
 			}
 			case "get_commands": {
 				const commands = pi.getCommands()
-					.filter((command) => command.source === "prompt" || command.source === "skill")
+					.filter((command) => command.source === "prompt" || command.source === "skill" || command.name === "worktree")
 					.map((command) => ({
 						name: command.name,
 						description: command.description,
 						source: command.source,
 						location: command.sourceInfo.scope,
 					}));
+				if (!commands.some((command) => command.name === "reload")) {
+					commands.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
+				}
 				respond(state, requestId, true, { commands });
 				return;
 			}
@@ -475,6 +543,43 @@ async function executeAgentCommand(
 				respond(state, requestId, true);
 				state.ctx.shutdown();
 				return;
+			case "reload":
+				if (!state.ctx.isIdle()) throw new Error("Wait for Pi to become idle before reloading");
+				pi.sendUserMessage(`/web-reload ${requestId}`);
+				return;
+			case "create_worktree": {
+				if (!state.ctx.isIdle()) throw new Error("Wait for Pi to become idle before creating a worktree");
+				const token = crypto.randomUUID();
+				const result = await new Promise<WorktreeResult>((resolveWorktree, rejectWorktree) => {
+					const finish = (error?: Error, value?: WorktreeResult) => {
+						const pending = pendingForks.get(token);
+						if (!pending) return;
+						pendingForks.delete(token);
+						clearTimeout(pending.timer);
+						if (error) rejectWorktree(error);
+						else resolveWorktree(value ?? { cancelled: true });
+					};
+					const timer = setTimeout(() => finish(new Error("Pi worktree switch timed out")), WORKTREE_TIMEOUT_MS);
+					timer.unref?.();
+					pendingForks.set(token, {
+						owner: state,
+						expectingReplacement: false,
+						timer,
+						resolve: (value) => finish(undefined, value),
+						reject: (error) => finish(error),
+					});
+					try {
+						const worktreeCommand = "existing" in command
+							? `--existing ${JSON.stringify(command.existing)}`
+							: `${JSON.stringify(command.name)} --repo ${JSON.stringify(command.repository)}`;
+						pi.sendUserMessage(`/web-worktree ${token} ${worktreeCommand}`);
+					} catch (error) {
+						finish(error instanceof Error ? error : new Error(String(error)));
+					}
+				});
+				respond(state, requestId, true, result);
+				return;
+			}
 			case "set_session_name":
 				pi.setSessionName(command.name);
 				updateSession(state, { name: command.name || undefined });
@@ -538,6 +643,13 @@ async function executeAgentCommand(
 		throw new Error("Unknown Pi web command");
 	} catch (error) {
 		respond(state, requestId, false, undefined, error instanceof Error ? error.message : String(error));
+	}
+}
+
+function drainPendingReloads(state: BridgeState): void {
+	for (const requestId of pendingReloads) {
+		pendingReloads.delete(requestId);
+		respond(state, requestId, true, { reloaded: true });
 	}
 }
 
@@ -615,6 +727,7 @@ async function connect(pi: ExtensionAPI, state: BridgeState): Promise<void> {
 		socket.onerror = () => finish(new Error("Could not connect to Pi web server"));
 	});
 
+	drainPendingReloads(state);
 	socket.onclose = () => {
 		if (state.socket === socket) state.socket = undefined;
 		scheduleReconnect(pi, state);
@@ -707,6 +820,24 @@ export default function webSessions(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("web-reload", {
+		description: `Internal web reload ${WEB_RELOAD_GENERATION}`,
+		handler: async (args, ctx) => {
+			const token = args.trim();
+			if (token) pendingReloads.add(token);
+			try {
+				await ctx.waitForIdle();
+				await ctx.reload();
+				return;
+			} catch (error) {
+				if (token) pendingReloads.delete(token);
+				const state = bridge;
+				if (token && state) respond(state, token, false, undefined, error instanceof Error ? error.message : String(error));
+				else throw error;
+			}
+		},
+	});
+
 	pi.registerCommand("web-tailscale", {
 		description: "Enable, disable, or inspect tailnet publishing for Pi web",
 		handler: async (args, ctx) => {
@@ -736,11 +867,20 @@ export default function webSessions(pi: ExtensionAPI): void {
 				...(serviceName ? { serviceName } : {}),
 			};
 			const server = bridge?.server ?? await ensureServer();
-			const status = await updateTailscaleServer(server, nextSetting);
-			if ((action === "on" && !status.published) || status.error) {
-				throw new Error(status.error ?? "Tailscale Serve did not publish Pi web");
-			}
-			await writeWebTailscaleSetting(nextSetting);
+			let appliedSetting = setting;
+			const status = await applyTailscaleSettingTransaction({
+				current: setting,
+				next: nextSetting,
+				apply: async (target) => {
+					const applied = await updateTailscaleServer(server, target, appliedSetting);
+					if ((target.enabled && !applied.published) || applied.error) {
+						throw new Error(applied.error ?? "Tailscale Serve did not publish Pi web");
+					}
+					appliedSetting = target;
+					return applied;
+				},
+				persist: writeWebTailscaleSetting,
+			});
 			server.tailscale = status;
 			if (bridge) {
 				bridge.server = server;
@@ -781,6 +921,27 @@ export default function webSessions(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("web-worktree", {
+		description: "Create and activate a worktree for the web session manager",
+		handler: async (args, ctx) => {
+			const [token = "", ...worktreeArgs] = args.trim().split(/\s+/);
+			const pending = pendingForks.get(token);
+			try {
+				if (pending) pending.expectingReplacement = true;
+				const result = await runWorktreeCommand(worktreeArgs.join(" "), ctx);
+				pending?.resolve({
+					...result,
+					sessionId: result.cancelled ? undefined : pending.owner.session.id,
+					path: result.path ?? pending.owner.session.cwd,
+					branch: result.branch ?? pending.owner.session.branch,
+				} as WorktreeResult);
+			} catch (error) {
+				pending?.reject(error instanceof Error ? error : new Error(String(error)));
+				if (!pending) throw error;
+			}
+		},
+	});
+
 	pi.registerCommand("web-fork", {
 		description: "Fork from an entry for the web session manager",
 		handler: async (args, ctx) => {
@@ -804,10 +965,11 @@ export default function webSessions(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		if (process.env.PI_WEB_MANAGED === "1") return;
 		const previous = bridge;
 		const session = makeSession(ctx, undefined);
+		const worktreeReplacement = consumeWorktreeReplacement(session.id);
 		const state: BridgeState = {
 			ctx,
 			session,
@@ -820,12 +982,20 @@ export default function webSessions(pi: ExtensionAPI): void {
 			previous.closed = true;
 			previous.replacement = state;
 			replacePendingForkOwners(previous, state);
-			rejectPendingForks(previous, "Pi session changed before the fork completed");
+			rejectPendingForks(previous, "Pi session changed before the fork completed", true);
 			previous.socket?.close();
 			if (previous.reconnectTimer) clearTimeout(previous.reconnectTimer);
 			removeFooter(pi, previous.session.id);
 		}
 		bridge = state;
+		for (const pending of pendingForks.values()) {
+			if (!pending.expectingReplacement) continue;
+			if (
+				pending.owner === previous ||
+				pending.owner.session.file === event.previousSessionFile ||
+				pending.owner.session.id === worktreeReplacement?.previousSessionId
+			) pending.owner = state;
+		}
 		void refreshGitMetadata(pi, state);
 		try {
 			await connect(pi, state);
@@ -848,7 +1018,10 @@ export default function webSessions(pi: ExtensionAPI): void {
 		forward(event, ctx);
 	});
 	pi.on("agent_start", (event, ctx) => forward(event, ctx, "working"));
-	pi.on("agent_end", (event, ctx) => forward(event, ctx, "working"));
+	// The visible run is complete at agent_end. agent_settled remains the
+	// authoritative point for queue delivery and teardown, but the session must
+	// not keep presenting itself as working while those final hooks drain.
+	pi.on("agent_end", (event, ctx) => forward(event, ctx, "idle"));
 	pi.on("agent_settled", (event, ctx) => {
 		if (bridge?.session.compaction) {
 			endBridgeCompaction(bridge, { aborted: false, willRetry: false, errorMessage: "Compaction stopped before completion" });
@@ -888,7 +1061,9 @@ export default function webSessions(pi: ExtensionAPI): void {
 		const state = bridge;
 		if (!state || state.session.id !== ctx.sessionManager.getSessionId()) return;
 		state.closed = true;
-		rejectPendingForks(state, "Pi session closed before the fork completed");
+		// Expected replacement requests survive extension-runtime reload and are
+		// rebound by the next session_start through the module-global pending map.
+		rejectPendingForks(state, "Pi session closed before the fork completed", true);
 		if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
 		state.socket?.close();
 		removeFooter(pi, state.session.id);

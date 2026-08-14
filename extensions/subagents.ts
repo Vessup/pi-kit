@@ -36,6 +36,8 @@ import {
 	type FooterUsage,
 } from "./footer-events.js";
 import {
+	parseSubagentAbortRequest,
+	SUBAGENT_ABORT_EVENT,
 	SUBAGENT_STATUS_EVENT,
 	type SubagentStatusEvent,
 	type SubagentWebSnapshot,
@@ -453,6 +455,7 @@ class SubagentManager {
 	private webStatusPublishTimer?: ReturnType<typeof setTimeout>;
 	private webTranscriptCursors = new Map<string, TranscriptItem | undefined>();
 	private webStreamingSnapshots = new Map<string, string>();
+	private abortAllInFlight?: Promise<number>;
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
@@ -966,16 +969,25 @@ class SubagentManager {
 	}
 
 	async abortAll(): Promise<number> {
-		const results = await abortRunningSubagentSessions(this.list());
-		for (const { agent, error } of results) {
-			if (error) {
-				agent.error = error.message;
-				this.activity(agent, `abort failed: ${agent.error}`);
-			} else {
-				this.activity(agent, "aborted with the main agent");
+		if (this.abortAllInFlight) return await this.abortAllInFlight;
+		const operation = (async () => {
+			const results = await abortRunningSubagentSessions(this.list());
+			for (const { agent, error } of results) {
+				if (error) {
+					agent.error = error.message;
+					this.activity(agent, `abort failed: ${agent.error}`);
+				} else {
+					this.activity(agent, "aborted with the main agent");
+				}
 			}
+			return results.length;
+		})();
+		this.abortAllInFlight = operation;
+		try {
+			return await operation;
+		} finally {
+			if (this.abortAllInFlight === operation) this.abortAllInFlight = undefined;
 		}
-		return results.length;
 	}
 
 	async terminate(id: string, remove = false): Promise<ManagedSubagent> {
@@ -1635,6 +1647,17 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	let managerOpen = false;
 	let mainAbortSignal: AbortSignal | undefined;
 	let onMainAbort: (() => void) | undefined;
+	let explicitAbortInProgress = false;
+
+	pi.events.on(SUBAGENT_ABORT_EVENT, (value) => {
+		const request = parseSubagentAbortRequest(value);
+		if (!request) return;
+		explicitAbortInProgress = true;
+		const operation = manager.abortAll().finally(() => {
+			explicitAbortInProgress = false;
+		});
+		request.waitUntil(operation);
+	});
 
 	const openManager = (ctx: ExtensionContext) => {
 		if (managerOpen) return;
@@ -1798,7 +1821,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		if (!ctx.signal) return;
 		if (mainAbortSignal && onMainAbort) mainAbortSignal.removeEventListener("abort", onMainAbort);
 		mainAbortSignal = ctx.signal;
-		onMainAbort = () => { void manager.abortAll(); };
+		onMainAbort = () => {
+			if (!explicitAbortInProgress) void manager.abortAll();
+		};
 		mainAbortSignal.addEventListener("abort", onMainAbort, { once: true });
 	});
 

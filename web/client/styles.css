@@ -220,6 +220,11 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-subagent-activity { display: flex; max-width: 42vw; align-items: center; justify-content: flex-end; gap: 0.45rem; overflow: hidden; color: rgb(113 113 122); font-size: 0.7rem; white-space: nowrap; }
 .semantic-subagent-tool { overflow: hidden; color: rgb(125 211 252); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; }
 .semantic-live-subagents { max-height: 12rem; overflow-y: auto; margin-bottom: 0.55rem; border: 1px solid rgb(63 63 70 / 0.7); border-radius: 0.85rem; background: rgb(24 24 27 / 0.75); padding: 0.65rem 0.75rem; }
+.semantic-live-subagents.is-minimized { overflow: hidden; }
+.semantic-live-subagents-header { display: flex; min-height: 1.75rem; align-items: center; gap: 0.5rem; }
+.semantic-live-subagents-header > .semantic-queue-label { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-subagents-minimize { display: inline-grid; width: 1.75rem; height: 1.75rem; margin-left: auto; flex: none; place-items: center; border-radius: 0.4rem; color: rgb(161 161 170); }
+.semantic-subagents-minimize:hover { background: rgb(63 63 70 / 0.7); color: white; }
 .semantic-subagent-dialog-body { max-height: min(70vh, 48rem); overflow-y: auto; }
 .semantic-subagent-error { margin-bottom: 0.75rem; border: 1px solid rgb(248 113 113 / 0.3); border-radius: 0.6rem; background: rgb(248 113 113 / 0.08); padding: 0.7rem; color: rgb(252 165 165); font-size: 0.8rem; }
 .semantic-subagent-transcript-item + .semantic-subagent-transcript-item { margin-top: 1rem; }
@@ -293,9 +298,8 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-attachment-drop { position: absolute; inset: 0; z-index: 10; display: flex; pointer-events: none; align-items: center; justify-content: center; gap: 0.5rem; border-radius: 1rem; background: rgb(9 9 11 / 0.88); color: rgb(125 211 252); font-size: 0.85rem; font-weight: 600; }
 .semantic-queue { display: grid; margin-bottom: 0.5rem; }
 .semantic-queue-label { margin-bottom: 0.15rem; color: rgb(113 113 122); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-.semantic-queue-item { display: flex; min-width: 0; cursor: grab; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(39 39 42 / 0.72); padding: 0.45rem 0.55rem; color: rgb(161 161 170); font-size: 0.8rem; transition: opacity 150ms ease, background-color 150ms ease; }
-.semantic-queue-item:active { cursor: grabbing; }
-.semantic-queue-item.is-uncertain { cursor: default; border: 1px solid rgb(251 191 36 / 0.65); background: rgb(120 53 15 / 0.35); color: rgb(253 230 138); }
+.semantic-queue-item { display: flex; min-width: 0; align-items: center; gap: 0.5rem; border-radius: 0.65rem; background: rgb(39 39 42 / 0.72); padding: 0.45rem 0.55rem; color: rgb(161 161 170); font-size: 0.8rem; transition: opacity 150ms ease, background-color 150ms ease; }
+.semantic-queue-item.is-uncertain { border: 1px solid rgb(251 191 36 / 0.65); background: rgb(120 53 15 / 0.35); color: rgb(253 230 138); }
 .semantic-queue-item.is-blocked { cursor: not-allowed; opacity: 0.55; }
 .semantic-queue-item.is-sortable-dragging { opacity: 0; }
 .semantic-queue-item.is-overlay { width: min(34rem, calc(100vw - 2rem)); cursor: grabbing; border: 1px solid rgb(255 255 255 / 0.65); background: rgb(39 39 42); box-shadow: 0 18px 50px rgb(0 0 0 / 0.65); opacity: 1; }
@@ -305,6 +309,10 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-queue-item > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-queue-item > button { display: inline-grid; width: 1.75rem; height: 1.75rem; flex: none; cursor: pointer; place-items: center; border-radius: 0.4rem; color: rgb(161 161 170); }
 .semantic-queue-item > button:hover { background: rgb(63 63 70); color: white; }
+.semantic-queue-item > button:disabled { cursor: wait; opacity: 0.55; }
+.semantic-queue-item > button:disabled:hover { background: transparent; color: rgb(161 161 170); }
+.semantic-queue-item > button.semantic-queue-grip { cursor: grab; touch-action: none; }
+.semantic-queue-item > button.semantic-queue-grip:active { cursor: grabbing; }
 
 @media (max-width: 640px) {
   .semantic-token-inline { display: none; }
