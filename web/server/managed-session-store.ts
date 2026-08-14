@@ -65,6 +65,21 @@ export class ManagedSessionStore {
 		}
 	}
 
+	recanonicalize(): void {
+		const normalized = new Set([...this.#files].map(fileKey));
+		if (normalized.size === this.#files.size && [...normalized].every((file) => this.#files.has(file))) return;
+		const snapshot = new Set(this.#files);
+		this.#files.clear();
+		for (const file of normalized) this.#files.add(file);
+		try {
+			this.#persist();
+		} catch (error) {
+			this.#files.clear();
+			for (const file of snapshot) this.#files.add(file);
+			throw error;
+		}
+	}
+
 	replace(previousFile: string | undefined, nextFile: string): void {
 		const previous = previousFile ? fileKey(previousFile) : undefined;
 		const next = fileKey(nextFile);

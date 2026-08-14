@@ -1,4 +1,4 @@
-import { accessSync, closeSync, constants, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -12,6 +12,19 @@ export function validateWorktreeName(input: string): string {
 	}
 	if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Worktree name may contain only letters, numbers, '.', '_' and '-'");
 	return name;
+}
+
+/** Validate a short local branch name while allowing namespaced branches such as owner/topic. */
+export function validateLocalBranchName(input: string): string {
+	const branch = input.trim();
+	if (!branch) throw new Error("Missing local branch name");
+	if (branch.includes("\0")) throw new Error("Local branch name contains a NUL byte");
+	if (branch.startsWith("refs/")) throw new Error("Local branch must be a short branch name, not a refs/... path");
+	const result = spawnSync("git", ["check-ref-format", "--branch", branch], { encoding: "utf8" });
+	if (result.status !== 0) {
+		throw new Error(`Invalid local branch name ${JSON.stringify(branch)}: ${result.stderr?.trim() || result.error?.message || "git check-ref-format rejected it"}`);
+	}
+	return branch;
 }
 
 function gitOutput(cwd: string, args: string[]): string {
@@ -41,8 +54,23 @@ function ensureSupportedGit(): void {
 
 export type WorktreeRef = { kind: "branch" | "detached"; value: string };
 export type ExistingWebWorktree = { path: string; repoRoot: string; ref: WorktreeRef };
-export type CreatedWebWorktree = { path: string; repoRoot: string; branch: string; setupRan: boolean };
-export type ManagedWorktree = Pick<CreatedWebWorktree, "path" | "repoRoot" | "branch">;
+export type CreateWebWorktreeOptions = { branch?: string; startPoint?: string };
+export type CreatedWebWorktree = {
+	path: string;
+	repoRoot: string;
+	/** Safe directory segment below .pi/worktrees. */
+	name: string;
+	/** Local branch checked out in the managed worktree. */
+	branch: string;
+	/** Whether this operation created the local branch and therefore owns its cleanup. */
+	branchCreated: boolean;
+	/** Commit/ref used to initialize a newly created branch. */
+	startPoint: string;
+	/** Remote-tracking branch configured as upstream when one was requested. */
+	upstream?: string;
+	setupRan: boolean;
+};
+export type ManagedWorktree = Pick<CreatedWebWorktree, "path" | "repoRoot" | "name" | "branch" | "branchCreated">;
 
 export const WORKTREE_SETUP_TIMEOUT_MS = 5 * 60_000;
 
@@ -92,7 +120,9 @@ export function managedWorktreeFromEntries(entries: readonly unknown[]): Managed
 		if (entry.data.managed === false) return undefined;
 		const { path, repoRoot, branch } = entry.data;
 		if (typeof path === "string" && typeof repoRoot === "string" && typeof branch === "string") {
-			return { path, repoRoot, branch };
+			const name = typeof entry.data.name === "string" ? entry.data.name : basename(path);
+			const branchCreated = typeof entry.data.branchCreated === "boolean" ? entry.data.branchCreated : name === branch;
+			return { path, repoRoot, name, branch, branchCreated };
 		}
 	}
 	return undefined;
@@ -136,6 +166,46 @@ function parseRegisteredWorktrees(cwd: string): Array<{ path: string; head?: str
 	return records;
 }
 
+function primaryRepositoryRoot(cwd: string): string {
+	const primary = parseRegisteredWorktrees(cwd)[0];
+	if (!primary) throw new Error("Git repository has no registered primary worktree");
+	return realpathSync(primary.path);
+}
+
+type ResolvedStartPoint = { value: string; commit: string; upstream?: string };
+
+function localBranchExists(cwd: string, branch: string): boolean {
+	const result = spawnSync("git", ["-C", cwd, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { encoding: "utf8" });
+	if (result.status === 0) return true;
+	if (result.status === 1) return false;
+	throw new Error(result.stderr?.trim() || result.error?.message || `Could not inspect local branch ${branch}`);
+}
+
+function resolveStartPoint(cwd: string, input: string): ResolvedStartPoint {
+	const value = input.trim();
+	if (!value) throw new Error("Missing worktree start point");
+	if (value.includes("\0")) throw new Error("Worktree start point contains a NUL byte");
+	if (value.startsWith("-")) throw new Error(`Invalid worktree start point: ${value}`);
+	let commit: string;
+	try {
+		commit = gitOutput(cwd, ["rev-parse", "--verify", "--end-of-options", `${value}^{commit}`]).toLowerCase();
+	} catch (error) {
+		throw new Error(`Worktree start point does not resolve to a commit: ${value} (${error instanceof Error ? error.message : String(error)})`);
+	}
+	if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error(`Worktree start point resolved to an invalid commit: ${value}`);
+
+	const symbolic = spawnSync("git", ["-C", cwd, "rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", value], { encoding: "utf8" });
+	const fullRef = symbolic.status === 0 ? symbolic.stdout?.trim() ?? "" : "";
+	const remoteMatch = fullRef.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
+	const upstream = remoteMatch && remoteMatch[2] !== "HEAD" ? `${remoteMatch[1]}/${remoteMatch[2]}` : undefined;
+	return { value, commit, upstream };
+}
+
+function checkedOutBranchPath(cwd: string, branch: string): string | undefined {
+	const fullRef = `refs/heads/${branch}`;
+	return parseRegisteredWorktrees(cwd).find((entry) => entry.branch === fullRef)?.path;
+}
+
 /** Resolve and validate an existing worktree without changing its checkout or branch. */
 export function inspectExistingWorktree(currentCwd: string, requestedPath: string): ExistingWebWorktree {
 	ensureSupportedGit();
@@ -177,7 +247,7 @@ export function inspectExistingWorktree(currentCwd: string, requestedPath: strin
 	} else {
 		throw new Error(`Target worktree has no valid checked-out branch or detached HEAD: ${path}`);
 	}
-	const repoRoot = dirname(currentGitDir);
+	const repoRoot = primaryRepositoryRoot(currentCwd);
 	return { path, repoRoot, ref };
 }
 
@@ -244,10 +314,11 @@ export function hasOtherSessionInWorktree(sessionsRoot: string, currentSessionFi
 	return false;
 }
 
-function verifiedManagedWorktree(worktree: ManagedWorktree): ManagedWorktree {
+function verifiedManagedWorktreeLocation(worktree: ManagedWorktree): ManagedWorktree {
 	ensureSupportedGit();
-	const name = validateWorktreeName(worktree.branch);
-	if (basename(worktree.path) !== name) throw new Error("Refusing to remove a worktree whose path and branch marker disagree");
+	const name = validateWorktreeName(worktree.name);
+	const branch = validateLocalBranchName(worktree.branch);
+	if (basename(worktree.path) !== name) throw new Error("Refusing to remove a worktree whose path and directory-name marker disagree");
 	const repoRoot = realpathSync(worktree.repoRoot);
 	let managedRoot = join(repoRoot, ".pi", "worktrees");
 	try {
@@ -262,13 +333,23 @@ function verifiedManagedWorktree(worktree: ManagedWorktree): ManagedWorktree {
 	if (!samePath(commonDir, primaryGitDir)) throw new Error("Refusing to remove a worktree owned by another repository");
 	const topLevel = gitOutput(path, ["rev-parse", "--show-toplevel"]);
 	if (!samePath(topLevel, path)) throw new Error("Refusing to remove a worktree whose Git root differs from its ownership marker");
-	return { path, repoRoot, branch: name };
+	return { path, repoRoot, name, branch, branchCreated: worktree.branchCreated === true };
 }
 
-/** Remove a verified Pi-managed checkout. A branch warning does not leave a worktree behind. */
+function verifiedManagedWorktree(worktree: ManagedWorktree): ManagedWorktree {
+	const verified = verifiedManagedWorktreeLocation(worktree);
+	const actualRef = currentWorktreeRef(verified.path);
+	if (actualRef.kind !== "branch" || actualRef.value !== verified.branch) {
+		throw new Error(`Refusing to remove a worktree whose checked-out branch differs from its ownership marker (${verified.branch})`);
+	}
+	return verified;
+}
+
+/** Remove a verified Pi-managed checkout, deleting only a branch created by Pi. */
 export function removeManagedWorktree(worktree: ManagedWorktree): { branchWarning?: string } {
 	const verified = verifiedManagedWorktree(worktree);
 	gitOutput(verified.repoRoot, ["worktree", "remove", "--force", verified.path]);
+	if (!verified.branchCreated) return {};
 	try {
 		gitOutput(verified.repoRoot, ["branch", "-D", verified.branch]);
 		return {};
@@ -277,29 +358,119 @@ export function removeManagedWorktree(worktree: ManagedWorktree): { branchWarnin
 	}
 }
 
-/** Explicitly remove a created worktree and branch; startup failures retain them for inspection. */
+/** Remove an operation-owned checkout and only the local branch created with it. */
 export function rollbackWebWorktree(worktree: CreatedWebWorktree): void {
-	gitOutput(worktree.repoRoot, ["worktree", "remove", "--force", worktree.path]);
-	gitOutput(worktree.repoRoot, ["branch", "-D", worktree.branch]);
+	const verified = verifiedManagedWorktreeLocation(worktree);
+	const dirty = gitOutput(verified.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+	if (dirty) throw new Error(`Refusing to roll back managed worktree with uncommitted or untracked changes: ${verified.path}`);
+	gitOutput(verified.repoRoot, ["worktree", "remove", verified.path]);
+	if (verified.branchCreated) gitOutput(verified.repoRoot, ["branch", "-D", verified.branch]);
 }
 
-/** Create a new branch/worktree under the primary repository's .pi directory. */
-export async function createWebWorktree(cwd: string, requestedName: string): Promise<CreatedWebWorktree> {
+/** Create or reuse a local branch in a managed worktree directory. */
+export async function createWebWorktree(
+	cwd: string,
+	requestedName: string,
+	options: CreateWebWorktreeOptions = {},
+): Promise<CreatedWebWorktree> {
 	ensureSupportedGit();
 	const name = validateWorktreeName(requestedName);
-	const commonDir = resolve(gitOutput(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
-	const startPoint = gitOutput(cwd, ["rev-parse", "HEAD"]);
-	const repoRoot = dirname(commonDir);
+	const branch = validateLocalBranchName(options.branch?.trim() || name);
+	gitOutput(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+	const repoRoot = primaryRepositoryRoot(cwd);
 	const path = join(repoRoot, ".pi", "worktrees", name);
 	try {
-		statSync(path);
+		lstatSync(path);
 		throw new Error(`Worktree path already exists: ${path}`);
 	} catch (error) {
 		if (error instanceof Error && error.message.startsWith("Worktree path already exists:")) throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			throw new Error(`Could not inspect worktree path ${path}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
+
+	const explicitStart = options.startPoint === undefined ? undefined : resolveStartPoint(repoRoot, options.startPoint);
+	const branchExists = localBranchExists(repoRoot, branch);
+	if (branchExists) {
+		if (explicitStart) throw new Error(`Local branch ${branch} already exists; omit --start-point to reuse it without moving it`);
+		const checkedOutAt = checkedOutBranchPath(repoRoot, branch);
+		if (checkedOutAt) throw new Error(`Local branch ${branch} is already checked out at ${checkedOutAt}`);
+	}
+	const branchStart = branchExists
+		? gitOutput(repoRoot, ["rev-parse", "--verify", "--end-of-options", `refs/heads/${branch}^{commit}`]).toLowerCase()
+		: explicitStart?.commit ?? gitOutput(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase();
+	const startPoint = branchExists ? `refs/heads/${branch}` : explicitStart?.value ?? branchStart;
+	const worktree: CreatedWebWorktree = {
+		path,
+		repoRoot,
+		name,
+		branch,
+		branchCreated: !branchExists,
+		startPoint,
+		upstream: !branchExists ? explicitStart?.upstream : undefined,
+		setupRan: false,
+	};
+
 	mkdirSync(dirname(path), { recursive: true });
-	gitOutput(repoRoot, ["worktree", "add", "-b", name, path, startPoint]);
-	const worktree = { path, repoRoot, branch: name, setupRan: false };
+	let branchProvisioned = false;
+	try {
+		if (!branchExists) {
+			// Create from the already-resolved OID so a moving ref cannot change the
+			// checked-out commit between validation and mutation.
+			gitOutput(repoRoot, ["branch", branch, branchStart]);
+			branchProvisioned = true;
+			if (explicitStart?.upstream) {
+				gitOutput(repoRoot, ["branch", `--set-upstream-to=${explicitStart.upstream}`, branch]);
+			}
+		}
+		gitOutput(repoRoot, ["worktree", "add", path, branch]);
+	} catch (error) {
+		const cleanupErrors: string[] = [];
+		let registered = false;
+		try {
+			registered = parseRegisteredWorktrees(repoRoot).some((entry) => samePath(entry.path, path));
+		} catch (inspectionError) {
+			cleanupErrors.push(`could not inspect partial worktree registration: ${inspectionError instanceof Error ? inspectionError.message : String(inspectionError)}`);
+		}
+		if (registered) {
+			try {
+				gitOutput(repoRoot, ["worktree", "remove", path]);
+			} catch (cleanupError) {
+				cleanupErrors.push(`could not remove partial worktree: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+			}
+		}
+		if (branchProvisioned) {
+			try {
+				gitOutput(repoRoot, ["branch", "-D", branch]);
+			} catch (cleanupError) {
+				cleanupErrors.push(`could not remove created branch ${branch}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+			}
+		}
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(cleanupErrors.length > 0 ? `${message}; ${cleanupErrors.join("; ")}` : message);
+	}
+	try {
+		const actualRef = currentWorktreeRef(path);
+		if (actualRef.kind !== "branch" || actualRef.value !== branch) {
+			throw new Error(`Created worktree checked out ${actualRef.kind} ${actualRef.value}, expected branch ${branch}`);
+		}
+		const actualHead = gitOutput(path, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase();
+		if (actualHead !== branchStart) throw new Error(`Created worktree HEAD ${actualHead} does not match requested start ${branchStart}`);
+		if (explicitStart?.upstream && !branchExists) {
+			const actualUpstream = gitOutput(path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+			if (actualUpstream !== explicitStart.upstream) {
+				throw new Error(`Created branch upstream ${actualUpstream || "none"} does not match ${explicitStart.upstream}`);
+			}
+		}
+	} catch (error) {
+		try {
+			rollbackWebWorktree(worktree);
+		} catch (rollbackError) {
+			throw new Error(`${error instanceof Error ? error.message : String(error)}; worktree rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+		}
+		throw error;
+	}
+
 	const setup = join(repoRoot, ".pi", "worktrees", "setup.sh");
 	let setupInfo: ReturnType<typeof statSync> | undefined;
 	try {

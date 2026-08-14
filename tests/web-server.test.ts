@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { compareWebSessions, moveWebQueuedMessage, moveWebSession, moveWebSessionRelative, orderWebSessions, type ServerStateFile, type WebQueuedMessage, type WebSession } from "../web/protocol.ts";
 import { clearSessionProjectCache, resolveSessionProject } from "../web/server/projects.ts";
 import { createWebWorktree, WORKTREE_SESSION_ENTRY } from "../web/server/worktrees.ts";
@@ -307,7 +307,7 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 	}
 
 	const sessionId = `semantic-${crypto.randomUUID()}`;
-	const managedWorktree = { path: join(tempDir, "worktree"), repoRoot: tempDir, branch: "feature" };
+	const managedWorktree = { path: join(tempDir, "worktree"), repoRoot: tempDir, name: "worktree", branch: "feature", branchCreated: false };
 	const nativeSession: WebSession = { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 1 };
 	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
 	await new Promise<void>((resolve, reject) => {
@@ -337,7 +337,12 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 	agent.close();
 }, 15_000);
 
-async function queuedFollowUpDeliveryOrder(url: string, sessionId: string, agent: WebSocket): Promise<string[]> {
+async function queuedFollowUpDeliveryOrder(
+	url: string,
+	sessionId: string,
+	agent: WebSocket,
+	completionEvent: "agent_settled" | "agent_end" = "agent_settled",
+): Promise<string[]> {
 	const order: string[] = [];
 	let deliveryStarted = false;
 	let settledSent = false;
@@ -361,7 +366,10 @@ async function queuedFollowUpDeliveryOrder(url: string, sessionId: string, agent
 			if (message.type !== "server.event") return;
 			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !settledSent) {
 				settledSent = true;
-				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+				if (completionEvent === "agent_settled") {
+					agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				}
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: completionEvent } }));
 			}
 			if (message.event?.type === "web_queue_delivery" && message.event.phase === "started") {
 				deliveryStarted = true;
@@ -434,6 +442,209 @@ async function steerQueuedFollowUpNow(url: string, sessionId: string, agent: Web
 	});
 }
 
+async function idleQueueReplacementStartsAutomatically(url: string, sessionId: string, agent: WebSocket): Promise<string | undefined> {
+	let behavior: string | undefined;
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		let replaced = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("idle replacement queue timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; streamingBehavior?: string } };
+			if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+			behavior = message.command.streamingBehavior;
+			agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; session?: { id?: string; status?: string }; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history") {
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (!replaced && message.type === "server.session" && message.session?.id === sessionId && message.session.status === "idle") {
+				replaced = true;
+				socket.send(JSON.stringify({ type: "client.command", requestId, sessionId, command: { type: "replace_queue", queue: [{ id: "idle-replacement", message: "deliver from idle" }] } }));
+			}
+			if (replaced && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(behavior);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("idle replacement queue websocket failed")); };
+	});
+}
+
+async function rejectedPromptPreservesLegacyQueueFallback(url: string, sessionId: string, agent: WebSocket): Promise<string | undefined> {
+	let queuedBehavior: string | undefined;
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const queueRequestId = crypto.randomUUID();
+		const rejectedRequestId = crypto.randomUUID();
+		let completionSent = false;
+		let rejectionSent = false;
+		let rejectionObserved = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("rejected prompt queue fallback timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; message?: string; streamingBehavior?: string } };
+			if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+			if (message.command.message === "reject during grace") {
+				// Settlement belongs to the run that emitted agent_end, not this admitted
+				// prompt. Its later rejection must still roll back optimistic working state.
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+				setTimeout(() => agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: false, error: "rejected for test" })), 10);
+			} else if (message.command.message === "deliver despite rejection") {
+				queuedBehavior = message.command.streamingBehavior;
+				agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+			}
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; session?: { id?: string; status?: string }; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({ type: "client.prompt", requestId: queueRequestId, sessionId, message: "deliver despite rejection", streamingBehavior: "followUp" }));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !completionSent) {
+				completionSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+			}
+			if (completionSent && !rejectionSent && message.type === "server.session" && message.session?.id === sessionId && message.session.status === "idle") {
+				rejectionSent = true;
+				socket.send(JSON.stringify({ type: "client.prompt", requestId: rejectedRequestId, sessionId, message: "reject during grace" }));
+			}
+			if (message.type === "server.response" && message.requestId === rejectedRequestId && message.success === false) rejectionObserved = true;
+			if (rejectionObserved && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(queuedBehavior);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("rejected prompt queue fallback websocket failed")); };
+	});
+}
+
+async function lateSettlementDoesNotBurstQueue(url: string, sessionId: string, agent: WebSocket): Promise<number[]> {
+	const promptCounts: number[] = [];
+	let promptCount = 0;
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const replaceRequestId = crypto.randomUUID();
+		let completionSent = false;
+		let secondCompletionSent = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("late settlement queue test timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+			if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+			promptCount += 1;
+			agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+			if (promptCount === 1) {
+				setTimeout(() => agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } })), 10);
+				setTimeout(() => {
+					promptCounts.push(promptCount);
+					secondCompletionSent = true;
+					agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				}, 160);
+			}
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({
+					type: "client.command", requestId: replaceRequestId, sessionId,
+					command: { type: "replace_queue", queue: [{ id: "late-1", message: "first" }, { id: "late-2", message: "second" }] },
+				}));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 2 && !completionSent) {
+				completionSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+			}
+			if (secondCompletionSent && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				promptCounts.push(promptCount);
+				clearTimeout(timeout);
+				socket.close();
+				resolve(promptCounts);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("late settlement queue websocket failed")); };
+	});
+}
+
+async function promptAdmissionStatus(url: string, sessionId: string, agent: WebSocket): Promise<string[]> {
+	const statuses: string[] = [];
+	agent.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+		if (message.type === "agent.command" && message.command?.type === "prompt" && message.requestId) {
+			agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+		}
+	};
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		let prompted = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("prompt admission status timed out")); }, 10_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; session?: { id?: string; status?: string } };
+			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (message.type === "server.history") {
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (message.type === "server.session" && message.session?.id === sessionId && message.session.status === "idle" && !prompted) {
+				prompted = true;
+				statuses.push("idle");
+				socket.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "start immediately" }));
+			} else if (prompted && message.type === "server.session" && message.session?.id === sessionId && message.session.status === "working") {
+				if (statuses.at(-1) !== "working") statuses.push("working");
+			}
+			if (message.type === "server.response" && message.requestId === requestId) {
+				clearTimeout(timeout);
+				socket.close();
+				if (!message.success) reject(new Error("prompt admission failed"));
+				else resolve(statuses);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("prompt admission websocket failed")); };
+	});
+}
+
+async function promptAcknowledgementLossBecomesUncertain(url: string, sessionId: string, agent: WebSocket): Promise<boolean> {
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		let completionSent = false;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("prompt acknowledgement uncertainty timed out")); }, 10_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+			if (message.type === "agent.command" && message.command?.type === "prompt" && message.requestId) agent.close();
+		};
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; event?: { type?: string; phase?: string; queue?: Array<{ deliveryState?: string }> } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "do not redeliver", streamingBehavior: "followUp" }));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !completionSent) {
+				completionSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_end" } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (message.event?.type === "web_queue_delivery" && message.event.phase === "uncertain") {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(true);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("prompt acknowledgement uncertainty websocket failed")); };
+	});
+}
+
 async function compactionLifecycle(url: string, sessionId: string, agent: WebSocket): Promise<Array<{ reason?: string; status: string }>> {
 	return await new Promise((resolve, reject) => {
 		const states: Array<{ reason?: string; status: string }> = [];
@@ -498,10 +709,10 @@ test("an idle native session flushes its restored web follow-up queue on hello",
 	});
 	await waitForState(statePath);
 	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
-	const delivered = new Promise<{ type?: string; message?: string }>((resolve, reject) => {
+	const delivered = new Promise<{ type?: string; message?: string; streamingBehavior?: string }>((resolve, reject) => {
 		const timeout = setTimeout(() => reject(new Error("restored queue was not flushed after hello")), 5_000);
 		agent.onmessage = ({ data }) => {
-			const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; message?: string } };
+			const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; message?: string; streamingBehavior?: string } };
 			if (frame.type !== "agent.command" || frame.command?.type !== "prompt" || !frame.requestId) return;
 			clearTimeout(timeout);
 			agent.send(JSON.stringify({ type: "agent.response", requestId: frame.requestId, success: true }));
@@ -520,7 +731,57 @@ test("an idle native session flushes its restored web follow-up queue on hello",
 		};
 		agent.onerror = () => reject(new Error("native agent websocket failed"));
 	});
-	expect(await delivered).toEqual({ type: "prompt", message: "deliver after reconnect" });
+	expect(await delivered).toEqual({ type: "prompt", message: "deliver after reconnect", streamingBehavior: "followUp" });
+	agent.close();
+}, 10_000);
+
+test("a visible client can resynchronize a durable queue after a missed reconnect update", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queue-sync-test-"));
+	const statePath = join(tempDir, "web", "server.json");
+	const sessionId = `queue-sync-${crypto.randomUUID()}`;
+	const expectedQueue = [{ id: "still-durable", message: "remain visible after wake" }];
+	await mkdir(join(tempDir, "web"), { recursive: true });
+	await writeFile(join(tempDir, "web", "queues.json"), JSON.stringify({ version: 2, queues: { [sessionId]: expectedQueue } }));
+	const port = 40_000 + Math.floor(Math.random() * 5_000);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	await waitForState(statePath);
+	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({
+				type: "agent.hello",
+				session: { id: sessionId, cwd: tempDir, status: "working", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+				entries: [],
+			}));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("queue sync agent failed"));
+	});
+	const synchronized = await new Promise<unknown[]>((resolve, reject) => {
+		const socket = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+		let queueSnapshots = 0;
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("queue resynchronization timed out")); }, 5_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const frame = JSON.parse(String(data)) as { type?: string; event?: { type?: string; queue?: unknown[] } };
+			if (frame.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			if (frame.event?.type !== "web_queue_update") return;
+			queueSnapshots++;
+			if (queueSnapshots === 1) socket.send(JSON.stringify({ type: "client.sync_queue", requestId: "wake-sync", sessionId }));
+			else {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(frame.event.queue ?? []);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("queue sync client failed")); };
+	});
+	expect(synchronized).toEqual(expectedQueue);
+	expect(await Bun.file(join(tempDir, "web", "queues.json")).json()).toEqual({ version: 2, queues: { [sessionId]: expectedQueue } });
 	agent.close();
 }, 10_000);
 
@@ -877,6 +1138,47 @@ test("worktree cleanup failure does not turn a completed session deletion into a
 	observer.close();
 }, 10_000);
 
+test("daemon restart completes a staged managed worktree source deletion", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-delete-recovery-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsRoot = join(agentDir, "sessions");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const sourceId = `source-${crypto.randomUUID()}`;
+	const replacementId = `replacement-${crypto.randomUUID()}`;
+	const sourceFile = join(sessionsRoot, "source", `${sourceId}.jsonl`);
+	const tombstone = `${sourceFile}.replaced-${crypto.randomUUID()}.tmp`;
+	const replacementFile = join(sessionsRoot, "replacement", `${replacementId}.jsonl`);
+	const uncommittedSourceId = `uncommitted-${crypto.randomUUID()}`;
+	const uncommittedSourceFile = join(sessionsRoot, "uncommitted", `${uncommittedSourceId}.jsonl`);
+	const uncommittedTombstone = `${uncommittedSourceFile}.replaced-${crypto.randomUUID()}.tmp`;
+	await mkdir(dirname(sourceFile), { recursive: true });
+	await mkdir(dirname(uncommittedSourceFile), { recursive: true });
+	await mkdir(dirname(replacementFile), { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(tombstone, `${JSON.stringify({ type: "session", version: 3, id: sourceId, timestamp: new Date().toISOString(), cwd: tempDir })}\n`);
+	await writeFile(uncommittedTombstone, `${JSON.stringify({ type: "session", version: 3, id: uncommittedSourceId, timestamp: new Date().toISOString(), cwd: tempDir })}\n`);
+	await writeFile(replacementFile, [
+		JSON.stringify({ type: "session", version: 3, id: replacementId, timestamp: new Date().toISOString(), cwd: tempDir }),
+		JSON.stringify({ type: "custom", id: crypto.randomUUID(), parentId: null, timestamp: new Date().toISOString(), customType: "vessup-replaced-session", data: { previousSessionId: sourceId, previousSessionFile: sourceFile, replacementSessionId: replacementId } }),
+	].join("\n") + "\n");
+	await writeFile(join(webDir, "managed-sessions.json"), `${JSON.stringify({ version: 1, files: [sourceFile, uncommittedSourceFile] })}\n`);
+	await writeFile(join(webDir, "queues.json"), `${JSON.stringify({ version: 2, queues: { [sourceId]: [{ id: "queued", message: "preserve queue" }] } })}\n`);
+	const port = 40_000 + Math.floor(Math.random() * 5_000);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	await waitForState(statePath);
+	expect(await Bun.file(tombstone).exists()).toBe(false);
+	expect(await Bun.file(sourceFile).exists()).toBe(false);
+	expect(await Bun.file(uncommittedTombstone).exists()).toBe(false);
+	expect(await Bun.file(uncommittedSourceFile).exists()).toBe(true);
+	expect(await Bun.file(join(webDir, "managed-sessions.json")).json()).toEqual({ version: 1, files: [await realpath(uncommittedSourceFile), await realpath(replacementFile)] });
+	expect(await Bun.file(join(webDir, "queues.json")).json()).toEqual({ version: 2, queues: { [replacementId]: [{ id: "queued", message: "preserve queue" }] } });
+}, 10_000);
+
 test("managed startup failure retains an initialized worktree and setup output", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-startup-test-"));
 	const repository = join(tempDir, "repository");
@@ -1002,6 +1304,130 @@ test("web reload survives a native bridge reconnect", async () => {
 	replacementAgent.close();
 }, 10_000);
 
+test("queued web reload waits for active subagents and executes as a control command", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queued-reload-test-"));
+	const statePath = join(tempDir, "server.json");
+	const port = 40_000 + Math.floor(Math.random() * 5_000);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	await waitForState(statePath);
+	const sessionId = `queued-reload-${crypto.randomUUID()}`;
+	const socketUrl = `ws://127.0.0.1:${port}`;
+	const agent = new WebSocket(`${socketUrl}/ws/agent`);
+	let reloadCommand: { requestId: string } | undefined;
+	let resolveReload!: (value: { requestId: string }) => void;
+	const reloadReceived = new Promise<{ requestId: string }>((resolve) => { resolveReload = resolve; });
+	agent.onmessage = ({ data }) => {
+		const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string } };
+		if (frame.type === "agent.command" && frame.requestId && frame.command?.type === "reload") {
+			reloadCommand = { requestId: frame.requestId };
+			resolveReload(reloadCommand);
+		}
+	};
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({
+				type: "agent.hello",
+				session: { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+				entries: [],
+			}));
+			agent.send(JSON.stringify({
+				type: "agent.subagents",
+				sessionId,
+				agents: [{ id: "worker", status: "working", model: "test/model", effort: "high", turns: 1, currentTool: null, queued: 0, createdAt: 1, updatedAt: 2, completedAt: null, error: null }],
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			}));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("queued reload agent failed"));
+	});
+	const client = browserSocket(`${socketUrl}/ws/client`);
+	const requestId = crypto.randomUUID();
+	let sawQueued = false;
+	let resolveAdmission!: () => void;
+	let resolveEmpty!: () => void;
+	const admitted = new Promise<void>((resolve) => { resolveAdmission = resolve; });
+	const emptied = new Promise<void>((resolve) => { resolveEmpty = resolve; });
+	client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+	client.onmessage = ({ data }) => {
+		const frame = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; event?: { type?: string; queue?: Array<{ id?: string }> } };
+		if (frame.type === "server.snapshot") {
+			client.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+			client.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "/reload", images: [], streamingBehavior: "followUp" }));
+		}
+		if (frame.type === "server.response" && frame.requestId === requestId && frame.success) resolveAdmission();
+		if (frame.event?.type === "web_queue_update" && frame.event.queue?.some((item) => item.id === requestId)) sawQueued = true;
+		if (sawQueued && frame.event?.type === "web_queue_update" && frame.event.queue?.length === 0) resolveEmpty();
+	};
+	await admitted;
+	await Bun.sleep(50);
+	expect(sawQueued).toBe(true);
+	expect(reloadCommand).toBeUndefined();
+	agent.send(JSON.stringify({
+		type: "agent.subagents",
+		sessionId,
+		agents: [{ id: "worker", status: "completed", model: "test/model", effort: "high", turns: 2, currentTool: null, queued: 0, createdAt: 1, updatedAt: 3, completedAt: 3, error: null }],
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	}));
+	const command = await Promise.race([
+		reloadReceived,
+		Bun.sleep(3_000).then(() => { throw new Error("queued reload was not delivered after settlement"); }),
+	]);
+	agent.send(JSON.stringify({ type: "agent.response", requestId: command.requestId, success: true, data: { reloaded: true } }));
+	await Promise.race([emptied, Bun.sleep(3_000).then(() => { throw new Error("accepted queued reload was not removed"); })]);
+	client.close();
+	agent.close();
+}, 10_000);
+
+test("native replacement recovery merges orphaned source and replacement queues", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-worktree-queue-recovery-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const webDir = join(tempDir, "web");
+	const statePath = join(webDir, "server.json");
+	const sourceId = `source-${crypto.randomUUID()}`;
+	const replacementId = `replacement-${crypto.randomUUID()}`;
+	const sourceFile = join(agentDir, "sessions", "source", `${sourceId}.jsonl`);
+	const replacementFile = join(agentDir, "sessions", "replacement", `${replacementId}.jsonl`);
+	await mkdir(dirname(replacementFile), { recursive: true });
+	await mkdir(webDir, { recursive: true });
+	await writeFile(replacementFile, [
+		JSON.stringify({ type: "session", version: 3, id: replacementId, timestamp: new Date().toISOString(), cwd: tempDir }),
+		JSON.stringify({ type: "custom", id: crypto.randomUUID(), parentId: null, timestamp: new Date().toISOString(), customType: "vessup-replaced-session", data: { previousSessionId: sourceId, previousSessionFile: sourceFile, replacementSessionId: replacementId } }),
+	].join("\n") + "\n");
+	await writeFile(join(webDir, "queues.json"), `${JSON.stringify({ version: 2, queues: {
+		[sourceId]: [{ id: "source-queue", message: "from source" }],
+		[replacementId]: [{ id: "replacement-queue", message: "from replacement" }],
+	} })}\n`);
+	const port = 40_000 + Math.floor(Math.random() * 5_000);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: String(port), PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	await waitForState(statePath);
+	const socketUrl = `ws://127.0.0.1:${port}`;
+	const agent = new WebSocket(`${socketUrl}/ws/agent`);
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({ type: "agent.hello", session: { id: replacementId, file: replacementFile, cwd: tempDir, status: "working", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 }, entries: [] }));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("replacement recovery agent failed"));
+	});
+	await Bun.sleep(25);
+	agent.send(JSON.stringify({ type: "agent.session_replaced", previousSessionId: sourceId, previousSessionFile: sourceFile, replacementSessionId: replacementId }));
+	await Bun.sleep(50);
+	const stored = await Bun.file(join(webDir, "queues.json")).json();
+	expect(stored).toEqual({ version: 2, queues: { [replacementId]: [
+		{ id: "source-queue", message: "from source" },
+		{ id: "replacement-queue", message: "from replacement" },
+	] } });
+	agent.close();
+}, 10_000);
+
 test("native worktree switches survive the replacement bridge reconnect", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-worktree-test-"));
 	const statePath = join(tempDir, "server.json");
@@ -1014,14 +1440,23 @@ test("native worktree switches survive the replacement bridge reconnect", async 
 	await waitForState(statePath);
 	const originalSessionId = `worktree-${crypto.randomUUID()}`;
 	const replacementSessionId = `replacement-${crypto.randomUUID()}`;
+	const originalSessionFile = join(tempDir, "pi-agent", "sessions", "source", `${originalSessionId}.jsonl`);
+	const replacementSessionFile = join(tempDir, "pi-agent", "sessions", "replacement", `${replacementSessionId}.jsonl`);
+	await mkdir(dirname(originalSessionFile), { recursive: true });
+	await mkdir(dirname(replacementSessionFile), { recursive: true });
+	await writeFile(originalSessionFile, `${JSON.stringify({ type: "session", version: 3, id: originalSessionId, timestamp: new Date().toISOString(), cwd: tempDir })}\n`);
+	await writeFile(replacementSessionFile, [
+		JSON.stringify({ type: "session", version: 3, id: replacementSessionId, timestamp: new Date().toISOString(), cwd: tempDir }),
+		JSON.stringify({ type: "custom", id: crypto.randomUUID(), parentId: null, timestamp: new Date().toISOString(), customType: "vessup-replaced-session", data: { previousSessionId: originalSessionId, previousSessionFile: originalSessionFile, replacementSessionId } }),
+	].join("\n") + "\n");
 	const socketUrl = `ws://127.0.0.1:${port}`;
-	const connectAgent = async (sessionId: string) => {
+	const connectAgent = async (sessionId: string, file?: string) => {
 		const agent = new WebSocket(`${socketUrl}/ws/agent`);
 		await new Promise<void>((resolve, reject) => {
 			agent.onopen = () => {
 				agent.send(JSON.stringify({
 					type: "agent.hello",
-					session: { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+					session: { id: sessionId, file, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
 					entries: [],
 				}));
 				resolve();
@@ -1030,13 +1465,13 @@ test("native worktree switches survive the replacement bridge reconnect", async 
 		});
 		return agent;
 	};
-	const firstAgent = await connectAgent(originalSessionId);
+	const firstAgent = await connectAgent(originalSessionId, originalSessionFile);
 	await Bun.sleep(25);
-	const command = new Promise<{ requestId: string; command: { type: string; name?: string; repository?: string } }>((resolve, reject) => {
+	const command = new Promise<{ requestId: string; command: { type: string; name?: string; repository?: string; branch?: string; startPoint?: string } }>((resolve, reject) => {
 		const timeout = setTimeout(() => reject(new Error("worktree command was not routed to native Pi")), 3_000);
 		firstAgent.onmessage = ({ data }) => {
-			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; name?: string; repository?: string } };
-			if (message.type !== "agent.command" || !message.requestId || message.command?.type !== "create_worktree") return;
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; name?: string; repository?: string; branch?: string; startPoint?: string } };
+			if (message.type !== "agent.command" || !message.requestId || message.command?.type !== "create_worktree_v2") return;
 			clearTimeout(timeout);
 			resolve({ requestId: message.requestId, command: { ...message.command, type: message.command.type } });
 		};
@@ -1049,7 +1484,7 @@ test("native worktree switches survive the replacement bridge reconnect", async 
 		client.onmessage = ({ data }) => {
 			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; data?: unknown; error?: string };
 			if (message.type === "server.snapshot") {
-				client.send(JSON.stringify({ type: "client.prompt", requestId: clientRequestId, sessionId: originalSessionId, message: `/worktree feature --repo ${tempDir}`, images: [] }));
+				client.send(JSON.stringify({ type: "client.prompt", requestId: clientRequestId, sessionId: originalSessionId, message: `/worktree pr-30 --repo ${tempDir} --branch tembo/cancel-builds --start-point origin/tembo/cancel-builds`, images: [] }));
 			}
 			if (message.type !== "server.response" || message.requestId !== clientRequestId) return;
 			clearTimeout(timeout);
@@ -1058,12 +1493,53 @@ test("native worktree switches survive the replacement bridge reconnect", async 
 		};
 	});
 	const routed = await command;
-	expect(routed.command).toEqual({ type: "create_worktree", name: "feature", repository: tempDir });
+	expect(routed.command).toEqual({
+		type: "create_worktree_v2",
+		name: "pr-30",
+		repository: tempDir,
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
+	});
 	firstAgent.close();
 	await Bun.sleep(25);
-	const replacementAgent = await connectAgent(replacementSessionId);
+	const replacementAgent = await connectAgent(replacementSessionId, replacementSessionFile);
+	let markObserverReady!: () => void;
+	const observerReady = new Promise<void>((resolve) => { markObserverReady = resolve; });
+	const removed = new Promise<{ type?: string; sessionId?: string; replacementSessionId?: string }>((resolve, reject) => {
+		const observer = browserSocket(`${socketUrl}/ws/client`);
+		const timeout = setTimeout(() => { observer.close(); reject(new Error("source session removal was not broadcast")); }, 5_000);
+		observer.onopen = () => observer.send(JSON.stringify({ type: "client.hello" }));
+		observer.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; replacementSessionId?: string };
+			if (message.type === "server.snapshot") observer.send(JSON.stringify({ type: "client.subscribe", sessionId: replacementSessionId }));
+			if (message.type === "server.history" && message.sessionId === replacementSessionId) markObserverReady();
+			if (message.type !== "server.session_removed" || message.sessionId !== originalSessionId) return;
+			clearTimeout(timeout);
+			observer.close();
+			resolve(message);
+		};
+	});
+	await observerReady;
+	await rm(originalSessionFile);
+	replacementAgent.send(JSON.stringify({
+		type: "agent.session_replaced",
+		previousSessionId: originalSessionId,
+		previousSessionFile: originalSessionFile,
+		replacementSessionId,
+	}));
+	expect(await removed).toEqual({ type: "server.session_removed", sessionId: originalSessionId, replacementSessionId });
+	// Durable replacement markers are replayed after daemon/native reconnects.
+	replacementAgent.send(JSON.stringify({
+		type: "agent.session_replaced",
+		previousSessionId: originalSessionId,
+		previousSessionFile: originalSessionFile,
+		replacementSessionId,
+	}));
 	replacementAgent.send(JSON.stringify({ type: "agent.response", requestId: routed.requestId, success: true, data: { sessionId: replacementSessionId } }));
 	expect(await result).toEqual({ sessionId: replacementSessionId });
+	const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+	expect(catalog.sessions.some((session) => session.id === originalSessionId)).toBe(false);
+	expect(catalog.sessions.some((session) => session.id === replacementSessionId)).toBe(true);
 	replacementAgent.close();
 }, 10_000);
 
@@ -1102,10 +1578,22 @@ test("native sessions expose queued-delivery ordering and context compaction lif
 		"prompt-after-transcript",
 		"queue-cleared",
 	]);
+	// Compatibility path for native bridges loaded before agent_settled forwarding
+	// was added: agent_end still advances the durable queue after a short grace.
+	expect(await queuedFollowUpDeliveryOrder(socketUrl, sessionId, agent, "agent_end")).toEqual([
+		"transcript",
+		"prompt-after-transcript",
+		"queue-cleared",
+	]);
+	expect(await idleQueueReplacementStartsAutomatically(socketUrl, sessionId, agent)).toBe("followUp");
+	expect(await rejectedPromptPreservesLegacyQueueFallback(socketUrl, sessionId, agent)).toBe("followUp");
+	expect(await lateSettlementDoesNotBurstQueue(socketUrl, sessionId, agent)).toEqual([1, 2]);
+	expect(await promptAdmissionStatus(socketUrl, sessionId, agent)).toEqual(["idle", "working"]);
 	expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual([
 		{ reason: "overflow", status: "working" },
 		{ status: "working" },
 	]);
+	expect(await promptAcknowledgementLossBecomesUncertain(socketUrl, sessionId, agent)).toBe(true);
 	agent.close();
 }, 15_000);
 

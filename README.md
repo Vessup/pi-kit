@@ -16,6 +16,7 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 
 - Pi 0.84.1
 - Git 2.36.0 or newer
+- `lsof` for exclusive source-session verification during worktree replacement
 - GitHub CLI (`gh`), authenticated with `gh auth login`
 - A terminal that supports OSC 8 hyperlinks for clickable links
 - A Nerd Font for the branch icon
@@ -34,9 +35,21 @@ The subagent extension independently contributes its token use and status to `ex
 
 ## Worktrees
 
-Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>` from the current checkout's `HEAD`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the new worktree. Use `/worktree <name> --repo <path>` to select another repository. To enter an already registered worktree in the same primary repository without modifying its checkout or branch, run `/worktree --existing <worktree-path>`. The original session is preserved as the replacement's parent and the switch completes only after the replacement CWD and branch or detached HEAD are verified.
+Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the managed checkout. The backward-compatible default creates or reuses local branch `<name>`; a missing branch starts at the selected checkout's `HEAD`.
 
-The LLM-callable `worktree` tool provides the same create/existing flows. It queues an internal correlated `/worktree` follow-up, ends the old agent run, verifies the replacement session, and automatically resumes a supplied continuation prompt in the new session. Its create mode intentionally starts a new branch at the selected checkout's `HEAD`; explicit create-only requests or requests to provision another branch, commit, or detached HEAD remain ordinary Git operations and do not replace the conversation.
+The managed directory name, local branch, and new-branch start point can be selected independently:
+
+```sh
+/worktree pr-30 --repo /path/to/repo \
+  --branch tembo/cancel-builds \
+  --start-point origin/tembo/cancel-builds
+```
+
+That creates `.pi/worktrees/pr-30` without creating a `pr-30` branch. If `tembo/cancel-builds` does not exist locally, it is created at `origin/tembo/cancel-builds` and tracks that remote branch. If the local branch already exists, omit `--start-point`; Pi reuses it without moving it or taking ownership of it. A branch already checked out in any registered worktree is rejected. To enter an already registered worktree without modifying its checkout or branch, run `/worktree --existing <worktree-path>`.
+
+Managed ownership records the directory name and whether Pi created the local branch. Final-session cleanup removes the managed checkout, while automatic rollback removes it only when clean so unrelated uncommitted files are never discarded. Both paths delete only a branch created by Pi; reused branches are preserved. Switching completes only after the replacement CWD and actual branch or detached HEAD are verified; the replacement is then made self-contained and the source session is deleted automatically.
+
+The LLM-callable `worktree` tool provides the same `name`, `repository`, `branch`, `startPoint`, and `existing` flows. For a pull request URL, agents must resolve the PR's real head branch and fetched remote-tracking ref and pass them explicitly rather than deriving a branch from a directory such as `pr-30`. The tool queues a correlated `/worktree` follow-up, ends the old run, verifies the replacement, and resumes its continuation there. Create-only requests that should not enter the checkout remain ordinary Git operations.
 
 ## Web sessions
 

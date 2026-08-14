@@ -29,6 +29,10 @@ export type WebSubagent = {
 	streamingText?: string;
 };
 
+export function hasActiveWebSubagents(subagents: readonly WebSubagent[] | undefined): boolean {
+	return Boolean(subagents?.some((agent) => agent.status === "creating" || agent.status === "working" || agent.status === "terminating"));
+}
+
 /** Incremental subagent telemetry; the full retained transcript is sent only in subscribe snapshots. */
 export type WebSubagentUpdate = Omit<WebSubagent, "currentTool" | "completedAt" | "error" | "transcript" | "streamingText"> & {
 	currentTool: string | null;
@@ -117,7 +121,7 @@ export type WebSession = {
 	/** Primary repository checkout used when creating another linked worktree. */
 	repositoryRoot?: string;
 	/** Present only for a checkout created and owned by pi-kit. */
-	managedWorktree?: { path: string; repoRoot: string; branch: string };
+	managedWorktree?: { path: string; repoRoot: string; name: string; branch: string; branchCreated: boolean };
 	pullRequest?: WebPullRequest;
 	subagents?: WebSubagent[];
 	subagentUsage?: WebUsage;
@@ -192,6 +196,13 @@ export type AgentHelloMessage = {
 	entries: unknown[];
 };
 
+export type AgentSessionReplacedMessage = {
+	type: "agent.session_replaced";
+	previousSessionId: string;
+	previousSessionFile: string;
+	replacementSessionId: string;
+};
+
 export type AgentEventMessage = {
 	type: "agent.event";
 	sessionId: string;
@@ -218,7 +229,7 @@ export type AgentResponseMessage = {
 	data?: unknown;
 };
 
-export type AgentToServerMessage = AgentHelloMessage | AgentEventMessage | AgentUpdateMessage | AgentSubagentsMessage | AgentResponseMessage;
+export type AgentToServerMessage = AgentHelloMessage | AgentSessionReplacedMessage | AgentEventMessage | AgentUpdateMessage | AgentSubagentsMessage | AgentResponseMessage;
 
 export type SemanticImage = { type: "image"; data: string; mimeType: string; name?: string };
 export type WebModelOption = { provider: string; id: string; name: string; reasoning: boolean; thinkingLevels?: string[] };
@@ -277,8 +288,10 @@ export type AgentCommand =
 	| { type: "set_thinking_level"; level: string }
 	| { type: "shutdown" }
 	| { type: "reload" }
-	| { type: "create_worktree"; repository: string; name: string }
-	| { type: "create_worktree"; existing: string };
+	| { type: "create_worktree"; repository: string; name: string; branch?: string; startPoint?: string }
+	| { type: "create_worktree"; existing: string }
+	/** Internal bridge version: old native bridges reject this instead of silently dropping branch/ref fields. */
+	| { type: "create_worktree_v2"; repository: string; name: string; branch?: string; startPoint?: string };
 
 export type ServerToAgentMessage = {
 	type: "agent.command";
@@ -289,6 +302,7 @@ export type ServerToAgentMessage = {
 export type ClientHelloMessage = { type: "client.hello" };
 export type ClientCommandHelloMessage = { type: "client.command_hello" };
 export type ClientSubscribeMessage = { type: "client.subscribe"; sessionId: string };
+export type ClientSyncQueueMessage = { type: "client.sync_queue"; requestId: string; sessionId: string };
 export type ClientPromptMessage = {
 	type: "client.prompt";
 	requestId: string;
@@ -307,6 +321,7 @@ export type ClientToServerMessage =
 	| ClientHelloMessage
 	| ClientCommandHelloMessage
 	| ClientSubscribeMessage
+	| ClientSyncQueueMessage
 	| ClientPromptMessage
 	| ClientCommandMessage;
 
@@ -357,8 +372,12 @@ export type CreateSessionRequest = {
 	/** Repository or directory in which to start the session. */
 	cwd: string;
 	name?: string;
-	/** When present, create this branch/worktree from cwd's current HEAD first. */
+	/** When present, create this managed worktree directory before starting the session. */
 	worktreeName?: string;
+	/** Local branch to reuse or create; defaults to worktreeName. */
+	worktreeBranch?: string;
+	/** Ref/commit for a newly created branch; remote-tracking refs configure upstream. */
+	worktreeStartPoint?: string;
 };
 export type ResumeSessionRequest = { file: string };
 

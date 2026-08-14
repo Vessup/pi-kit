@@ -23,6 +23,7 @@ import type {
 	AgentEventMessage,
 	AgentHelloMessage,
 	AgentResponseMessage,
+	AgentSessionReplacedMessage,
 	AgentSubagentsMessage,
 	AgentToServerMessage,
 	AgentUpdateMessage,
@@ -33,8 +34,14 @@ import type {
 } from "../web/protocol.js";
 import { WEB_STATE_VERSION } from "../web/protocol.js";
 import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.js";
+import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
 import { readWebTailscaleSetting, writeWebTailscaleSetting } from "./web-settings.js";
-import { consumeWorktreeReplacement, runWorktreeCommand } from "./worktree.js";
+import {
+	consumeWorktreeReplacement,
+	replacementFromEntries,
+	runWorktreeCommand,
+	type WorktreeSessionReplacement,
+} from "./worktree.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_ENTRY = join(PACKAGE_ROOT, "web", "server", "index.ts");
@@ -134,6 +141,7 @@ type BridgeState = {
 	reconnectAttempt: number;
 	pending: AgentToServerMessage[];
 	metrics: Pick<WebSession, "usage" | "contextUsage">;
+	sourceReplacement?: WorktreeSessionReplacement;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -320,6 +328,11 @@ function send(state: BridgeState, message: AgentToServerMessage): void {
 	}
 	state.pending.push(message);
 	if (state.pending.length > 500) state.pending.splice(0, state.pending.length - 500);
+}
+
+function sendSourceReplacement(state: BridgeState, replacement: WorktreeSessionReplacement): void {
+	state.sourceReplacement = replacement;
+	send(state, { type: "agent.session_replaced", ...replacement } satisfies AgentSessionReplacedMessage);
 }
 
 function flush(state: BridgeState): void {
@@ -547,7 +560,8 @@ async function executeAgentCommand(
 				if (!state.ctx.isIdle()) throw new Error("Wait for Pi to become idle before reloading");
 				pi.sendUserMessage(`/web-reload ${requestId}`);
 				return;
-			case "create_worktree": {
+			case "create_worktree":
+			case "create_worktree_v2": {
 				if (!state.ctx.isIdle()) throw new Error("Wait for Pi to become idle before creating a worktree");
 				const token = crypto.randomUUID();
 				const result = await new Promise<WorktreeResult>((resolveWorktree, rejectWorktree) => {
@@ -571,7 +585,7 @@ async function executeAgentCommand(
 					try {
 						const worktreeCommand = "existing" in command
 							? `--existing ${JSON.stringify(command.existing)}`
-							: `${JSON.stringify(command.name)} --repo ${JSON.stringify(command.repository)}`;
+							: formatWorktreeCreateCommandArgs(command);
 						pi.sendUserMessage(`/web-worktree ${token} ${worktreeCommand}`);
 					} catch (error) {
 						finish(error instanceof Error ? error : new Error(String(error)));
@@ -721,6 +735,9 @@ async function connect(pi: ExtensionAPI, state: BridgeState): Promise<void> {
 				entries: [],
 			};
 			socket.send(JSON.stringify(hello));
+			if (state.sourceReplacement) {
+				socket.send(JSON.stringify({ type: "agent.session_replaced", ...state.sourceReplacement } satisfies AgentSessionReplacedMessage));
+			}
 			flush(state);
 			finish();
 		};
@@ -929,6 +946,7 @@ export default function webSessions(pi: ExtensionAPI): void {
 			try {
 				if (pending) pending.expectingReplacement = true;
 				const result = await runWorktreeCommand(worktreeArgs.join(" "), ctx);
+				if (result.replacedSession && bridge) sendSourceReplacement(bridge, result.replacedSession);
 				pending?.resolve({
 					...result,
 					sessionId: result.cancelled ? undefined : pending.owner.session.id,
@@ -970,6 +988,12 @@ export default function webSessions(pi: ExtensionAPI): void {
 		const previous = bridge;
 		const session = makeSession(ctx, undefined);
 		const worktreeReplacement = consumeWorktreeReplacement(session.id);
+		// The in-memory replacement token exists before activation verification.
+		// Advertise deletion only from the durable marker written after verification.
+		const persistedReplacement = replacementFromEntries(ctx.sessionManager.getEntries());
+		const sourceReplacement = persistedReplacement?.replacementSessionId === session.id
+			? persistedReplacement
+			: undefined;
 		const state: BridgeState = {
 			ctx,
 			session,
@@ -977,6 +1001,7 @@ export default function webSessions(pi: ExtensionAPI): void {
 			reconnectAttempt: 0,
 			pending: [],
 			metrics: { usage: session.usage, contextUsage: session.contextUsage },
+			sourceReplacement,
 		};
 		if (previous) {
 			previous.closed = true;
@@ -988,6 +1013,19 @@ export default function webSessions(pi: ExtensionAPI): void {
 			removeFooter(pi, previous.session.id);
 		}
 		bridge = state;
+		if (worktreeReplacement && !sourceReplacement) {
+			const deadline = Date.now() + WORKTREE_TIMEOUT_MS;
+			const poll = setInterval(() => {
+				if (state.closed || Date.now() >= deadline) {
+					clearInterval(poll);
+					return;
+				}
+				if (!worktreeReplacement.activated) return;
+				clearInterval(poll);
+				sendSourceReplacement(state, worktreeReplacement.activated);
+			}, 10);
+			poll.unref?.();
+		}
 		for (const pending of pendingForks.values()) {
 			if (!pending.expectingReplacement) continue;
 			if (

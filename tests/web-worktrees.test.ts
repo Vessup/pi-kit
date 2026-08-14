@@ -12,6 +12,7 @@ import {
 	rollbackWebWorktree,
 	runWorktreeSetup,
 	validateGitVersion,
+	validateLocalBranchName,
 	validateWorktreeName,
 	WORKTREE_SESSION_ENTRY,
 } from "../web/server/worktrees.ts";
@@ -31,7 +32,7 @@ test("web worktrees are created under the primary repository .pi directory", asy
 
 	const result = await createWebWorktree(repository, "feature-one");
 	expect(await realpath(result.path)).toBe(await realpath(join(repository, ".pi", "worktrees", "feature-one")));
-	expect(result.branch).toBe("feature-one");
+	expect(result).toMatchObject({ name: "feature-one", branch: "feature-one", branchCreated: true });
 	expect((await Bun.$`git -C ${result.path} branch --show-current`.text()).trim()).toBe("feature-one");
 
 	await writeFile(join(repository, "README.md"), "second\n");
@@ -41,6 +42,126 @@ test("web worktrees are created under the primary repository .pi directory", asy
 	const linkedHead = (await Bun.$`git -C ${linked} rev-parse HEAD`.text()).trim();
 	const fromLinked = await createWebWorktree(linked, "from-linked");
 	expect((await Bun.$`git -C ${fromLinked.path} rev-parse HEAD`.text()).trim()).toBe(linkedHead);
+});
+
+test("managed directory, local branch, remote start point, and upstream are independent", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-remote-"));
+	const repository = join(directory, "repo");
+	const remote = join(directory, "origin.git");
+	await Bun.$`git init -q --bare ${remote}`;
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "main\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+	await Bun.$`git -C ${repository} branch -M main`;
+	await Bun.$`git -C ${repository} remote add origin ${remote}`;
+	await Bun.$`git -C ${repository} push -q -u origin main`;
+	await Bun.$`git -C ${repository} switch -q -c tembo/cancel-builds`;
+	await writeFile(join(repository, "PR.md"), "pull request head\n");
+	await Bun.$`git -C ${repository} add PR.md`;
+	await Bun.$`git -C ${repository} commit -qm pr-head`;
+	await Bun.$`git -C ${repository} push -q -u origin tembo/cancel-builds`;
+	const remoteHead = (await Bun.$`git -C ${repository} rev-parse origin/tembo/cancel-builds`.text()).trim();
+	await Bun.$`git -C ${repository} switch -q main`;
+	await Bun.$`git -C ${repository} branch -D tembo/cancel-builds`;
+	await writeFile(join(repository, "README.md"), "source checkout moved\n");
+	await Bun.$`git -C ${repository} commit -am source-moved -q`;
+	const sourceHead = (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
+	expect(sourceHead).not.toBe(remoteHead);
+
+	const result = await createWebWorktree(repository, "pr-30", {
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
+	});
+	expect(result).toMatchObject({
+		path: await realpath(join(repository, ".pi", "worktrees", "pr-30")),
+		name: "pr-30",
+		branch: "tembo/cancel-builds",
+		branchCreated: true,
+		startPoint: "origin/tembo/cancel-builds",
+		upstream: "origin/tembo/cancel-builds",
+	});
+	expect((await Bun.$`git -C ${result.path} rev-parse HEAD`.text()).trim()).toBe(remoteHead);
+	expect((await Bun.$`git -C ${result.path} rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'`.text()).trim()).toBe("origin/tembo/cancel-builds");
+	expect((await Bun.$`git -C ${repository} branch --list pr-30`.text()).trim()).toBe("");
+
+	removeManagedWorktree(result);
+	await expect(stat(result.path)).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} branch --list tembo/cancel-builds`.text()).trim()).toBe("");
+});
+
+test("an unused existing local branch is reused and preserved by rollback", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-reuse-"));
+	const repository = join(directory, "repo");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "initial\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+	await Bun.$`git -C ${repository} branch reusable/topic`;
+	const branchHead = (await Bun.$`git -C ${repository} rev-parse reusable/topic`.text()).trim();
+	await writeFile(join(repository, "README.md"), "main moved\n");
+	await Bun.$`git -C ${repository} commit -am main-moved -q`;
+
+	const result = await createWebWorktree(repository, "local-copy", { branch: "reusable/topic" });
+	expect(result).toMatchObject({ name: "local-copy", branch: "reusable/topic", branchCreated: false });
+	expect((await Bun.$`git -C ${result.path} rev-parse HEAD`.text()).trim()).toBe(branchHead);
+	rollbackWebWorktree(result);
+	await expect(stat(result.path)).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} rev-parse reusable/topic`.text()).trim()).toBe(branchHead);
+	await expect(createWebWorktree(repository, "conflicting-start", {
+		branch: "reusable/topic",
+		startPoint: "HEAD",
+	})).rejects.toThrow("omit --start-point");
+});
+
+test("managed creation rejects branches checked out in another worktree", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-checked-out-"));
+	const repository = join(directory, "repo");
+	const linked = join(directory, "linked");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "initial\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+	await Bun.$`git -C ${repository} worktree add -q -b occupied/topic ${linked}`;
+
+	try {
+		await createWebWorktree(repository, "duplicate", { branch: "occupied/topic" });
+		throw new Error("expected occupied branch rejection");
+	} catch (error) {
+		expect(error instanceof Error ? error.message : String(error)).toContain(`already checked out at ${await realpath(linked)}`);
+	}
+	const sourceBranch = (await Bun.$`git -C ${repository} branch --show-current`.text()).trim();
+	try {
+		await createWebWorktree(repository, "duplicate-source", { branch: sourceBranch });
+		throw new Error("expected source branch rejection");
+	} catch (error) {
+		expect(error instanceof Error ? error.message : String(error)).toContain("already checked out");
+	}
+});
+
+test("invalid branches and missing start points fail before creating resources", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-invalid-ref-"));
+	const repository = join(directory, "repo");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "initial\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+
+	await expect(createWebWorktree(repository, "missing", { branch: "owner/missing", startPoint: "origin/does-not-exist" })).rejects.toThrow("does not resolve to a commit");
+	await expect(createWebWorktree(repository, "invalid", { branch: "bad..branch" })).rejects.toThrow("Invalid local branch name");
+	await expect(createWebWorktree(repository, "option", { branch: "owner/option", startPoint: "--all" })).rejects.toThrow("Invalid worktree start point");
+	for (const name of ["missing", "invalid", "option"]) {
+		await expect(stat(join(repository, ".pi", "worktrees", name))).rejects.toThrow();
+	}
+	expect((await Bun.$`git -C ${repository} branch --list owner/missing`.text()).trim()).toBe("");
 });
 
 test("existing registered worktrees are resolved without modifying their branch", async () => {
@@ -165,7 +286,12 @@ test("managed worktree metadata is parsed and cleanup removes its checkout and b
 		customType: WORKTREE_SESSION_ENTRY,
 		data: created,
 	}]);
-	expect(marker).toEqual({ path: created.path, repoRoot: created.repoRoot, branch: created.branch });
+	expect(marker).toEqual({ path: created.path, repoRoot: created.repoRoot, name: created.name, branch: created.branch, branchCreated: true });
+	expect(managedWorktreeFromEntries([{
+		type: "custom",
+		customType: WORKTREE_SESSION_ENTRY,
+		data: { path: created.path, repoRoot: created.repoRoot, branch: created.branch },
+	}])).toEqual({ path: created.path, repoRoot: created.repoRoot, name: "cleanup-me", branch: "cleanup-me", branchCreated: true });
 	expect(managedWorktreeFromEntries([
 		{ type: "custom", customType: WORKTREE_SESSION_ENTRY, data: created },
 		{ type: "custom", customType: WORKTREE_SESSION_ENTRY, data: { managed: false } },
@@ -205,6 +331,42 @@ test("worktree rollback removes the checkout and its branch", async () => {
 	expect((await Bun.$`git -C ${repository} branch --list rollback-me`.text()).trim()).toBe("");
 });
 
+test("rollback removes operation-owned resources after the checkout branch changes", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-rollback-ref-"));
+	const repository = join(directory, "repo");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "test\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+
+	const result = await createWebWorktree(repository, "rollback-original");
+	await Bun.$`git -C ${result.path} switch -q -c user-created`;
+	rollbackWebWorktree(result);
+	await expect(stat(result.path)).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} branch --list rollback-original`.text()).trim()).toBe("");
+	expect((await Bun.$`git -C ${repository} branch --list user-created`.text()).trim()).toBe("user-created");
+});
+
+test("rollback preserves a changed checkout with uncommitted files", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-rollback-dirty-"));
+	const repository = join(directory, "repo");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "test\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+
+	const result = await createWebWorktree(repository, "rollback-dirty");
+	await Bun.$`git -C ${result.path} switch -q -c user-dirty`;
+	await writeFile(join(result.path, "uncommitted.txt"), "preserve me\n");
+	expect(() => rollbackWebWorktree(result)).toThrow("uncommitted or untracked changes");
+	expect(await readFile(join(result.path, "uncommitted.txt"), "utf8")).toBe("preserve me\n");
+	expect((await Bun.$`git -C ${repository} branch --list rollback-dirty`.text()).trim()).toBe("rollback-dirty");
+});
+
 test("worktree handling requires Git 2.36 or newer", () => {
 	expect(() => validateGitVersion("git version 2.35.9")).toThrow("Git 2.36.0 or newer is required");
 	expect(() => validateGitVersion("git version unknown")).toThrow("Could not determine Git version");
@@ -217,4 +379,8 @@ test("web worktree names reject traversal and nested paths", () => {
 		expect(() => validateWorktreeName(value)).toThrow();
 	}
 	expect(validateWorktreeName("fix-123_example.test")).toBe("fix-123_example.test");
+	expect(validateLocalBranchName("tembo/cancel-builds")).toBe("tembo/cancel-builds");
+	for (const value of ["bad..branch", "refs/heads/topic", "-option", "bad branch"]) {
+		expect(() => validateLocalBranchName(value)).toThrow();
+	}
 });

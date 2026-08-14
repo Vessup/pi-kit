@@ -69,7 +69,7 @@ import { Button } from "./components/ui/button";
 import { Dialog, DialogBody, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip";
 import { AnchoredPopover } from "./components/anchored-popover";
-import { resolveScrollFollow } from "./scroll-follow";
+import { anchoredScrollTop, resolveScrollFollow } from "./scroll-follow";
 import { totalSubagentUsage } from "./usage";
 import { toolHasArgumentDetails } from "./tool-expansion";
 import { cn } from "./lib/utils";
@@ -106,6 +106,7 @@ type SemanticSessionProps = {
   session: WebSession | null;
   entries: SemanticEntry[];
   streamingMessage: Record<string, unknown> | null;
+  streamingMessageKey: string | null;
   tools: ActiveTool[];
   error: string | null;
   connected: boolean;
@@ -668,6 +669,7 @@ function ToolCallCard({
   result,
   expansionKey,
   expanded,
+  autoFollowOutput = false,
   onExpansionChange,
 }: {
   name: string;
@@ -676,16 +678,38 @@ function ToolCallCard({
   result?: ToolResultView;
   expansionKey: string;
   expanded: boolean;
+  autoFollowOutput?: boolean;
   onExpansionChange: (key: string, open: boolean, manual?: boolean) => void;
 }) {
   const args = asRecord(input);
+  const cardRef = React.useRef<HTMLDetailsElement | null>(null);
+  const followInnerOutputRef = React.useRef(false);
+  const previousAutoFollowRef = React.useRef(false);
   const presentation = toolPresentation(name, args);
   const Icon = running ? presentation.icon : result && !result.isError ? CheckCircle2 : result?.isError ? X : presentation.icon;
   const subagents = name.startsWith("subagent_") ? subagentsFromDetails(result?.details) : [];
+
+  React.useLayoutEffect(() => {
+    if (autoFollowOutput && !previousAutoFollowRef.current) followInnerOutputRef.current = true;
+    previousAutoFollowRef.current = autoFollowOutput;
+    if (!autoFollowOutput || !expanded || !followInnerOutputRef.current) return;
+    const card = cardRef.current;
+    if (!card) return;
+    for (const element of card.querySelectorAll<HTMLElement>("pre, .semantic-edits, .semantic-data-documents")) {
+      if (element.scrollHeight > element.clientHeight) element.scrollTop = element.scrollHeight;
+    }
+  }, [autoFollowOutput, expanded, input, result]);
+
   return (
     <details
+      ref={cardRef}
+      data-expansion-key={expansionKey}
       className={cn("semantic-tool-call", result?.isError && "border-red-500/35")}
       open={expanded}
+      onScrollCapture={(event) => {
+        if (!autoFollowOutput || !(event.target instanceof HTMLElement) || event.target === cardRef.current) return;
+        followInnerOutputRef.current = event.target.scrollHeight - event.target.scrollTop - event.target.clientHeight <= 2;
+      }}
     >
       <summary onClick={(event) => { event.preventDefault(); onExpansionChange(expansionKey, !expanded, true); }}>
         <Icon className={cn("semantic-tool-icon h-4 w-4", running && "animate-pulse text-sky-400", !running && result && !result.isError && "text-emerald-400", !running && result?.isError && "text-red-300")} />
@@ -708,6 +732,7 @@ const MessageCard = React.memo(function MessageCard({
   active = false,
   messageKey,
   expandedItems,
+  autoFollowExpansionKey,
   onExpansionChange,
   toolResults,
   runningToolIds,
@@ -718,6 +743,7 @@ const MessageCard = React.memo(function MessageCard({
   active?: boolean;
   messageKey: string;
   expandedItems: ReadonlySet<string>;
+  autoFollowExpansionKey?: string | null;
   onExpansionChange: (key: string, open: boolean, manual?: boolean) => void;
   toolResults: ReadonlyMap<string, ToolResultView>;
   runningToolIds: ReadonlySet<string>;
@@ -750,7 +776,7 @@ const MessageCard = React.memo(function MessageCard({
           if (part.type === "toolCall") {
             const callId = String(part.id ?? `${messageKey}:${index}`);
             const expansionKey = `call:${callId}`;
-            return <ToolCallCard key={index} name={String(part.name ?? "tool")} args={part.arguments} running={runningToolIds.has(callId)} result={toolResults.get(callId)} expansionKey={expansionKey} expanded={expandedItems.has(expansionKey)} onExpansionChange={onExpansionChange} />;
+            return <ToolCallCard key={index} name={String(part.name ?? "tool")} args={part.arguments} running={runningToolIds.has(callId)} result={toolResults.get(callId)} expansionKey={expansionKey} expanded={expandedItems.has(expansionKey)} autoFollowOutput={autoFollowExpansionKey === expansionKey} onExpansionChange={onExpansionChange} />;
           }
           if (part.type === "image" && typeof part.data === "string") {
             return <img key={index} className="max-h-80 rounded-xl border border-zinc-700" src={`data:${String(part.mimeType ?? "image/png")};base64,${part.data}`} alt="Attachment" />;
@@ -787,9 +813,10 @@ export function updateStreamingMessage(
   return next;
 }
 
-function QueuedMessageRow({ item, overlay = false, blocked = false, steering = false, steerDisabled = false, onEdit, onRemove, onSteer, onReconcile }: {
+function QueuedMessageRow({ item, overlay = false, overlayWidth, blocked = false, steering = false, steerDisabled = false, onEdit, onRemove, onSteer, onReconcile }: {
   item: WebQueuedMessage;
   overlay?: boolean;
+  overlayWidth?: number | null;
   blocked?: boolean;
   steering?: boolean;
   steerDisabled?: boolean;
@@ -800,10 +827,13 @@ function QueuedMessageRow({ item, overlay = false, blocked = false, steering = f
 }) {
   const uncertain = item.deliveryState === "delivering";
   const sortable = useSortable({ id: overlay ? `overlay:${item.id}` : item.id, disabled: overlay || uncertain || blocked });
-  const style = overlay ? undefined : { transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition };
+  const style: React.CSSProperties | undefined = overlay
+    ? overlayWidth ? { width: overlayWidth } : undefined
+    : { transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition };
   return (
     <div
       ref={overlay ? undefined : sortable.setNodeRef}
+      data-queue-item-id={overlay ? undefined : item.id}
       style={style}
       className={cn("semantic-queue-item", sortable.isDragging && "is-sortable-dragging", overlay && "is-overlay", uncertain && "is-uncertain", blocked && "is-blocked")}
     >
@@ -821,7 +851,7 @@ function QueuedMessageRow({ item, overlay = false, blocked = false, steering = f
   );
 }
 
-export function SemanticSession({ session, entries, streamingMessage, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
+export function SemanticSession({ session, entries, streamingMessage, streamingMessageKey: providedStreamingMessageKey, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
   const [sendError, setSendError] = React.useState<string | null>(null);
@@ -831,6 +861,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   const [draggingAttachments, setDraggingAttachments] = React.useState(false);
   const [editingQueueId, setEditingQueueId] = React.useState<string | null>(null);
   const [draggingQueueId, setDraggingQueueId] = React.useState<string | null>(null);
+  const [draggingQueueWidth, setDraggingQueueWidth] = React.useState<number | null>(null);
   const [steeringQueueId, setSteeringQueueId] = React.useState<string | null>(null);
   const queueSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -846,6 +877,8 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   const [controlBusy, setControlBusy] = React.useState(false);
   const [expandedItems, setExpandedItems] = React.useState<Set<string>>(() => new Set());
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const scrollSpacerRef = React.useRef<HTMLDivElement | null>(null);
+  const lockedScrollHeightRef = React.useRef<number | null>(null);
   const fileRef = React.useRef<HTMLInputElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const slashMenuRef = React.useRef<HTMLDivElement | null>(null);
@@ -855,7 +888,133 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   const initialScrollSessionRef = React.useRef<string | null>(null);
   const initialScrollPendingRef = React.useRef(true);
   const followOutputRef = React.useRef(true);
+  const showScrollToBottomRef = React.useRef(false);
+  const scrollIntentRef = React.useRef<"up" | "down" | null>(null);
+  const scrollbarPointerRef = React.useRef(false);
+  const lastTouchYRef = React.useRef<number | null>(null);
+  const lastScrollTopRef = React.useRef(0);
   const autoScrollFrameRef = React.useRef<number | null>(null);
+  const viewportAnchorRef = React.useRef<{
+    element: HTMLElement | null;
+    range: Range | null;
+    rangeTop: number;
+    key: string | null;
+    top: number;
+    keyTop: number;
+    fallbacks: Array<{ key: string; top: number }>;
+    scrollTop: number;
+  } | null>(null);
+
+  const updateScrollButton = React.useCallback((visible: boolean) => {
+    showScrollToBottomRef.current = visible;
+    setShowScrollToBottom(visible);
+  }, []);
+
+  const captureViewportAnchor = React.useCallback(() => {
+    const target = scrollRef.current;
+    if (!target || (!showScrollToBottomRef.current && followOutputRef.current)) {
+      viewportAnchorRef.current = null;
+      return;
+    }
+    const viewport = target.getBoundingClientRect();
+    const anchors = Array.from(target.querySelectorAll<HTMLElement>("[data-transcript-anchor]"));
+    const anchorIndex = anchors.findIndex((candidate) => candidate.getBoundingClientRect().bottom > viewport.top + 1);
+    const messageAnchor = anchorIndex >= 0 ? anchors[anchorIndex] : null;
+    let element: HTMLElement | null = messageAnchor;
+    let range: Range | null = null;
+    let rangeTop = viewport.top;
+    const caretDocument = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    for (const x of [viewport.left + Math.min(32, viewport.width / 4), viewport.left + viewport.width / 2]) {
+      const hit = document.elementFromPoint(x, viewport.top + 2);
+      if (!(hit instanceof HTMLElement) || !messageAnchor?.contains(hit)) continue;
+      element = hit;
+      const candidateRange = caretDocument.caretRangeFromPoint?.(x, viewport.top + 2) ?? null;
+      const candidateNode = candidateRange?.startContainer;
+      const candidateElement = candidateNode instanceof Element
+        ? candidateNode
+        : candidateNode?.parentNode instanceof Element
+          ? candidateNode.parentNode
+          : null;
+      const candidateRect = candidateRange?.getBoundingClientRect();
+      if (candidateRange && candidateElement && messageAnchor.contains(candidateElement) && candidateRect && candidateRect.height > 0) {
+        range = candidateRange.cloneRange();
+        rangeTop = candidateRect.top;
+      }
+      break;
+    }
+    const key = messageAnchor?.dataset.transcriptAnchor ?? null;
+    viewportAnchorRef.current = {
+      element,
+      range,
+      rangeTop,
+      key,
+      top: element?.getBoundingClientRect().top ?? viewport.top,
+      keyTop: messageAnchor?.getBoundingClientRect().top ?? viewport.top,
+      fallbacks: anchorIndex < 0 ? [] : anchors.slice(anchorIndex, anchorIndex + 5).flatMap((candidate) => {
+        const candidateKey = candidate.dataset.transcriptAnchor;
+        return candidateKey ? [{ key: candidateKey, top: candidate.getBoundingClientRect().top }] : [];
+      }),
+      scrollTop: target.scrollTop,
+    };
+  }, []);
+
+  const maintainLockedScrollExtent = React.useCallback(() => {
+    const target = scrollRef.current;
+    const spacer = scrollSpacerRef.current;
+    if (!target || !spacer) return;
+    if (!showScrollToBottomRef.current && followOutputRef.current) {
+      lockedScrollHeightRef.current = null;
+      spacer.style.height = "0px";
+      return;
+    }
+    lockedScrollHeightRef.current ??= target.scrollHeight;
+    const naturalScrollHeight = target.scrollHeight - spacer.offsetHeight;
+    const anchoredMinimum = (viewportAnchorRef.current?.scrollTop ?? target.scrollTop) + target.clientHeight + 1;
+    const requiredScrollHeight = Math.max(lockedScrollHeightRef.current, anchoredMinimum);
+    spacer.style.height = `${Math.max(0, requiredScrollHeight - naturalScrollHeight)}px`;
+  }, []);
+
+  const restoreViewportAnchor = React.useCallback(() => {
+    maintainLockedScrollExtent();
+    const target = scrollRef.current;
+    const anchor = viewportAnchorRef.current;
+    if (!target || !anchor || (!showScrollToBottomRef.current && followOutputRef.current)) return;
+    const currentAnchors = Array.from(target.querySelectorAll<HTMLElement>("[data-transcript-anchor]"));
+    const rangeNode = anchor.range?.startContainer;
+    const rangeRect = rangeNode?.isConnected ? anchor.range?.getBoundingClientRect() : undefined;
+    if (rangeRect && rangeRect.height > 0) {
+      target.scrollTop = anchoredScrollTop(target.scrollTop, anchor.rangeTop, rangeRect.top);
+    } else if (anchor.element?.isConnected) {
+      target.scrollTop = anchoredScrollTop(target.scrollTop, anchor.top, anchor.element.getBoundingClientRect().top);
+    } else {
+      const fallback = anchor.fallbacks.flatMap((candidate) => {
+        const element = currentAnchors.find((current) => current.dataset.transcriptAnchor === candidate.key);
+        return element ? [{ element, top: candidate.top }] : [];
+      })[0] ?? (anchor.key
+        ? (() => {
+            const element = currentAnchors.find((current) => current.dataset.transcriptAnchor === anchor.key);
+            return element ? { element, top: anchor.keyTop } : undefined;
+          })()
+        : undefined);
+      target.scrollTop = fallback
+        ? anchoredScrollTop(target.scrollTop, fallback.top, fallback.element.getBoundingClientRect().top)
+        : anchor.scrollTop;
+    }
+    lastScrollTopRef.current = target.scrollTop;
+    captureViewportAnchor();
+  }, [captureViewportAnchor, maintainLockedScrollExtent]);
+
+  const stopFollowing = React.useCallback(() => {
+    const target = scrollRef.current;
+    if (followOutputRef.current && target) lockedScrollHeightRef.current = target.scrollHeight;
+    followOutputRef.current = false;
+    scrollIntentRef.current = "up";
+    if (autoScrollFrameRef.current !== null) cancelAnimationFrame(autoScrollFrameRef.current);
+    autoScrollFrameRef.current = null;
+    updateScrollButton(true);
+    maintainLockedScrollExtent();
+    captureViewportAnchor();
+  }, [captureViewportAnchor, maintainLockedScrollExtent, updateScrollButton]);
 
   React.useEffect(() => {
     setSendNotice(null);
@@ -895,6 +1054,10 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
     initialScrollSessionRef.current = session?.id ?? null;
     initialScrollPendingRef.current = true;
     followOutputRef.current = true;
+    showScrollToBottomRef.current = false;
+    scrollIntentRef.current = null;
+    viewportAnchorRef.current = null;
+    lockedScrollHeightRef.current = null;
   }
 
   const manuallyExpandedRef = React.useRef(new Set<string>());
@@ -944,6 +1107,9 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
     [representedToolIds, tools],
   );
 
+  const streamingMessageKey = providedStreamingMessageKey
+    ?? (streamingMessage ? String(streamingMessage.id ?? streamingMessage.timestamp ?? "streaming-assistant") : "streaming-assistant");
+
   const latestCard = React.useMemo(() => {
     type Candidate = { key: string; expandable: boolean };
     const card = (message: Record<string, unknown>, messageKey: string): Candidate | null => {
@@ -968,7 +1134,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
       }
       return null;
     };
-    if (streamingMessage) return card(streamingMessage, "streaming-assistant");
+    if (streamingMessage) return card(streamingMessage, streamingMessageKey);
     const orphan = orphanTools.at(-1);
     if (orphan) {
       const result = streamingToolResults.get(orphan.id);
@@ -983,10 +1149,13 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
       if (candidate) return candidate;
     }
     return null;
-  }, [messages, orphanTools, streamingMessage, streamingToolResults]);
+  }, [messages, orphanTools, streamingMessage, streamingMessageKey, streamingToolResults]);
 
   const latestCardKey = latestCard?.key ?? null;
   const latestExpandableKey = latestCard?.expandable ? latestCard.key : null;
+  const autoFollowExpansionKey = latestExpandableKey && !manuallyExpandedRef.current.has(latestExpandableKey)
+    ? latestExpandableKey
+    : null;
 
   React.useEffect(() => {
     if (!latestCardKey) return;
@@ -1003,42 +1172,57 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
   React.useLayoutEffect(() => {
     const target = scrollRef.current;
     if (!target || transcriptLoading || !initialScrollPendingRef.current) return;
-    const scrollToEnd = () => { target.scrollTop = target.scrollHeight; };
+    const scrollToEnd = () => {
+      if (!followOutputRef.current || showScrollToBottomRef.current) return;
+      target.scrollTop = target.scrollHeight;
+      lastScrollTopRef.current = target.scrollTop;
+    };
     followOutputRef.current = true;
-    setShowScrollToBottom(false);
+    updateScrollButton(false);
     scrollToEnd();
     const frame = requestAnimationFrame(() => {
       scrollToEnd();
       initialScrollPendingRef.current = false;
     });
     return () => cancelAnimationFrame(frame);
-  }, [messages.length, session?.id, streamingMessage, transcriptLoading]);
+  }, [messages.length, session?.id, streamingMessage, transcriptLoading, updateScrollButton]);
 
   React.useEffect(() => {
     const target = scrollRef.current;
-    if (!target || initialScrollPendingRef.current) return;
+    if (!target) return;
     const pinToBottom = () => {
-      if (!followOutputRef.current) return;
+      if (!followOutputRef.current || showScrollToBottomRef.current) return;
       target.scrollTop = target.scrollHeight;
+      lastScrollTopRef.current = target.scrollTop;
     };
-    const schedulePin = () => {
-      if (!followOutputRef.current) return;
+    const handleLayoutChange = () => {
+      if (!followOutputRef.current || showScrollToBottomRef.current) {
+        restoreViewportAnchor();
+        return;
+      }
       if (autoScrollFrameRef.current !== null) cancelAnimationFrame(autoScrollFrameRef.current);
       autoScrollFrameRef.current = requestAnimationFrame(() => {
         autoScrollFrameRef.current = null;
         pinToBottom();
       });
     };
-    const observer = new ResizeObserver(schedulePin);
     const transcript = target.firstElementChild;
-    if (transcript) observer.observe(transcript);
-    schedulePin();
+    const resizeObserver = new ResizeObserver(handleLayoutChange);
+    const mutationObserver = new MutationObserver(handleLayoutChange);
+    resizeObserver.observe(target);
+    if (transcript) {
+      resizeObserver.observe(transcript);
+      mutationObserver.observe(transcript, { childList: true, characterData: true, subtree: true });
+    }
+    if (!followOutputRef.current || showScrollToBottomRef.current) captureViewportAnchor();
+    handleLayoutChange();
     return () => {
-      observer.disconnect();
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
       if (autoScrollFrameRef.current !== null) cancelAnimationFrame(autoScrollFrameRef.current);
       autoScrollFrameRef.current = null;
     };
-  }, [expandedItems, messages.length, streamingMessage, tools, queuedMessages.length]);
+  }, [captureViewportAnchor, restoreViewportAnchor, session?.id, transcriptLoading]);
 
   const addFiles = async (files: File[]) => {
     try {
@@ -1105,6 +1289,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
 
   const finishQueueDrag = async (event: DragEndEvent) => {
     setDraggingQueueId(null);
+    setDraggingQueueWidth(null);
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : null;
     if (!overId || activeId === overId) return;
@@ -1191,9 +1376,13 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
     const target = scrollRef.current;
     if (!target) return;
     followOutputRef.current = true;
-    setShowScrollToBottom(false);
+    scrollIntentRef.current = null;
+    viewportAnchorRef.current = null;
+    lockedScrollHeightRef.current = null;
+    if (scrollSpacerRef.current) scrollSpacerRef.current.style.height = "0px";
+    updateScrollButton(false);
     target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
-  }, []);
+  }, [updateScrollButton]);
   const latestAssistantIndex = lastAssistantMessageIndex(messages);
   const selectedSubagent = session?.subagents?.find((agent) => agent.id === selectedSubagentId) ?? null;
   const displayedSubagentUsage = React.useMemo(
@@ -1258,44 +1447,73 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
       <SubagentOutputDialog agent={selectedSubagent} onOpenChange={(open) => { if (!open) setSelectedSubagentId(null); }} />
       <div
         ref={scrollRef}
+        data-testid="transcript-scroll"
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
         onWheel={(event) => {
-          if (event.deltaY < 0) {
-            followOutputRef.current = false;
-            setShowScrollToBottom(true);
-          }
+          scrollIntentRef.current = event.deltaY < 0 ? "up" : "down";
+          if (event.deltaY < 0) stopFollowing();
         }}
-        onTouchMove={() => {
-          followOutputRef.current = false;
-          setShowScrollToBottom(true);
+        onTouchStart={(event) => {
+          lastTouchYRef.current = event.touches[0]?.clientY ?? null;
+        }}
+        onTouchMove={(event) => {
+          const currentY = event.touches[0]?.clientY;
+          const previousY = lastTouchYRef.current;
+          if (currentY === undefined || previousY === null) return;
+          // Finger moving down scrolls transcript content upward, away from bottom.
+          scrollIntentRef.current = currentY > previousY ? "up" : "down";
+          if (scrollIntentRef.current === "up") stopFollowing();
+          lastTouchYRef.current = currentY;
+        }}
+        onTouchEnd={() => {
+          lastTouchYRef.current = null;
+          scrollIntentRef.current = null;
         }}
         onPointerDown={(event) => {
           const target = event.currentTarget;
           const bounds = target.getBoundingClientRect();
           if (event.clientX >= bounds.left + target.clientWidth) {
-            followOutputRef.current = false;
-            setShowScrollToBottom(true);
+            scrollbarPointerRef.current = true;
+            lastScrollTopRef.current = target.scrollTop;
           }
         }}
+        onPointerUp={() => { scrollbarPointerRef.current = false; scrollIntentRef.current = null; }}
+        onPointerCancel={() => { scrollbarPointerRef.current = false; scrollIntentRef.current = null; }}
         onKeyDown={(event) => {
           if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home") {
-            followOutputRef.current = false;
-            setShowScrollToBottom(true);
+            scrollIntentRef.current = "up";
+            stopFollowing();
+          } else if (event.key === "ArrowDown" || event.key === "PageDown" || event.key === "End") {
+            scrollIntentRef.current = "down";
           }
         }}
         onScroll={(event) => {
           const target = event.currentTarget;
+          if (scrollbarPointerRef.current && target.scrollTop !== lastScrollTopRef.current) {
+            scrollIntentRef.current = target.scrollTop < lastScrollTopRef.current ? "up" : "down";
+            if (scrollIntentRef.current === "up") stopFollowing();
+          }
           const decision = resolveScrollFollow(
             followOutputRef.current,
             target.scrollHeight - target.scrollTop - target.clientHeight,
+            undefined,
+            scrollIntentRef.current === "down",
           );
           followOutputRef.current = decision.following;
-          setShowScrollToBottom(decision.showButton);
+          updateScrollButton(decision.showButton);
+          if (decision.following && !decision.showButton) {
+            lockedScrollHeightRef.current = null;
+            viewportAnchorRef.current = null;
+            if (scrollSpacerRef.current) scrollSpacerRef.current.style.height = "0px";
+          }
+          lastScrollTopRef.current = target.scrollTop;
+          if (!decision.following) captureViewportAnchor();
+          scrollIntentRef.current = null;
           if (decision.pinToBottom) {
             if (autoScrollFrameRef.current !== null) cancelAnimationFrame(autoScrollFrameRef.current);
             autoScrollFrameRef.current = requestAnimationFrame(() => {
               autoScrollFrameRef.current = null;
-              if (followOutputRef.current) target.scrollTop = target.scrollHeight;
+              if (followOutputRef.current && !showScrollToBottomRef.current) target.scrollTop = target.scrollHeight;
             });
           }
         }}
@@ -1310,16 +1528,19 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
             <div className="py-24 text-center text-sm text-zinc-500">{session ? "No messages in this session yet." : "Select a session."}</div>
           )}
           {messages.map((view, index) => (
-            <MessageCard key={view.key} message={view.message} active={!streamingMessage && isWorking && index === latestAssistantIndex} messageKey={view.key} endedAt={view.endedAt} expandedItems={expandedItems} onExpansionChange={handleExpansionChange} toolResults={streamingToolResults} runningToolIds={runningToolIds} />
+            <div key={view.key} data-transcript-anchor={view.key}>
+              <MessageCard message={view.message} active={!streamingMessage && isWorking && index === latestAssistantIndex} messageKey={view.key} endedAt={view.endedAt} expandedItems={expandedItems} autoFollowExpansionKey={autoFollowExpansionKey} onExpansionChange={handleExpansionChange} toolResults={streamingToolResults} runningToolIds={runningToolIds} />
+            </div>
           ))}
-          {streamingMessage && <MessageCard message={streamingMessage} streaming active={isWorking} messageKey="streaming-assistant" expandedItems={expandedItems} onExpansionChange={handleExpansionChange} toolResults={streamingToolResults} runningToolIds={runningToolIds} />}
-          {session?.compaction && <CompactionStatus session={session} />}
-          {!session?.compaction && !streamingMessage && latestAssistantIndex < 0 && isWorking && <div className="semantic-activity-label"><span>Pi</span><span className="semantic-streaming-dot" /></div>}
+          {streamingMessage && <div data-transcript-anchor={streamingMessageKey}><MessageCard message={streamingMessage} streaming active={isWorking} messageKey={streamingMessageKey} expandedItems={expandedItems} autoFollowExpansionKey={autoFollowExpansionKey} onExpansionChange={handleExpansionChange} toolResults={streamingToolResults} runningToolIds={runningToolIds} /></div>}
+          {session?.compaction && <div data-transcript-anchor="compaction"><CompactionStatus session={session} /></div>}
+          {!session?.compaction && !streamingMessage && latestAssistantIndex < 0 && isWorking && <div data-transcript-anchor="activity" className="semantic-activity-label"><span>Pi</span><span className="semantic-streaming-dot" /></div>}
           {orphanTools.map((tool) => {
             const callKey = `call:${tool.id}`;
-            return <ToolCallCard key={tool.id} name={tool.name} args={tool.args} running={tool.running} result={tool.result === undefined ? undefined : toolResultView(tool.result, tool.isError === true)} expansionKey={callKey} expanded={expandedItems.has(callKey)} onExpansionChange={handleExpansionChange} />;
+            return <div key={tool.id} data-transcript-anchor={callKey}><ToolCallCard name={tool.name} args={tool.args} running={tool.running} result={tool.result === undefined ? undefined : toolResultView(tool.result, tool.isError === true)} expansionKey={callKey} expanded={expandedItems.has(callKey)} autoFollowOutput={autoFollowExpansionKey === callKey} onExpansionChange={handleExpansionChange} /></div>;
           })}
         </div>
+        <div ref={scrollSpacerRef} aria-hidden="true" className="shrink-0" />
       </div>
       {showScrollToBottom && <div className="relative z-30 h-0"><button type="button" className="semantic-scroll-bottom" title="Scroll to bottom" aria-label="Scroll to bottom" onClick={jumpToBottom}><ArrowDown className="h-4 w-4" /></button></div>}
       <div className="semantic-session-composer bg-zinc-950/95 p-3 backdrop-blur sm:p-4">
@@ -1346,12 +1567,21 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
             <DndContext
               sensors={queueSensors}
               collisionDetection={closestCenter}
-              onDragStart={(event) => setDraggingQueueId(String(event.active.id))}
-              onDragCancel={() => setDraggingQueueId(null)}
+              onDragStart={(event) => {
+                const activeId = String(event.active.id);
+                const activeRow = Array.from(document.querySelectorAll<HTMLElement>("[data-queue-item-id]"))
+                  .find((element) => element.dataset.queueItemId === activeId);
+                setDraggingQueueId(activeId);
+                setDraggingQueueWidth(event.active.rect.current.initial?.width ?? activeRow?.getBoundingClientRect().width ?? null);
+              }}
+              onDragCancel={() => {
+                setDraggingQueueId(null);
+                setDraggingQueueWidth(null);
+              }}
               onDragEnd={(event) => void finishQueueDrag(event)}
             >
               <div className="semantic-queue">
-                <div className="semantic-queue-label">Queued follow-up{queuedMessages.length === 1 ? "" : "s"}</div>
+                <div className="semantic-queue-label">Queued</div>
                 <SortableContext items={queuedMessages.map((item) => item.id)} strategy={verticalListSortingStrategy}>
                   <div className="grid gap-1.5">
                     {queuedMessages.map((item, index) => {
@@ -1365,7 +1595,7 @@ export function SemanticSession({ session, entries, streamingMessage, tools, err
                 <DragOverlay dropAnimation={null}>
                   {draggingQueueId ? (() => {
                     const item = queuedMessages.find((queued) => queued.id === draggingQueueId);
-                    return item ? <QueuedMessageRow item={item} overlay onEdit={() => {}} onRemove={() => {}} onSteer={() => {}} onReconcile={() => {}} /> : null;
+                    return item ? <QueuedMessageRow item={item} overlay overlayWidth={draggingQueueWidth} onEdit={() => {}} onRemove={() => {}} onSteer={() => {}} onReconcile={() => {}} /> : null;
                   })() : null}
                 </DragOverlay>,
                 document.body,

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { resolveScrollFollow } from "../web/client/scroll-follow.ts";
+import { anchoredScrollTop, resolveScrollFollow } from "../web/client/scroll-follow.ts";
 
 test("layout growth while following stays pinned without showing the down arrow", () => {
 	expect(resolveScrollFollow(true, 240)).toEqual({
@@ -25,10 +25,23 @@ test("an unpinned reader near the bottom remains frozen during layout changes", 
 	});
 });
 
-test("reaching the actual bottom resumes following and hides the down arrow", () => {
-	expect(resolveScrollFollow(false, 0)).toEqual({
+test("passive layout changes cannot resume while the down arrow is visible", () => {
+	expect(resolveScrollFollow(false, 0, undefined, false)).toEqual({
+		following: false,
+		showButton: true,
+		pinToBottom: false,
+	});
+});
+
+test("explicit downward input at the actual bottom resumes following", () => {
+	expect(resolveScrollFollow(false, 0, undefined, true)).toEqual({
 		following: true,
 		showButton: false,
 		pinToBottom: false,
 	});
+});
+
+test("anchor correction offsets only visual movement caused above the viewport", () => {
+	expect(anchoredScrollTop(420, 100, 135)).toBe(455);
+	expect(anchoredScrollTop(420, 100, 100)).toBe(420);
 });

@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,13 +18,14 @@ import worktreeExtension, {
 	inheritedWorktreeOwnership,
 	installWorktreeCommandDispatchCompatibility,
 	queueWorktreeToolRequest,
+	replacementFromEntries,
 	runWorktreeCommand,
 	takeWorktreeToolRequest,
 	withWorktreeOperation,
 	worktreeToolCommandArgs,
 } from "../extensions/worktree.ts";
 import { WORKTREE_SESSION_ENTRY } from "../web/server/worktrees.ts";
-import { parseWorktreeCommandArgs, parseWorktreeInvocation } from "../web/worktree-command.ts";
+import { formatWorktreeCreateCommandArgs, parseWorktreeCommandArgs, parseWorktreeInvocation } from "../web/worktree-command.ts";
 
 beforeEach(() => clearWorktreeToolRequests());
 
@@ -86,11 +87,14 @@ test("worktree tool queues a correlated create command and terminates the old ru
 	const { tool, sent } = registeredWorktreeTool();
 	expect(tool.name).toBe("worktree");
 	expect(tool.promptSnippet).toContain("move this conversation");
-	expect(tool.promptGuidelines?.join(" ")).toContain("selected checkout's HEAD");
+	expect(tool.promptGuidelines?.join(" ")).toContain("resolve its actual head branch");
+	expect(tool.promptGuidelines?.join(" ")).toContain("Never infer the branch from the PR number");
 	expect(tool.promptGuidelines?.join(" ")).toContain("explicitly asks only to create");
 	const result = await tool.execute("call-1", {
-		name: "feature one",
+		name: "feature-one",
 		repository: "~/Source/my repo",
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
 		continuation: "Resume implementing the requested feature.",
 	}, undefined, undefined, {
 		sessionManager: { getSessionId: () => "source-session" },
@@ -101,7 +105,7 @@ test("worktree tool queues a correlated create command and terminates the old ru
 	expect(sent[0]?.message).toMatch(/^\/worktree --tool-request [0-9a-f-]+$/);
 	const token = sent[0]!.message.split(" ").at(-1)!;
 	expect(takeWorktreeToolRequest(token, "source-session")).toMatchObject({
-		commandArgs: '"feature one" --repo "~/Source/my repo"',
+		commandArgs: '"feature-one" --repo "~/Source/my repo" --branch "tembo/cancel-builds" --start-point "origin/tembo/cancel-builds"',
 		continuation: "Resume implementing the requested feature.",
 	});
 });
@@ -183,6 +187,32 @@ test("worktree command parses safe quoted repository arguments", () => {
 		name: "feature-two",
 		repository: "/tmp/repo",
 	});
+	expect(parseWorktreeCommandArgs('pr-30 --repo "/tmp/my repo" --branch "tembo/cancel-builds" --start-point "origin/tembo/cancel-builds"')).toEqual({
+		name: "pr-30",
+		repository: "/tmp/my repo",
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
+	});
+	expect(parseWorktreeCommandArgs("--branch=owner/topic --start-point=origin/owner/topic pr-31")).toEqual({
+		name: "pr-31",
+		branch: "owner/topic",
+		startPoint: "origin/owner/topic",
+	});
+});
+
+test("formatted branch and start-point values round-trip without command interpolation", () => {
+	const formatted = formatWorktreeCreateCommandArgs({
+		name: "pr-30",
+		repository: '/tmp/repo; echo "unsafe"',
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
+	});
+	expect(parseWorktreeCommandArgs(formatted)).toEqual({
+		name: "pr-30",
+		repository: '/tmp/repo; echo "unsafe"',
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
+	});
 });
 
 test("tool-quoted worktree paths preserve JSON control escapes", () => {
@@ -201,9 +231,16 @@ test("worktree command parses existing checkout paths exclusively", () => {
 	expect(() => parseWorktreeCommandArgs("--existing")).toThrow("requires a worktree path");
 	expect(() => parseWorktreeCommandArgs("feature --existing /tmp/worktree")).toThrow("Usage");
 	expect(() => parseWorktreeCommandArgs("--existing /tmp/worktree --repo /tmp/repo")).toThrow("Usage");
+	expect(() => parseWorktreeCommandArgs("--existing /tmp/worktree --branch topic")).toThrow("Usage");
+	expect(() => parseWorktreeCommandArgs("feature --branch")).toThrow("requires a local branch name");
+	expect(() => parseWorktreeCommandArgs("feature --start-point")).toThrow("requires a Git ref or commit");
+	expect(() => parseWorktreeCommandArgs("feature --branch one --branch two")).toThrow("Duplicate");
+	expect(() => worktreeToolCommandArgs({ existing: "/tmp/worktree", branch: "topic", continuation: "Continue." })).toThrow("Specify existing by itself");
+	expect(() => worktreeToolCommandArgs({ name: "nested/path", continuation: "Continue." })).toThrow("one safe path segment");
+	expect(() => worktreeToolCommandArgs({ name: "safe", branch: "bad..branch", continuation: "Continue." })).toThrow("Invalid local branch name");
 });
 
-test("branched replacements keep the durable source as their parent", async () => {
+test("branched replacements are self-contained before the source is deleted", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-kit-worktree-branch-parent-"));
 	try {
 		const sourceCwd = join(directory, "source");
@@ -226,7 +263,7 @@ test("branched replacements keep the durable source as their parent", async () =
 			replacementSessions,
 		);
 		const opened = SessionManager.open(replacement.sessionFile);
-		expect(opened.getHeader()?.parentSession).toBe(sourceFile);
+		expect(opened.getHeader()?.parentSession).toBeUndefined();
 		expect(opened.getEntries().some((entry) => entry.type === "message" && entry.message.role === "user" && entry.message.content === "second")).toBe(false);
 		expect((await readdir(sourceSessions)).filter((file) => file.endsWith(".jsonl"))).toEqual([sourceFile.split("/").at(-1)]);
 	} finally {
@@ -250,6 +287,7 @@ test("existing worktree migration activates the replacement and rollback restore
 		let rollbackRequested = false;
 		let removeTargetBeforeVerification = false;
 		let latestReplacementFile: string | undefined;
+		let replacementIdOverride: string | undefined;
 		const notifications: string[] = [];
 		const continuations: string[] = [];
 		const ctx = {
@@ -279,6 +317,8 @@ test("existing worktree migration activates the replacement and rollback restore
 				return { cancelled: false };
 			},
 		} as unknown as ExtensionCommandContext;
+		let createOptions: { branch?: string; startPoint?: string } | undefined;
+		const rolledBackWorktrees: Array<{ name: string; branch: string; branchCreated: boolean }> = [];
 		const dependencies = {
 			inspectExisting: () => ({ path: canonicalTargetCwd, repoRoot: sourceCwd, ref: { kind: "branch", value: "feature" } as const }),
 			readCurrentRef: () => ({ kind: "branch", value: "feature" } as const),
@@ -287,8 +327,13 @@ test("existing worktree migration activates the replacement and rollback restore
 				// writes them into ~/.pi/agent/sessions, where Pi Web discovers them later.
 				const replacement = SessionManager.forkFrom(previousFile, target.path, join(directory, "sessions"));
 				latestReplacementFile = replacement.getSessionFile()!;
-				return { sessionId: replacement.getSessionId(), sessionFile: latestReplacementFile };
+				return { sessionId: replacementIdOverride ?? replacement.getSessionId(), sessionFile: latestReplacementFile };
 			},
+			rollbackWorktree: (worktree: { name: string; branch: string; branchCreated: boolean }) => {
+				rolledBackWorktrees.push({ name: worktree.name, branch: worktree.branch, branchCreated: worktree.branchCreated });
+			},
+			// Preserve the shared source fixture for the rollback scenarios below.
+			deleteSourceSession: () => undefined,
 		};
 		const result = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, dependencies, "Resume in the verified replacement.");
 		expect(result.cancelled).toBe(false);
@@ -297,6 +342,15 @@ test("existing worktree migration activates the replacement and rollback restore
 		expect(existsSync(sourceFile)).toBe(true);
 		expect(rollbackRequested).toBe(false);
 		expect(continuations).toEqual(["Resume in the verified replacement."]);
+
+		replacementIdOverride = "mismatched-replacement-id";
+		const mismatchedIdentity = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, dependencies, "Must not run after identity mismatch.");
+		expect(mismatchedIdentity.cancelled).toBe(true);
+		expect(rollbackRequested).toBe(true);
+		expect(existsSync(sourceFile)).toBe(true);
+		expect(existsSync(latestReplacementFile!)).toBe(false);
+		replacementIdOverride = undefined;
+		rollbackRequested = false;
 
 		dependencies.readCurrentRef = () => ({ kind: "branch", value: "changed" } as const);
 		const rolledBack = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, dependencies, "Must not run after rollback.");
@@ -320,11 +374,183 @@ test("existing worktree migration activates the replacement and rollback restore
 		removeTargetBeforeVerification = false;
 		rollbackRequested = false;
 		await mkdir(targetCwd, { recursive: true });
-		dependencies.createWorktree = async () => ({ path: await realpath(targetCwd), repoRoot: sourceCwd, branch: "managed", setupRan: false });
-		const retained = await runWorktreeCommand("managed", ctx, dependencies, "Must not run after managed rollback.");
-		expect(retained.cancelled).toBe(true);
+		dependencies.createWorktree = async (_repository: string, _name: string, options: { branch?: string; startPoint?: string } = {}) => {
+			createOptions = options;
+			return {
+				path: await realpath(targetCwd),
+				repoRoot: sourceCwd,
+				name: "pr-30",
+				branch: "tembo/cancel-builds",
+				branchCreated: false,
+				startPoint: "refs/heads/tembo/cancel-builds",
+				setupRan: false,
+			};
+		};
+		dependencies.readCurrentRef = () => ({ kind: "branch", value: "tembo/cancel-builds" } as const);
+		const managed = await runWorktreeCommand('pr-30 --branch "tembo/cancel-builds" --start-point "origin/tembo/cancel-builds"', ctx, dependencies, "Resume on the requested PR branch.");
+		expect(managed).toMatchObject({ cancelled: false, path: await realpath(targetCwd), branch: "tembo/cancel-builds" });
+		expect(createOptions).toEqual({ branch: "tembo/cancel-builds", startPoint: "origin/tembo/cancel-builds" });
+		expect(continuations.at(-1)).toBe("Resume on the requested PR branch.");
+		expect(rolledBackWorktrees).toEqual([]);
+
+		rollbackRequested = false;
+		dependencies.readCurrentRef = () => ({ kind: "branch", value: "wrong-branch" } as const);
+		const managedRollback = await runWorktreeCommand('pr-30 --branch "tembo/cancel-builds" --start-point "origin/tembo/cancel-builds"', ctx, dependencies, "Must not run after managed rollback.");
+		expect(managedRollback.cancelled).toBe(true);
 		expect(rollbackRequested).toBe(true);
-		expect(notifications.at(-1)).toContain(`worktree retained at ${await realpath(targetCwd)}`);
+		expect(rolledBackWorktrees).toEqual([{ name: "pr-30", branch: "tembo/cancel-builds", branchCreated: false }]);
+		expect(notifications.at(-1)).toContain("Returning to the original session");
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("verified replacement deletes its source session and records a durable tombstone", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-kit-worktree-source-delete-"));
+	try {
+		const sourceCwd = join(directory, "source");
+		const targetCwd = join(directory, "target");
+		await mkdir(sourceCwd, { recursive: true });
+		await mkdir(targetCwd, { recursive: true });
+		const source = SessionManager.create(sourceCwd, join(directory, "source-sessions"));
+		const sourceFile = join(directory, "source.jsonl");
+		writeFileSync(sourceFile, `${JSON.stringify({ type: "session", version: 3, id: source.getSessionId(), timestamp: new Date().toISOString(), cwd: sourceCwd })}\n`);
+		source.setSessionFile(sourceFile);
+		source.appendMessage({ role: "user", content: "move me", timestamp: Date.now() });
+		source.appendCustomEntry("vessup-replaced-session", {
+			previousSessionId: "older-source",
+			previousSessionFile: "/tmp/older-source.jsonl",
+			replacementSessionId: source.getSessionId(),
+		});
+		let replacementFile: string | undefined;
+		const notifications: string[] = [];
+		const ctx = {
+			cwd: sourceCwd,
+			hasUI: true,
+			sessionManager: source,
+			waitForIdle: async () => undefined,
+			ui: { input: async () => undefined, notify: (message: string) => { notifications.push(message); } },
+			switchSession: async (sessionPath: string, options?: { withSession?: (next: ExtensionCommandContext) => Promise<void> }) => {
+				const manager = SessionManager.open(sessionPath);
+				await options?.withSession?.({
+					...ctx,
+					cwd: manager.getCwd(),
+					sessionManager: manager,
+					sendUserMessage: async () => { throw new Error("continuation transport failed"); },
+				} as ExtensionCommandContext);
+				return { cancelled: false };
+			},
+		} as unknown as ExtensionCommandContext;
+		const result = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, {
+			inspectExisting: () => ({ path: realpathSync(targetCwd), repoRoot: sourceCwd, ref: { kind: "branch", value: "feature" } }),
+			readCurrentRef: () => ({ kind: "branch", value: "feature" }),
+			createReplacement: (_ctx, target, previousFile) => {
+				const replacement = SessionManager.forkFrom(previousFile, target.path, join(directory, "replacement-sessions"));
+				replacementFile = replacement.getSessionFile()!;
+				return { sessionId: replacement.getSessionId(), sessionFile: replacementFile };
+			},
+		}, "Continue after replacement.");
+		expect(result.cancelled).toBe(false);
+		expect(notifications.some((message) => message.includes("continuation could not be sent"))).toBe(true);
+		expect(existsSync(sourceFile)).toBe(false);
+		expect(existsSync(replacementFile!)).toBe(true);
+		expect(result.replacedSession).toEqual({
+			previousSessionId: source.getSessionId(),
+			previousSessionFile: sourceFile,
+			replacementSessionId: result.sessionId,
+		});
+		const replacementEntries = SessionManager.open(replacementFile!).getEntries();
+		expect(replacementFromEntries(replacementEntries)).toEqual(result.replacedSession);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("an independently open source session rolls back and preserves the original", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-kit-worktree-source-delete-failure-"));
+	try {
+		const sourceCwd = join(directory, "source");
+		const targetCwd = join(directory, "target");
+		await mkdir(sourceCwd, { recursive: true });
+		await mkdir(targetCwd, { recursive: true });
+		const source = SessionManager.create(sourceCwd, join(directory, "source-sessions"));
+		const sourceFile = join(directory, "source.jsonl");
+		writeFileSync(sourceFile, `${JSON.stringify({ type: "session", version: 3, id: source.getSessionId(), timestamp: new Date().toISOString(), cwd: sourceCwd })}\n`);
+		source.setSessionFile(sourceFile);
+		let replacementFile: string | undefined;
+		let rolledBack = false;
+		const ctx = {
+			cwd: sourceCwd,
+			hasUI: true,
+			sessionManager: source,
+			waitForIdle: async () => undefined,
+			ui: { input: async () => undefined, notify: () => undefined },
+			switchSession: async (sessionPath: string, options?: { withSession?: (next: ExtensionCommandContext) => Promise<void> }) => {
+				const manager = SessionManager.open(sessionPath);
+				const openSource = openSync(sourceFile, "a");
+				try {
+					await options?.withSession?.({
+						...ctx,
+						cwd: manager.getCwd(),
+						sessionManager: manager,
+						switchSession: async () => { rolledBack = true; return { cancelled: false }; },
+					} as ExtensionCommandContext);
+				} finally {
+					closeSync(openSource);
+				}
+				return { cancelled: false };
+			},
+		} as unknown as ExtensionCommandContext;
+		const result = await runWorktreeCommand(`--existing ${JSON.stringify(targetCwd)}`, ctx, {
+			inspectExisting: () => ({ path: realpathSync(targetCwd), repoRoot: sourceCwd, ref: { kind: "branch", value: "feature" } }),
+			readCurrentRef: () => ({ kind: "branch", value: "feature" }),
+			createReplacement: (_ctx, target, previousFile) => {
+				const replacement = SessionManager.forkFrom(previousFile, target.path, join(directory, "replacement-sessions"));
+				replacementFile = replacement.getSessionFile()!;
+				return { sessionId: replacement.getSessionId(), sessionFile: replacementFile };
+			},
+		});
+		expect(result.cancelled).toBe(true);
+		expect(rolledBack).toBe(true);
+		expect(existsSync(sourceFile)).toBe(true);
+		expect(existsSync(replacementFile!)).toBe(false);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("failed replacement-file cleanup retains the managed worktree CWD", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-kit-worktree-cleanup-retain-"));
+	try {
+		const sourceCwd = join(directory, "source");
+		const targetCwd = join(directory, "target");
+		await mkdir(sourceCwd, { recursive: true });
+		await mkdir(targetCwd, { recursive: true });
+		const source = SessionManager.create(sourceCwd, join(directory, "sessions"));
+		const sourceFile = join(directory, "source-session.jsonl");
+		writeFileSync(sourceFile, `${JSON.stringify({ type: "session", version: 3, id: source.getSessionId(), timestamp: new Date().toISOString(), cwd: sourceCwd })}\n`);
+		source.setSessionFile(sourceFile);
+		source.appendMessage({ role: "user", content: "persist", timestamp: Date.now() });
+		const notifications: string[] = [];
+		let worktreeRolledBack = false;
+		const result = await runWorktreeCommand("managed", {
+			cwd: sourceCwd,
+			hasUI: true,
+			sessionManager: source,
+			waitForIdle: async () => undefined,
+			ui: { input: async () => undefined, notify: (message: string) => { notifications.push(message); } },
+			switchSession: async () => ({ cancelled: true }),
+		} as unknown as ExtensionCommandContext, {
+			createWorktree: async () => ({
+				path: await realpath(targetCwd), repoRoot: sourceCwd, name: "managed", branch: "managed",
+				branchCreated: true, startPoint: "HEAD", setupRan: false,
+			}),
+			createReplacement: () => ({ sessionId: "replacement", sessionFile: targetCwd }),
+			rollbackWorktree: () => { worktreeRolledBack = true; },
+		});
+		expect(result.cancelled).toBe(true);
+		expect(worktreeRolledBack).toBe(false);
+		expect(notifications.at(-1)).toContain("Managed worktree retained so that session CWD remains valid");
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
@@ -336,7 +562,7 @@ test("existing selection preserves ownership only for the current managed worktr
 		const owned = join(directory, "owned");
 		const unrelated = join(directory, "unrelated");
 		await Bun.$`mkdir -p ${owned} ${unrelated}`;
-		const marker = { path: owned, repoRoot: directory, branch: "feature" };
+		const marker = { path: owned, repoRoot: directory, name: "owned", branch: "feature", branchCreated: false };
 		const entries = [{ type: "custom", customType: WORKTREE_SESSION_ENTRY, data: marker }];
 
 		expect(inheritedWorktreeOwnership(entries, owned)).toEqual(marker);
@@ -351,9 +577,11 @@ test("existing selection preserves ownership only for the current managed worktr
 });
 
 test("worktree invocation only matches the extension command", () => {
-	expect(parseWorktreeInvocation('/worktree "feature one" --repo /tmp/repo')).toEqual({
-		name: "feature one",
+	expect(parseWorktreeInvocation('/worktree "pr 30" --repo /tmp/repo --branch tembo/cancel-builds --start-point origin/tembo/cancel-builds')).toEqual({
+		name: "pr 30",
 		repository: "/tmp/repo",
+		branch: "tembo/cancel-builds",
+		startPoint: "origin/tembo/cancel-builds",
 	});
 	expect(parseWorktreeInvocation("please create a worktree")).toBeUndefined();
 	expect(() => parseWorktreeCommandArgs("one two")).toThrow("Usage");

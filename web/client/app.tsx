@@ -7,7 +7,6 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  ExternalLink,
   FolderGit2,
   GitFork,
   ListFilter,
@@ -50,6 +49,39 @@ import { assertClientPromptPayloadFits } from "./image-payload";
 import { displaySessionStatus } from "./session-status";
 
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
+
+function semanticEntryIdentity(entry: SemanticEntry): string | undefined {
+  const message = entry.message;
+  if (!message) return undefined;
+  if (typeof message.id === "string") return `id:${message.id}`;
+  const role = typeof message.role === "string" ? message.role : "";
+  const timestamp = typeof message.timestamp === "number" || typeof message.timestamp === "string" ? String(message.timestamp) : "";
+  if (timestamp) return `${role}:${timestamp}`;
+  return undefined;
+}
+
+function preserveSemanticEntryKeys(previous: SemanticEntry[], incoming: SemanticEntry[]): SemanticEntry[] {
+  const previousIds = new Map<string, string>();
+  for (const entry of previous) {
+    const identity = semanticEntryIdentity(entry);
+    if (identity && entry.id) previousIds.set(identity, entry.id);
+  }
+  return incoming.map((entry) => {
+    const identity = semanticEntryIdentity(entry);
+    const id = identity ? previousIds.get(identity) : undefined;
+    return id ? { ...entry, id } : entry;
+  });
+}
+
+function mergeSemanticHistory(previous: SemanticEntry[], incoming: SemanticEntry[]): SemanticEntry[] {
+  const reconciled = preserveSemanticEntryKeys(previous, incoming);
+  const incomingIdentities = new Set(reconciled.map(semanticEntryIdentity).filter((identity): identity is string => Boolean(identity)));
+  const retained = previous.filter((entry) => {
+    const identity = semanticEntryIdentity(entry);
+    return !identity || !incomingIdentities.has(identity);
+  });
+  return [...retained, ...reconciled];
+}
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
 
@@ -201,6 +233,8 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
   const [repository, setRepository] = React.useState("");
   const [name, setName] = React.useState("");
   const [worktreeName, setWorktreeName] = React.useState("");
+  const [worktreeBranch, setWorktreeBranch] = React.useState("");
+  const [worktreeStartPoint, setWorktreeStartPoint] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [createError, setCreateError] = React.useState<string | null>(null);
   const repositoryListId = React.useId();
@@ -209,6 +243,8 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
     setRepository(baseSession?.repositoryRoot ?? baseSession?.cwd ?? "");
     setName("");
     setWorktreeName("");
+    setWorktreeBranch("");
+    setWorktreeStartPoint("");
     setBusy(false);
     setCreateError(null);
   }, [baseSession?.cwd, baseSession?.repositoryRoot, open]);
@@ -239,9 +275,20 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
           </div>
           <div className="space-y-2">
             <label className="text-xs uppercase tracking-wider text-zinc-500">worktree name</label>
-            <Input value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional branch and worktree name" />
-            <p className="text-xs text-zinc-500">When set, the repository must be Git-backed. Creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code> from its current <code>HEAD</code>.</p>
+            <Input value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional managed directory name" />
+            <p className="text-xs text-zinc-500">Creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The branch can have a different, namespaced name.</p>
           </div>
+          {worktreeName.trim() && <>
+            <div className="space-y-2">
+              <label className="text-xs uppercase tracking-wider text-zinc-500">local branch</label>
+              <Input value={worktreeBranch} onChange={(event) => { setWorktreeBranch(event.target.value); setCreateError(null); }} placeholder={`Defaults to ${worktreeName.trim()}`} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs uppercase tracking-wider text-zinc-500">start point</label>
+              <Input value={worktreeStartPoint} onChange={(event) => { setWorktreeStartPoint(event.target.value); setCreateError(null); }} placeholder="Optional, e.g. origin/owner/topic" />
+              <p className="text-xs text-zinc-500">Used only when creating a missing local branch. A remote-tracking ref configures its upstream.</p>
+            </div>
+          </>}
           <div className="space-y-2">
             <label className="text-xs uppercase tracking-wider text-zinc-500">session name</label>
             <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Optional display name" />
@@ -259,6 +306,8 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
                   cwd: repository.trim(),
                   name: name.trim() || undefined,
                   worktreeName: worktreeName.trim() || undefined,
+                  worktreeBranch: worktreeName.trim() && worktreeBranch.trim() ? worktreeBranch.trim() : undefined,
+                  worktreeStartPoint: worktreeName.trim() && worktreeStartPoint.trim() ? worktreeStartPoint.trim() : undefined,
                 });
                 onOpenChange(false);
               } catch (cause) {
@@ -667,7 +716,7 @@ function SessionListItem({
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1">
         <div className="truncate text-sm font-medium text-zinc-100">{sessionTitle(session)}</div>
         <SessionActionsMenu session={session} actions={actions} />
-        <div className="truncate text-xs text-zinc-500">{sessionSubtitle(session)}</div>
+        <div className="truncate text-left text-xs text-zinc-500" dir="rtl" title={sessionSubtitle(session)}>{sessionSubtitle(session)}</div>
         <span className={cn(
           "inline-flex justify-self-end rounded-full border px-2 py-0.5 text-[10px] font-medium capitalize leading-none",
           sessionStatusClasses(session),
@@ -675,8 +724,7 @@ function SessionListItem({
           {sessionStatusLabel(session)}
         </span>
         {session.pullRequest && (
-          <div className="col-span-2 mt-0.5 flex min-w-0 items-center gap-1.5 text-xs">
-            <ExternalLink className="h-3.5 w-3.5 shrink-0 text-sky-300" aria-hidden="true" />
+          <div className="col-span-2 mt-0.5 flex min-w-0 items-center text-xs">
             <a
               className="min-w-0 truncate text-sky-300 hover:text-sky-200 hover:underline"
               href={session.pullRequest.url}
@@ -731,6 +779,9 @@ export function App() {
   );
   const [entries, setEntries] = React.useState<SemanticEntry[]>([]);
   const [streamingMessage, setStreamingMessage] = React.useState<Record<string, unknown> | null>(null);
+  const [streamingMessageKey, setStreamingMessageKey] = React.useState<string | null>(null);
+  const streamingMessageKeyRef = React.useRef<string | null>(null);
+  const activeSessionIdRef = React.useRef<string | null>(null);
   const [activeTools, setActiveTools] = React.useState<ActiveTool[]>([]);
   const [connected, setConnected] = React.useState(false);
   const [transcriptLoading, setTranscriptLoading] = React.useState(Boolean(selectedId));
@@ -739,6 +790,7 @@ export function App() {
   const socketRef = React.useRef<SessionSocket | null>(null);
   const selectedIdRef = React.useRef<string | null>(selectedId);
   const reconnectTimerRef = React.useRef<number | null>(null);
+  const queueSyncRef = React.useRef<{ requestId: string; sessionId: string; socket: SessionSocket; timer: number } | null>(null);
   const connectionGenerationRef = React.useRef(0);
   const optionsGenerationRef = React.useRef(0);
   const pendingRequestsRef = React.useRef(new Map<string, { socket: SessionSocket; optimisticId: string; resolve: (data?: unknown) => void; reject: (error: Error) => void }>());
@@ -800,6 +852,11 @@ export function App() {
 
   const connect = React.useCallback(async (sessionId: string) => {
     const generation = ++connectionGenerationRef.current;
+    if (queueSyncRef.current) {
+      window.clearTimeout(queueSyncRef.current.timer);
+      queueSyncRef.current = null;
+    }
+    const switchingSessions = activeSessionIdRef.current !== sessionId;
     const previousSocket = socketRef.current;
     socketRef.current = null;
     if (previousSocket) {
@@ -807,12 +864,17 @@ export function App() {
       previousSocket.close();
     }
     if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
     setConnected(false);
     setTranscriptLoading(true);
-    setEntries([]);
-    setStreamingMessage(null);
-    setActiveTools([]);
-    setQueuedMessages([]);
+    if (switchingSessions) {
+      setEntries([]);
+      setStreamingMessage(null);
+      setStreamingMessageKey(null);
+      streamingMessageKeyRef.current = null;
+      setActiveTools([]);
+      setQueuedMessages([]);
+    }
     const socket = await openSessionSocket((message) => {
       if (generation !== connectionGenerationRef.current || selectedIdRef.current !== sessionId) return;
       if (!message || typeof message !== "object" || !("type" in message)) return;
@@ -845,7 +907,7 @@ export function App() {
       if (type === "server.history") {
         const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[] };
         if (payload.sessionId === selectedIdRef.current) {
-          if (payload.entries) setEntries(payload.entries);
+          if (payload.entries) setEntries((previous) => switchingSessions ? payload.entries! : mergeSemanticHistory(previous, payload.entries!));
           setTranscriptLoading(false);
         }
         return;
@@ -888,6 +950,10 @@ export function App() {
         setCurrentSession((current) => current?.id === payload.sessionId ? applyUpdate(current) : current);
         setSessions((previous) => previous.map((session) => session.id === payload.sessionId ? applyUpdate(session) : session));
       } else if (eventType === "web_queue_update") {
+        if (typeof event.syncRequestId === "string" && queueSyncRef.current?.requestId === event.syncRequestId) {
+          window.clearTimeout(queueSyncRef.current.timer);
+          queueSyncRef.current = null;
+        }
         setQueuedMessages(Array.isArray(event.queue) ? event.queue.filter((item): item is WebQueuedMessage => Boolean(item) && typeof item === "object" && typeof (item as WebQueuedMessage).id === "string" && typeof (item as WebQueuedMessage).message === "string") : []);
       } else if (eventType === "web_queue_delivery" && event.item && typeof event.item === "object") {
         const item = event.item as WebQueuedMessage;
@@ -909,14 +975,24 @@ export function App() {
                 ...(item.images ?? []).map((image) => ({ ...image })),
               ],
             },
-          }].slice(-600));
+          }]);
         } else if (event.phase === "failed") {
           setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
         }
       } else if (eventType === "message_start" && event.message && typeof event.message === "object" && (event.message as Record<string, unknown>).role === "assistant") {
-        setStreamingMessage(event.message as Record<string, unknown>);
+        const assistant = event.message as Record<string, unknown>;
+        const key = String(assistant.id ?? assistant.timestamp ?? `streaming-${crypto.randomUUID()}`);
+        streamingMessageKeyRef.current = key;
+        setStreamingMessageKey(key);
+        setStreamingMessage(assistant);
       } else if (eventType === "message_update") {
         if (event.message && typeof event.message === "object") {
+          if (!streamingMessageKeyRef.current) {
+            const partial = event.message as Record<string, unknown>;
+            const key = String(partial.id ?? partial.timestamp ?? `streaming-${crypto.randomUUID()}`);
+            streamingMessageKeyRef.current = key;
+            setStreamingMessageKey(key);
+          }
           // Pi includes the authoritative partial assistant message on every
           // update. Rendering it directly avoids reconstructing streams from
           // provider-specific deltas (especially tool-call deltas).
@@ -926,8 +1002,12 @@ export function App() {
         }
       } else if (eventType === "message_end" && event.message && typeof event.message === "object") {
         const finalized = event.message as Record<string, unknown>;
+        const finalizedStreamingKey = streamingMessageKeyRef.current;
         setEntries((previous) => {
-          const entry = { id: crypto.randomUUID(), type: "message", timestamp: new Date().toISOString(), message: finalized };
+          const stableAssistantId = finalized.role === "assistant"
+            ? finalizedStreamingKey ?? String(finalized.id ?? finalized.timestamp ?? crypto.randomUUID())
+            : crypto.randomUUID();
+          const entry = { id: stableAssistantId, type: "message", timestamp: new Date().toISOString(), message: finalized };
           if (finalized.role === "user") {
             const confirmedText = messageText(finalized);
             let optimisticIndex = previous.findIndex((item) =>
@@ -938,14 +1018,19 @@ export function App() {
               const next = [...previous];
               next[optimisticIndex] = {
                 ...entry,
+                id: previous[optimisticIndex]!.id,
                 message: preserveOptimisticAttachments(finalized, previous[optimisticIndex]!),
               };
               return next;
             }
           }
-          return [...previous, entry].slice(-600);
+          return [...previous, entry];
         });
-        if (finalized.role === "assistant") setStreamingMessage(null);
+        if (finalized.role === "assistant") {
+          setStreamingMessage(null);
+          setStreamingMessageKey(null);
+          streamingMessageKeyRef.current = null;
+        }
       } else if (eventType === "tool_execution_start") {
         const id = String(event.toolCallId ?? crypto.randomUUID());
         setActiveTools((previous) => [...previous.filter((tool) => tool.id !== id), { id, name: String(event.toolName ?? "tool"), args: event.args, running: true }]);
@@ -982,8 +1067,54 @@ export function App() {
     });
     socket.send({ type: "client.subscribe", sessionId });
     socketRef.current = socket;
+    activeSessionIdRef.current = sessionId;
     setConnected(true);
   }, [rejectPendingForSocket]);
+
+  const syncSelectedQueue = React.useCallback(() => {
+    const sessionId = selectedIdRef.current;
+    if (!sessionId) return;
+    const socket = socketRef.current;
+    if (!socket) {
+      if (!reconnectTimerRef.current) void connect(sessionId);
+      return;
+    }
+    const pending = queueSyncRef.current;
+    if (pending?.sessionId === sessionId && pending.socket === socket) return;
+    if (pending) window.clearTimeout(pending.timer);
+    const requestId = crypto.randomUUID();
+    const timer = window.setTimeout(() => {
+      if (queueSyncRef.current?.requestId !== requestId) return;
+      queueSyncRef.current = null;
+      if (selectedIdRef.current === sessionId && socketRef.current === socket) void connect(sessionId);
+    }, 5_000);
+    queueSyncRef.current = { requestId, sessionId, socket, timer };
+    try {
+      socket.send({ type: "client.sync_queue", requestId, sessionId });
+    } catch {
+      window.clearTimeout(timer);
+      if (queueSyncRef.current?.requestId === requestId) queueSyncRef.current = null;
+      if (!reconnectTimerRef.current) void connect(sessionId);
+    }
+  }, [connect]);
+
+  React.useEffect(() => {
+    const syncWhenVisible = () => {
+      if (document.visibilityState === "visible") syncSelectedQueue();
+    };
+    const interval = window.setInterval(syncWhenVisible, 60_000);
+    document.addEventListener("visibilitychange", syncWhenVisible);
+    window.addEventListener("focus", syncWhenVisible);
+    window.addEventListener("online", syncWhenVisible);
+    window.addEventListener("pageshow", syncWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", syncWhenVisible);
+      window.removeEventListener("focus", syncWhenVisible);
+      window.removeEventListener("online", syncWhenVisible);
+      window.removeEventListener("pageshow", syncWhenVisible);
+    };
+  }, [syncSelectedQueue]);
 
   React.useEffect(() => {
     if (!selectedId) return;
@@ -993,6 +1124,8 @@ export function App() {
       connectionGenerationRef.current += 1;
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
+      if (queueSyncRef.current) window.clearTimeout(queueSyncRef.current.timer);
+      queueSyncRef.current = null;
       const socket = socketRef.current;
       socketRef.current = null;
       if (socket) {
@@ -1077,6 +1210,13 @@ export function App() {
     const promptFrame = { type: "client.prompt", requestId, sessionId, message, images, streamingBehavior } satisfies ClientPromptMessage;
     assertClientPromptPayloadFits(promptFrame);
     const queuedFollowUp = streamingBehavior === "followUp" && selectedSession?.status === "working";
+    const controlCommand = isWebReloadCommand(message) || /^\/worktree(?:\s|$)/.test(message.trim());
+    const optimisticallyWorking = !queuedFollowUp && !controlCommand && selectedSession?.status !== "working";
+    const previousStatus = selectedSession?.status;
+    if (optimisticallyWorking) {
+      setCurrentSession((current) => current?.id === sessionId ? { ...current, status: "working" } : current);
+      setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, status: "working" } : session));
+    }
     const optimisticId = `optimistic-${requestId}`;
     const optimistic: SemanticEntry = {
       id: optimisticId,
@@ -1091,17 +1231,28 @@ export function App() {
         ],
       },
     };
-    if (!queuedFollowUp) setEntries((previous) => [...previous, optimistic].slice(-600));
-    const responseData = await new Promise<unknown>((resolve, reject) => {
-      pendingRequestsRef.current.set(requestId, { socket, optimisticId, resolve, reject });
-      try {
-        socket.send(promptFrame);
-      } catch (cause) {
-        pendingRequestsRef.current.delete(requestId);
-        if (!queuedFollowUp) setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
-        reject(cause instanceof Error ? cause : new Error(String(cause)));
+    if (!queuedFollowUp) setEntries((previous) => [...previous, optimistic]);
+    let responseData: unknown;
+    let promptFrameSent = false;
+    try {
+      responseData = await new Promise<unknown>((resolve, reject) => {
+        pendingRequestsRef.current.set(requestId, { socket, optimisticId, resolve, reject });
+        try {
+          socket.send(promptFrame);
+          promptFrameSent = true;
+        } catch (cause) {
+          pendingRequestsRef.current.delete(requestId);
+          if (!queuedFollowUp) setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+          reject(cause instanceof Error ? cause : new Error(String(cause)));
+        }
+      });
+    } catch (cause) {
+      if (optimisticallyWorking && previousStatus && !promptFrameSent) {
+        setCurrentSession((current) => current?.id === sessionId ? { ...current, status: previousStatus } : current);
+        setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, status: previousStatus } : session));
       }
-    });
+      throw cause;
+    }
     if (isWebReloadCommand(message)) {
       setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
       const generation = ++optionsGenerationRef.current;
@@ -1390,6 +1541,7 @@ export function App() {
             session={selectedSession}
             entries={entries}
             streamingMessage={streamingMessage}
+            streamingMessageKey={streamingMessageKey}
             tools={activeTools}
             error={error}
             connected={connected}

@@ -16,6 +16,7 @@ const FORK_COMMAND_TIMEOUT_MS = 35_000;
 const WORKTREE_COMMAND_TIMEOUT_MS = 11 * 60_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 11 * 60_000;
 let commandHelloCapability: Promise<boolean> | undefined;
+let worktreeRefsCapability: Promise<boolean> | undefined;
 
 export function commandHelloType(health: unknown): "client.hello" | "client.command_hello" {
   const capabilities = health && typeof health === "object" && "capabilities" in health
@@ -24,6 +25,20 @@ export function commandHelloType(health: unknown): "client.hello" | "client.comm
   return capabilities && typeof capabilities === "object" && "commandHello" in capabilities && (capabilities as { commandHello?: unknown }).commandHello === true
     ? "client.command_hello"
     : "client.hello";
+}
+
+export function healthSupportsWorktreeRefs(health: unknown): boolean {
+  const capabilities = health && typeof health === "object" && "capabilities" in health
+    ? (health as { capabilities?: unknown }).capabilities
+    : undefined;
+  return Boolean(capabilities && typeof capabilities === "object" && "worktreeRefs" in capabilities && (capabilities as { worktreeRefs?: unknown }).worktreeRefs === true);
+}
+
+async function supportsWorktreeRefs(): Promise<boolean> {
+  worktreeRefsCapability ??= fetch("/api/health", { cache: "no-store" })
+    .then(async (response) => response.ok && healthSupportsWorktreeRefs(await response.json()))
+    .catch(() => false);
+  return await worktreeRefsCapability;
 }
 
 async function supportsCommandHello(): Promise<boolean> {
@@ -37,7 +52,7 @@ async function supportsCommandHello(): Promise<boolean> {
 }
 
 export function sessionCommandTimeout(command: AgentCommand | RpcSessionCommand): number {
-  if (command.type === "create_worktree" || command.type === "reload") return WORKTREE_COMMAND_TIMEOUT_MS;
+  if (command.type === "create_worktree" || command.type === "create_worktree_v2" || command.type === "reload") return WORKTREE_COMMAND_TIMEOUT_MS;
   if (command.type === "clone" || command.type === "fork") return FORK_COMMAND_TIMEOUT_MS;
   return command.type === "compact" || command.type === "bash"
     ? LONG_RUNNING_COMMAND_TIMEOUT_MS
@@ -94,6 +109,9 @@ export async function listSessions(): Promise<WebSession[]> {
 }
 
 export async function createSession(request: CreateSessionRequest): Promise<WebSession> {
+  if ((request.worktreeBranch || request.worktreeStartPoint) && !await supportsWorktreeRefs()) {
+    throw new Error("The running Pi Web daemon must be updated before creating a worktree with branch or start-point options");
+  }
   const data = await tryJson<SessionActionResponse>(["/api/sessions"], {
     method: "POST",
     body: JSON.stringify(request),
@@ -212,8 +230,13 @@ export async function forkSessionViaCommand(sessionId: string, entryId: string):
   return sendSessionCommand(sessionId, { type: "fork", entryId });
 }
 
-export async function createSessionWorktreeViaCommand(sessionId: string, repository: string, name: string): Promise<unknown> {
-  return sendSessionCommand(sessionId, { type: "create_worktree", repository, name });
+export async function createSessionWorktreeViaCommand(
+  sessionId: string,
+  repository: string,
+  name: string,
+  options: { branch?: string; startPoint?: string } = {},
+): Promise<unknown> {
+  return sendSessionCommand(sessionId, { type: "create_worktree", repository, name, ...options });
 }
 
 export async function openSessionSocket(onMessage: (message: unknown) => void): Promise<SessionSocket> {
