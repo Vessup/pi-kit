@@ -8,6 +8,7 @@ import {
 	isFailedStopReason,
 	MAX_WEB_STREAMING_CHARS,
 	parsePersistedUsageState,
+	subagentModelGuidance,
 } from "../extensions/subagents.ts";
 
 const usage = {
@@ -58,6 +59,21 @@ test("available subagent models honor a configured scope", () => {
 		[{ provider: "openai", id: "small" }],
 	);
 	assert.equal(filterModelsToScope(available, []), available);
+});
+
+test("subagent model guidance exposes exact choices and inheritance", () => {
+	const guidance = subagentModelGuidance(
+		{ provider: "openai-codex", id: "gpt-5.6-sol" },
+		[
+			{ provider: "openai-codex", id: "gpt-5.6-luna" },
+			{ provider: "openai-codex", id: "gpt-5.6-sol" },
+			{ provider: "openai-codex", id: "gpt-5.6-sol" },
+		],
+	);
+	assert.match(guidance, /inherits openai-codex\/gpt-5\.6-sol when model is omitted/);
+	assert.match(guidance, /openai-codex\/gpt-5\.6-luna, openai-codex\/gpt-5\.6-sol/);
+	assert.doesNotMatch(guidance, /gpt-5\.6-sol, openai-codex\/gpt-5\.6-sol/);
+	assert.match(guidance, /Never shorten, generalize, or invent a model ID/);
 });
 
 test("streaming subagent output remains bounded to its newest text", () => {

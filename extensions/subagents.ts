@@ -434,8 +434,36 @@ function truncateToolOutput(text: string): string {
 	return `${output}\n\n[Output truncated: ${bytes - Buffer.byteLength(output, "utf8")} bytes omitted. Re-read a specific subagent or use the transcript modal for details.]`;
 }
 
-function modelName(model: AgentModel | undefined): string {
+function modelName(model: { provider: string; id: string } | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "no-model";
+}
+
+export function subagentModelGuidance(
+	current: { provider: string; id: string } | undefined,
+	available: readonly { provider: string; id: string }[],
+): string {
+	const choices = [...new Set(available.map(modelName))];
+	const inherited = modelName(current);
+	return [
+		"Subagent model selection for this session:",
+		`- subagent_create inherits ${inherited} when model is omitted.`,
+		"- Only pass model when intentionally overriding the inherited model.",
+		`- Exact available provider/model IDs: ${choices.length > 0 ? choices.join(", ") : "none"}.`,
+		"- Never shorten, generalize, or invent a model ID.",
+	].join("\n");
+}
+
+function unavailableModelMessage(
+	requested: string,
+	available: readonly { provider: string; id: string }[],
+	current: { provider: string; id: string } | undefined,
+	withinScope: boolean,
+): string {
+	const choices = [...new Set(available.map(modelName))];
+	const scope = withinScope ? " within the session scope" : "";
+	const allowed = choices.length > 0 ? choices.join(", ") : "none";
+	const inherit = current ? ` Omit model to inherit ${modelName(current)}.` : "";
+	return `Model is unavailable${scope}: ${requested}. Exact available models: ${allowed}.${inherit}`;
 }
 
 function asFooterUsage(usage: Usage): FooterUsage {
@@ -666,8 +694,7 @@ class SubagentManager {
 			const id = requested.slice(slash + 1);
 			const model = available.find((item) => item.provider === provider && item.id === id);
 			if (model) return model;
-			const qualifier = ctx.scopedModels.length > 0 ? "outside the session model scope or unavailable" : "unavailable";
-			throw new Error(`Model is ${qualifier}: ${requested}`);
+			throw new Error(unavailableModelMessage(requested, available, ctx.model, ctx.scopedModels.length > 0));
 		}
 
 		const matches = available.filter((item) => item.id === requested || item.name === requested);
@@ -675,7 +702,7 @@ class SubagentManager {
 		if (matches.length > 1) {
 			throw new Error(`Model name is ambiguous; use provider/model: ${matches.map(modelName).join(", ")}`);
 		}
-		throw new Error(`Model is unavailable${ctx.scopedModels.length > 0 ? " within the session scope" : ""}: ${requested}`);
+		throw new Error(unavailableModelMessage(requested, available, ctx.model, ctx.scopedModels.length > 0));
 	}
 
 	private scopedEffort(ctx: ExtensionContext, model: AgentModel | undefined): SubagentEffort | undefined {
@@ -1605,7 +1632,7 @@ const EffortSchema = stringEnum(THINKING_LEVELS, {
 const CreateParams = Type.Object({
 	prompt: Type.String({ description: "Complete task prompt for the new isolated subagent" }),
 	name: Type.Optional(Type.String({ description: "Short stable name used to address the subagent" })),
-	model: Type.Optional(Type.String({ description: "Model as provider/model-id, or an unambiguous model id" })),
+	model: Type.Optional(Type.String({ description: "Exact provider/model-id or exact unambiguous model id. Omit to inherit the current model; never use a shortened family alias." })),
 	effort: Type.Optional(EffortSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory, relative to the main session unless absolute" })),
 });
@@ -1632,7 +1659,7 @@ const SendParams = Type.Object({
 
 const ConfigureParams = Type.Object({
 	id: Type.String({ description: "Subagent id" }),
-	model: Type.Optional(Type.String({ description: "New model as provider/model-id, or an unambiguous model id" })),
+	model: Type.Optional(Type.String({ description: "Exact new provider/model-id or exact unambiguous model id. Omit to retain the current model; never use a shortened family alias." })),
 	effort: Type.Optional(EffortSchema),
 });
 
@@ -1668,12 +1695,24 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 	};
 
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (!pi.getActiveTools().includes("subagent_create")) return;
+		let available: readonly { provider: string; id: string }[];
+		try {
+			available = await manager.availableModels(ctx);
+		} catch {
+			available = ctx.model ? [ctx.model] : [];
+		}
+		return { systemPrompt: `${event.systemPrompt}\n\n${subagentModelGuidance(ctx.model, available)}` };
+	});
+
 	pi.registerTool({
 		name: "subagent_create",
 		label: "Create subagent",
 		description: `Create a background subagent with an isolated context, model, and reasoning effort. Returns immediately after startup. Up to ${MAX_SUBAGENTS} live subagent sessions are allowed.`,
 		promptSnippet: "Create a background subagent with a chosen prompt, model, and effort",
 		promptGuidelines: [
+			"When calling subagent_create, omit model to inherit the current model unless deliberately choosing one of the exact session-available provider/model IDs listed in the system prompt; never shorten or invent a model ID.",
 			"After subagent_create returns, use subagent_read with its default wait roughly every 15–30 seconds while work continues; briefly tell the user about meaningful progress between polls without narrating every event.",
 			"Wait for subagent_create to return before calling another subagent management tool for that id.",
 			"Use subagent_send with urgent only when the current approach must change immediately; use normal for work that can wait until the current run finishes.",
