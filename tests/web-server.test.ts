@@ -757,14 +757,28 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		updatedAt: Date.now(),
 		messageCount: 0,
 	};
+	let resolveSnapshot!: () => void;
 	let resolveSubscribed!: () => void;
 	let resolveRegistered!: () => void;
 	let resolveRenamed!: () => void;
 	let resolveBranch!: () => void;
+	let resolveWorking!: () => void;
+	let resolveIdle!: () => void;
+	let resolvePreview!: () => void;
+	let resolveCompactionStarted!: () => void;
+	let resolveCompactionEnded!: () => void;
+	const snapshot = new Promise<void>((resolve) => { resolveSnapshot = resolve; });
 	const subscribed = new Promise<void>((resolve) => { resolveSubscribed = resolve; });
 	const registered = new Promise<void>((resolve) => { resolveRegistered = resolve; });
 	const renamed = new Promise<void>((resolve) => { resolveRenamed = resolve; });
 	const branchUpdated = new Promise<void>((resolve) => { resolveBranch = resolve; });
+	const working = new Promise<void>((resolve) => { resolveWorking = resolve; });
+	const idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
+	const previewUpdated = new Promise<void>((resolve) => { resolvePreview = resolve; });
+	const compactionStarted = new Promise<void>((resolve) => { resolveCompactionStarted = resolve; });
+	const compactionEnded = new Promise<void>((resolve) => { resolveCompactionEnded = resolve; });
+	let observedWorking = false;
+	let observedCompaction = false;
 	let timeout: ReturnType<typeof setTimeout>;
 	const timedOut = new Promise<never>((_resolve, reject) => {
 		timeout = setTimeout(() => {
@@ -775,27 +789,146 @@ test("TUI metadata changes update every connected web catalog", async () => {
 	});
 	client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
 	client.onmessage = ({ data }) => {
-		const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; session?: { id?: string; name?: string; branch?: string } };
-		if (message.type === "server.snapshot") client.send(JSON.stringify({ type: "client.subscribe", sessionId: selectedId }));
+		const message = JSON.parse(String(data)) as {
+			type?: string;
+			sessionId?: string;
+			session?: { id?: string; name?: string; branch?: string; status?: string; preview?: string; compaction?: { reason?: string } };
+		};
+		if (message.type === "server.snapshot") resolveSnapshot();
 		if (message.type === "server.history" && message.sessionId === selectedId) resolveSubscribed();
 		if (message.type !== "server.session" || message.session?.id !== tuiId) return;
 		if (message.session.name === "Before rename") resolveRegistered();
 		if (message.session.name === "Renamed in TUI") resolveRenamed();
 		if (message.session.branch === "feature/live-metadata") resolveBranch();
+		if (message.session.status === "working" && !message.session.compaction) {
+			observedWorking = true;
+			resolveWorking();
+		}
+		if (observedWorking && message.session.status === "idle" && !message.session.compaction) resolveIdle();
+		if (message.session.name === "Preview barrier" && message.session.preview === "Latest assistant preview") resolvePreview();
+		if (message.session.status === "working" && message.session.compaction?.reason === "overflow") {
+			observedCompaction = true;
+			resolveCompactionStarted();
+		}
+		if (observedCompaction && message.session.status === "idle" && !message.session.compaction) resolveCompactionEnded();
 	};
 	try {
-		await Promise.race([subscribed, timedOut]);
+		await Promise.race([snapshot, timedOut]);
 		await Promise.race([agentOpened, timedOut]);
+		// Register before subscribing. Catalog sockets must not miss sessions created
+		// in the gap between their snapshot and selected-session subscription.
 		agent.send(JSON.stringify({ type: "agent.hello", session: tuiSession, entries: [] }));
 		await Promise.race([registered, timedOut]);
+		client.send(JSON.stringify({ type: "client.subscribe", sessionId: selectedId }));
+		await Promise.race([subscribed, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "session_info_changed", name: "Renamed in TUI" } }));
 		await Promise.race([renamed, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.update", session: { ...tuiSession, name: "Renamed in TUI", branch: "feature/live-metadata", updatedAt: Date.now() } }));
 		await Promise.race([branchUpdated, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "agent_start" } }));
+		await Promise.race([working, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "agent_end" } }));
+		await Promise.race([idle, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "message_end", message: { role: "assistant", content: "Latest assistant preview" } } }));
+		agent.send(JSON.stringify({ type: "agent.update", session: { ...tuiSession, name: "Renamed in TUI", branch: "feature/live-metadata", preview: "Stale first preview", updatedAt: Date.now() } }));
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "session_info_changed", name: "Preview barrier" } }));
+		await Promise.race([previewUpdated, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "compaction_start", reason: "overflow", startedAt: Date.now() } }));
+		await Promise.race([compactionStarted, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "compaction_end", aborted: false, willRetry: false } }));
+		await Promise.race([compactionEnded, timedOut]);
 	} finally {
 		clearTimeout(timeout);
 		client.close();
 		agent.close();
+	}
+}, 10_000);
+
+test("managed sessions are published only after their runtime identity is final", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-final-managed-id-test-"));
+	const fakeBin = join(tempDir, "bin");
+	const project = join(tempDir, "project");
+	const agentDir = join(tempDir, "pi-agent");
+	const statePath = join(tempDir, "web", "server.json");
+	const finalId = `final-${crypto.randomUUID()}`;
+	const startupStartedFile = join(tempDir, "startup-started");
+	await mkdir(fakeBin, { recursive: true });
+	await mkdir(project, { recursive: true });
+	const fakePi = join(fakeBin, "pi");
+	await writeFile(fakePi, `#!/usr/bin/env bun
+import { createInterface } from "node:readline";
+const finalId = ${JSON.stringify(finalId)};
+const startupStartedFile = ${JSON.stringify(startupStartedFile)};
+let sessionFile;
+let startupDelayed = false;
+const lines = createInterface({ input: process.stdin });
+for await (const line of lines) {
+  const request = JSON.parse(line);
+  let data;
+  if (request.type === "get_state") {
+    if (!startupDelayed) {
+      startupDelayed = true;
+      await Bun.write(startupStartedFile, "started");
+      await Bun.sleep(200);
+    }
+    data = { sessionId: finalId, sessionFile, messageCount: 0, isStreaming: false };
+  } else if (request.type === "switch_session") {
+    sessionFile = request.sessionPath;
+  } else if (request.type === "get_entries") data = { entries: [], leafId: null };
+  else if (request.type === "get_session_stats") data = {};
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+}
+`);
+	await chmod(fakePi, 0o755);
+	child = Bun.spawn({
+		cmd: ["bun", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const client = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+	const publishedIds: string[] = [];
+	let resolveSnapshot!: () => void;
+	let resolveFinal!: () => void;
+	const snapshot = new Promise<void>((resolve) => { resolveSnapshot = resolve; });
+	const finalPublished = new Promise<void>((resolve) => { resolveFinal = resolve; });
+	client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+	client.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; session?: { id?: string; source?: string } };
+		if (message.type === "server.snapshot") resolveSnapshot();
+		if (message.type === "server.session" && message.session?.id) {
+			publishedIds.push(message.session.id);
+			if (message.session.id === finalId) resolveFinal();
+		}
+	};
+	try {
+		await Promise.race([snapshot, Bun.sleep(2_000).then(() => { throw new Error("managed identity observer did not receive a snapshot"); })]);
+		const creation = fetch(`http://127.0.0.1:${port}/api/sessions`, {
+			method: "POST",
+			headers: { "content-type": "application/json", Origin: `http://127.0.0.1:${port}` },
+			body: JSON.stringify({ cwd: project }),
+		});
+		const startupDeadline = Date.now() + 2_000;
+		while (Date.now() < startupDeadline) {
+			try {
+				if (await readFile(startupStartedFile, "utf8") === "started") break;
+			} catch {
+				// The fake runtime has not received its first startup request yet.
+			}
+			await Bun.sleep(10);
+		}
+		expect(await readFile(startupStartedFile, "utf8")).toBe("started");
+		const provisionalCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ cwd: string }> };
+		expect(provisionalCatalog.sessions.filter((session) => session.cwd === project)).toEqual([]);
+		const response = await creation;
+		const body = await response.text();
+		if (response.status !== 201) throw new Error(`Managed session creation failed with ${response.status}: ${body}`);
+		await Promise.race([finalPublished, Bun.sleep(2_000).then(() => { throw new Error(`final managed identity was not published; response=${body}; observed=${publishedIds.join(",")}`); })]);
+		await Bun.sleep(100);
+		expect(publishedIds.length).toBeGreaterThan(0);
+		expect(publishedIds.every((id) => id === finalId)).toBe(true);
+	} finally {
+		client.close();
 	}
 }, 10_000);
 
@@ -1013,6 +1146,7 @@ test("resuming a selected saved session keeps its existing client subscription",
 	await mkdir(fakeBin, { recursive: true });
 	const sessionId = `resume-${crypto.randomUUID()}`;
 	const sessionFile = join(sessionsDir, `${sessionId}.jsonl`);
+	const abortDeliveryFile = join(tempDir, "abort-delivered");
 	await writeFile(sessionFile, [
 		JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: project, timestamp: new Date().toISOString() }),
 		JSON.stringify({ id: "saved-entry", type: "message", message: { role: "user", content: "saved history" } }),
@@ -1022,9 +1156,11 @@ test("resuming a selected saved session keeps its existing client subscription",
 import { createInterface } from "node:readline";
 const sessionId = ${JSON.stringify(sessionId)};
 const sessionFile = ${JSON.stringify(sessionFile)};
+const abortDeliveryFile = ${JSON.stringify(abortDeliveryFile)};
 const entries = [{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } }];
 let reloadGeneration = 0;
 let sessionName = "named session";
+let aborts = 0;
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {
   const request = JSON.parse(line);
@@ -1035,6 +1171,11 @@ for await (const line of lines) {
   else if (request.type === "get_commands") data = { commands: [{ name: "web-reload", description: "generation-" + reloadGeneration, source: "extension", sourceInfo: { path: "web-sessions.ts", scope: "temporary" } }] };
   else if (request.type === "set_session_name") sessionName = request.name || null;
   else if (request.type === "prompt" && request.message === "/web-reload") reloadGeneration += 1;
+  else if (request.type === "abort") {
+    aborts += 1;
+    await Bun.write(abortDeliveryFile, "delivered");
+    if (aborts === 1) continue;
+  }
   process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
   if (request.type === "set_session_name") process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
 }
@@ -1138,6 +1279,21 @@ for await (const line of lines) {
 	expect(await reloadResult).toEqual({ response: { reloaded: true }, confirmation: "Reload complete." });
 	const afterReload = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; status: string }> };
 	expect(afterReload.sessions.find((session) => session.id === sessionId)?.status).toBe("idle");
+	const abortResult = await Promise.race([
+		sessionCommand(`ws://127.0.0.1:${port}/ws/client`, sessionId, { type: "abort" }),
+		Bun.sleep(2_000).then(() => { throw new Error("managed Stop waited for an RPC response or refresh"); }),
+	]);
+	expect(abortResult).toEqual({ accepted: true });
+	const deliveryDeadline = Date.now() + 2_000;
+	while (Date.now() < deliveryDeadline) {
+		try {
+			if (await readFile(abortDeliveryFile, "utf8") === "delivered") break;
+		} catch {
+			// The fake runtime has not consumed the delivered frame yet.
+		}
+		await Bun.sleep(10);
+	}
+	expect(await readFile(abortDeliveryFile, "utf8")).toBe("delivered");
 }, 10_000);
 
 test("managed RPC requests fail within the configured bound when Pi wedges", async () => {

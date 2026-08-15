@@ -89,7 +89,7 @@ export function splitWebWorktreeCommandArgs(args: string): { token: string; work
 }
 
 /** Abort the main session and wait for subagent abort operations registered through waitUntil. */
-export async function abortSessionAndSubagents(options: {
+export function abortSessionAndSubagents(options: {
 	sessionId: string;
 	abortMain(): void;
 	emit(request: SubagentAbortRequest): void;
@@ -107,7 +107,7 @@ export async function abortSessionAndSubagents(options: {
 		// A broken optional listener must never prevent the main Stop request.
 	}
 	options.abortMain();
-	await Promise.allSettled(operations);
+	return Promise.allSettled(operations).then(() => undefined);
 }
 
 /** Apply a route change and roll it back if the matching settings write fails. */
@@ -509,19 +509,21 @@ async function executeAgentCommand(
 				respond(state, requestId, true);
 				return;
 			}
-			case "abort":
-				// Acknowledge delivery before waiting for the main run and subagents to
-				// settle. Compaction can delay that teardown well past the browser's
-				// command bound even though Stop has already taken effect.
-				respond(state, requestId, true, { accepted: true });
-				void abortSessionAndSubagents({
+			case "abort": {
+				// Invoke the main abort before acknowledging, then let subagent teardown
+				// settle in the background. Compaction can delay that settlement well
+				// past the browser's command bound even though Stop has taken effect.
+				const settlement = abortSessionAndSubagents({
 					sessionId: state.session.id,
 					abortMain: () => state.ctx.abort(),
 					emit: (request) => pi.events.emit(SUBAGENT_ABORT_EVENT, request),
-				}).catch((error) => {
+				});
+				respond(state, requestId, true, { accepted: true });
+				void settlement.catch((error) => {
 					console.error(`Pi web Stop failed after acknowledgement: ${error instanceof Error ? error.message : String(error)}`);
 				});
 				return;
+			}
 			case "replace_queue":
 				respond(state, requestId, true);
 				return;
@@ -760,15 +762,26 @@ async function connect(pi: ExtensionAPI, state: BridgeState): Promise<void> {
 	};
 }
 
+function previewFromMessage(message: unknown): string | undefined {
+	if (!isRecord(message) || (message.role !== "user" && message.role !== "assistant")) return undefined;
+	if (typeof message.content === "string") return message.content.slice(0, 180);
+	if (!Array.isArray(message.content)) return undefined;
+	const preview = message.content
+		.filter((item): item is Record<string, unknown> => isRecord(item) && item.type === "text" && typeof item.text === "string")
+		.map((item) => item.text as string)
+		.join("");
+	return preview ? preview.slice(0, 180) : undefined;
+}
+
 function makeSession(ctx: ExtensionContext, branch: string | undefined): WebSession {
 	const entries = ctx.sessionManager.getEntries();
 	const header = ctx.sessionManager.getHeader();
-	const firstUser = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
 	let preview: string | undefined;
-	if (firstUser?.type === "message" && firstUser.message.role === "user") {
-		preview = typeof firstUser.message.content === "string"
-			? firstUser.message.content.slice(0, 180)
-			: firstUser.message.content.filter((item) => item.type === "text").map((item) => item.text).join("").slice(0, 180);
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (entry?.type !== "message" || (entry.message.role !== "user" && entry.message.role !== "assistant")) continue;
+		preview = previewFromMessage(entry.message);
+		if (preview) break;
 	}
 	return {
 		id: ctx.sessionManager.getSessionId(),
@@ -826,8 +839,10 @@ export default function webSessions(pi: ExtensionAPI): void {
 			sessionId: bridge.session.id,
 			event: safeClone(event),
 		} satisfies AgentEventMessage);
+		const latestPreview = isRecord(event) && event.type === "message_end" ? previewFromMessage(event.message) : undefined;
 		updateSession(bridge, {
 			status,
+			preview: latestPreview ?? bridge.session.preview,
 			messageCount: refreshMetrics
 				? ctx.sessionManager.getEntries().filter((entry) => entry.type === "message").length
 				: bridge.session.messageCount,

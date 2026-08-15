@@ -51,6 +51,7 @@ import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js";
 import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
+import { SerializedWriter } from "./serialized-writer.js";
 import {
 	disableTailscaleServe,
 	ensureTailscaleServe,
@@ -134,6 +135,8 @@ type SessionRecord = {
 	managedIdentityOperation?: ClientCommandMessage["command"]["type"];
 	managedWorktree?: ManagedWorktree;
 	pendingWorktreeSourceDeletion?: { sessionId: string; sessionFile: string };
+	/** False until a managed runtime has replaced its provisional startup ID. */
+	catalogReady?: boolean;
 };
 
 type SessionFileScan = {
@@ -203,6 +206,7 @@ const IMAGE_EXTENSIONS = new Map([
 
 const sessions = new Map<string, SessionRecord>();
 const sessionsByFile = new Map<string, SessionRecord>();
+const connectedClientSockets = new Set<Bun.ServerWebSocket<ClientSocketData>>();
 const savedSessionMetadataCache = new Map<string, { mtimeMs: number; size: number; scan: SessionFileScan }>();
 const managedSessionStarts = new Map<string, Promise<SessionRecord>>();
 const missingSessionReconciliations = new Set<SessionRecord>();
@@ -752,19 +756,17 @@ function broadcast(sessionId: string, message: ServerToClientMessage): void {
 
 function broadcastToAll(message: ServerToClientMessage): void {
 	const payload = JSON.stringify(message);
-	for (const record of sessions.values()) {
-		for (const socket of record.clientSockets) {
-			try {
-				socket.send(payload);
-			} catch {
-				// ignore
-			}
+	for (const socket of connectedClientSockets) {
+		try {
+			socket.send(payload);
+		} catch {
+			// ignore
 		}
 	}
 }
 
 function broadcastSessionToAll(record: SessionRecord): void {
-	if (sessions.get(record.id) !== record) return;
+	if (record.catalogReady === false || sessions.get(record.id) !== record) return;
 	broadcastToAll({ type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 }
 
@@ -791,7 +793,7 @@ function sessionSnapshot(): WebSession[] {
 	void reconcileMissingSessionFiles();
 	const merged = new Map<string, WebSession>();
 	for (const record of sessions.values()) {
-		if (isMissingInactiveSession(record)) continue;
+		if (record.catalogReady === false || isMissingInactiveSession(record)) continue;
 		const key = record.file ? normalizePath(record.file) : record.id;
 		merged.set(key, sessionToClientPayload(record));
 	}
@@ -943,6 +945,7 @@ class ManagedRpcSession {
 	private worktreeError: Error | undefined;
 	private reloadError: Error | undefined;
 	private reloadInFlight: Promise<void> | undefined;
+	private readonly lineWriter = new SerializedWriter<string>((line) => this.writeLineNow(line));
 
 	constructor(options: ManagedRpcSessionOptions) {
 		this.options = options;
@@ -1062,9 +1065,13 @@ class ManagedRpcSession {
 		this.options.onEvent(parsed);
 	}
 
-	private async writeLine(line: string): Promise<void> {
+	private writeLine(line: string, shouldWrite?: () => boolean): Promise<void> {
+		return this.lineWriter.write(line, shouldWrite);
+	}
+
+	private async writeLineNow(line: string): Promise<void> {
 		if (!this.process) throw new Error("RPC process is not running");
-		const stdin = (this.process as unknown as { stdin?: { getWriter?: () => WritableStreamDefaultWriter<Uint8Array>; write?: (value: string | Uint8Array) => unknown } }).stdin;
+		const stdin = (this.process as unknown as { stdin?: { getWriter?: () => WritableStreamDefaultWriter<Uint8Array>; write?: (value: string | Uint8Array) => unknown; flush?: () => unknown } }).stdin;
 		if (!stdin) throw new Error("RPC stdin unavailable");
 		const payload = encoder.encode(line);
 		if (typeof stdin.getWriter === "function") {
@@ -1078,6 +1085,7 @@ class ManagedRpcSession {
 		}
 		if (typeof stdin.write === "function") {
 			await stdin.write(payload);
+			if (typeof stdin.flush === "function") await stdin.flush();
 			return;
 		}
 		throw new Error("Unsupported RPC stdin sink");
@@ -1105,6 +1113,13 @@ class ManagedRpcSession {
 			}
 			await Bun.sleep(10);
 		}
+	}
+
+	private async deliver(command: Record<string, unknown>, bypassReloadBarrier = false): Promise<void> {
+		if (!bypassReloadBarrier && this.reloadInFlight) await this.reloadInFlight;
+		if (this.stopped) throw new Error("RPC session stopped");
+		if (!this.process) await this.start();
+		await this.writeLine(`${JSON.stringify({ id: `${this.requestPrefix}-${randomUUID()}`, ...command })}\n`);
 	}
 
 	async send<T = unknown>(
@@ -1143,7 +1158,7 @@ class ManagedRpcSession {
 					pending.reject(pending.command === "prompt" ? new CommandDeliveryUncertainError(message) : new Error(message));
 				}, timeoutMs);
 			}
-			void this.writeLine(`${JSON.stringify(payload)}\n`).catch((error: unknown) => {
+			void this.writeLine(`${JSON.stringify(payload)}\n`, () => this.pending.has(id)).catch((error: unknown) => {
 				const pending = this.pending.get(id);
 				if (!pending) return;
 				this.pending.delete(id);
@@ -1271,7 +1286,7 @@ class ManagedRpcSession {
 	}
 
 	async abort(): Promise<void> {
-		await this.send({ type: "abort" });
+		await this.deliver({ type: "abort" });
 	}
 
 	async bash(command: string): Promise<unknown> {
@@ -1748,12 +1763,9 @@ function sendSessionRemoved(
 	const payload: ServerSessionRemovedMessage = { type: "server.session_removed", sessionId, replacementSessionId };
 	const message = JSON.stringify(payload);
 	const notified = new Set<Bun.ServerWebSocket<ClientSocketData>>();
-	for (const record of sessions.values()) {
-		for (const socket of record.clientSockets) {
-			if (notified.has(socket)) continue;
-			notified.add(socket);
-			try { socket.send(message); } catch { /* ignore */ }
-		}
+	for (const socket of connectedClientSockets) {
+		notified.add(socket);
+		try { socket.send(message); } catch { /* ignore */ }
 	}
 	for (const socket of additionalSockets) {
 		if (notified.has(socket)) continue;
@@ -2194,6 +2206,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		// snapshot clears stale browser telemetry retained across daemon reconnects.
 		subagents: [],
 		managedWorktree: managedWorktreeFromEntries(resumed?.entries ?? []),
+		catalogReady: false,
 	};
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
@@ -2307,6 +2320,8 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			// Keep history-derived usage when stats are unavailable.
 		}
 		record.status = "idle";
+		record.catalogReady = true;
+		broadcastSessionToAll(record);
 		for (const socket of record.clientSockets) {
 			socket.data.sessionId = record.id;
 			sendSessionState(socket, record);
@@ -2325,6 +2340,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			sessions.set(existingRecord.id, existingRecord);
 			if (existingRecord.file) sessionsByFile.set(normalizePath(existingRecord.file), existingRecord);
 			restoreExistingQueueIntake?.();
+			broadcastSessionToAll(existingRecord);
 		}
 		throw error;
 	}
@@ -2394,7 +2410,10 @@ function parseSocketMessage<T>(data: string | Uint8Array): T | undefined {
 async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>, message: ClientToServerMessage): Promise<void> {
 	if (message.type === "client.hello" || message.type === "client.command_hello") {
 		socket.data.authed = true;
-		if (message.type === "client.hello") sendSessionSnapshot(socket);
+		if (message.type === "client.hello") {
+			connectedClientSockets.add(socket);
+			sendSessionSnapshot(socket);
+		}
 		return;
 	}
 	if (!socket.data.authed) throw new Error("Client must send a hello message first");
@@ -2492,7 +2511,7 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 		try {
 			const previousSessionId = record.id;
 			const data = await routeCommand(record, message.command);
-			await refreshManagedSession(record);
+			if (message.command.type !== "abort") await refreshManagedSession(record);
 			const responseData = record.id !== previousSessionId && (message.command.type === "clone" || message.command.type === "fork" || message.command.type === "create_worktree" || message.command.type === "create_worktree_v2")
 				? { ...(isRecord(data) ? data : {}), cancelled: isRecord(data) && data.cancelled === true, sessionId: record.id }
 				: data;
@@ -2792,9 +2811,7 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 			case "abort":
 				// Stop is accepted once its RPC request is written. Do not hold the web
 				// response open while compaction and subagent teardown finish.
-				void record.managed.abort().catch((error) => {
-					console.error(`Managed Stop failed after acknowledgement for ${record.id}: ${error instanceof Error ? error.message : String(error)}`);
-				});
+				await record.managed.abort();
 				return { accepted: true };
 			case "bash":
 				return await record.managed.bash(command.command);
@@ -2908,6 +2925,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			const scan = parseSessionFile(record.file);
 			if (scan) record.history = scan.history;
 		}
+		record.preview = extractPreviewFromHistory(record.history) ?? record.preview;
 		record.managedWorktree = managedWorktreeFromEntries(record.history);
 		record.agentSockets.add(socket);
 		record.active = true;
@@ -3012,9 +3030,9 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				sessionMetadataChanged = true;
 			}
 			broadcast(event.sessionId, { type: "server.event", sessionId: event.sessionId, event: event.event } satisfies ServerEventMessage);
-			if (sessionMetadataChanged) {
+			if (sessionMetadataChanged || lifecycleChanged || event.event.type === "compaction_start" || event.event.type === "compaction_end") {
 				broadcastSessionToAll(record);
-			} else if (lifecycleChanged || subagentsChanged || event.event.type === "compaction_start" || event.event.type === "compaction_end") {
+			} else if (subagentsChanged) {
 				broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 			}
 		}
@@ -3041,9 +3059,12 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		// Older bridge runtimes reported `working` again immediately after their
 		// authoritative agent_end event. Preserve the lifecycle event until a new
 		// agent_start arrives so completed runs cannot get stuck visually working.
-		const session = existing?.agentRunning === false && update.session.status === "working"
+		const lifecycleSession = existing?.agentRunning === false && update.session.status === "working"
 			? { ...update.session, status: "idle" as const }
 			: update.session;
+		// Older native bridges keep reporting their initial preview. Preserve
+		// message_end/file-derived metadata after hello during rolling upgrades.
+		const session = existing ? { ...lifecycleSession, preview: existing.preview } : lifecycleSession;
 		const catalogChanged = catalogSessionChanged(existing, session);
 		const record = upsertSession(session, "external", existing?.history ?? []);
 		record.agentSockets.add(socket);
@@ -3359,9 +3380,13 @@ async function handleApi(request: Request): Promise<Response> {
 			}
 		}
 		const merged = new Map<string, WebSession>();
-		for (const scan of scans) merged.set(scan.session.file ? normalizePath(scan.session.file) : scan.session.id, sessionToClientPayload(scan.session));
+		for (const scan of scans) {
+			const live = sessions.get(scan.session.id) ?? sessionsByFile.get(normalizePath(scan.file));
+			if (live?.catalogReady === false) continue;
+			merged.set(scan.session.file ? normalizePath(scan.session.file) : scan.session.id, sessionToClientPayload(scan.session));
+		}
 		for (const item of sessions.values()) {
-			if (isMissingInactiveSession(item)) continue;
+			if (item.catalogReady === false || isMissingInactiveSession(item)) continue;
 			merged.set(item.file ? normalizePath(item.file) : item.id, sessionToClientPayload(item));
 		}
 		return jsonResponse({ sessions: sortSessions(Array.from(merged.values())) });
@@ -3536,6 +3561,7 @@ async function handleWebSocketMessage(socket: Bun.ServerWebSocket<SocketData>, d
 
 function handleWebSocketClose(socket: Bun.ServerWebSocket<SocketData>): void {
 	if (socket.data.kind === "client") {
+		connectedClientSockets.delete(socket as Bun.ServerWebSocket<ClientSocketData>);
 		for (const record of sessions.values()) {
 			if (!record.clientSockets.delete(socket as Bun.ServerWebSocket<ClientSocketData>)) continue;
 		}

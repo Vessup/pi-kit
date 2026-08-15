@@ -18,6 +18,14 @@ test("web Stop aborts the main session and waits for subagent propagation", asyn
 	expect(settled).toBe(true);
 });
 
+test("web Stop reports a synchronous main-session abort failure before acknowledgement", () => {
+	expect(() => abortSessionAndSubagents({
+		sessionId: "session-1",
+		abortMain: () => { throw new Error("main abort failed"); },
+		emit: () => undefined,
+	})).toThrow("main abort failed");
+});
+
 test("web Stop still aborts when an optional subagent listener fails", async () => {
 	let mainAborted = false;
 	await abortSessionAndSubagents({
