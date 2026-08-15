@@ -763,6 +763,30 @@ function broadcastToAll(message: ServerToClientMessage): void {
 	}
 }
 
+function broadcastSessionToAll(record: SessionRecord): void {
+	if (sessions.get(record.id) !== record) return;
+	broadcastToAll({ type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+}
+
+function catalogSessionChanged(previous: WebSession | undefined, next: WebSession): boolean {
+	if (!previous) return true;
+	return previous.file !== next.file
+		|| previous.cwd !== next.cwd
+		|| previous.name !== next.name
+		|| previous.branch !== next.branch
+		|| previous.model !== next.model
+		|| previous.thinkingLevel !== next.thinkingLevel
+		|| previous.status !== next.status
+		|| previous.source !== next.source
+		|| previous.messageCount !== next.messageCount
+		|| previous.preview !== next.preview
+		|| previous.parentSession !== next.parentSession
+		|| previous.pullRequest?.number !== next.pullRequest?.number
+		|| previous.pullRequest?.url !== next.pullRequest?.url
+		|| previous.compaction?.reason !== next.compaction?.reason
+		|| previous.compaction?.startedAt !== next.compaction?.startedAt;
+}
+
 function sessionSnapshot(): WebSession[] {
 	void reconcileMissingSessionFiles();
 	const merged = new Map<string, WebSession>();
@@ -891,7 +915,7 @@ async function hydrateGitMetadata(record: SessionRecord): Promise<void> {
 			// A branch without an open PR is expected.
 		}
 	}
-	broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+	broadcastSessionToAll(record);
 }
 
 class CommandRejectedError extends Error {
@@ -2002,11 +2026,7 @@ async function refreshManagedSession(
 				record.pendingWorktreeSourceDeletion = undefined;
 			}
 			identityTransition = undefined;
-			const message = JSON.stringify({
-				type: "server.session",
-				session: sessionToClientPayload(record),
-			} satisfies ServerSessionMessage);
-			for (const socket of record.clientSockets) socket.send(message);
+			broadcastSessionToAll(record);
 		} catch (error) {
 			finishQueueMigration?.();
 			if (identityTransition) {
@@ -2246,13 +2266,21 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 				sessionId: record.id,
 				event,
 			} satisfies ServerEventMessage);
-			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			const catalogChanged = event.type === "agent_start"
+				|| event.type === "turn_start"
+				|| event.type === "agent_end"
+				|| event.type === "agent_settled"
+				|| event.type === "compaction_start"
+				|| event.type === "compaction_end"
+				|| event.type === "message_end";
+			if (catalogChanged) broadcastSessionToAll(record);
+			else broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 		},
 		onExit: () => {
 			record.status = "offline";
 			record.active = false;
 			record.managed = undefined;
-			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			broadcastSessionToAll(record);
 		},
 	});
 	record.managed = managed;
@@ -2885,7 +2913,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			);
 		}
 		if (record.file) sessionsByFile.set(normalizePath(record.file), record);
-		broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+		broadcastSessionToAll(record);
 		// Native sessions use the same bounded semantic history as managed sessions;
 		// no browser connection asks Pi to paint an additional TUI viewport.
 		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history.slice(-600) } satisfies ServerHistoryMessage);
@@ -2948,6 +2976,10 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			}
 			const subagentsChanged = updateSubagentsFromToolEvent(record, event.event);
 			let sessionMetadataChanged = false;
+			if (event.event.type === "session_info_changed") {
+				record.name = typeof event.event.name === "string" && event.event.name ? event.event.name : undefined;
+				sessionMetadataChanged = true;
+			}
 			if (event.event.type === "message_end" && isRecord(event.event.message)) {
 				record.history.push({
 					type: "message",
@@ -2970,7 +3002,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			}
 			broadcast(event.sessionId, { type: "server.event", sessionId: event.sessionId, event: event.event } satisfies ServerEventMessage);
 			if (sessionMetadataChanged) {
-				broadcastToAll({ type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+				broadcastSessionToAll(record);
 			} else if (lifecycleChanged || subagentsChanged || event.event.type === "compaction_start" || event.event.type === "compaction_end") {
 				broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 			}
@@ -3001,10 +3033,12 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		const session = existing?.agentRunning === false && update.session.status === "working"
 			? { ...update.session, status: "idle" as const }
 			: update.session;
+		const catalogChanged = catalogSessionChanged(existing, session);
 		const record = upsertSession(session, "external", existing?.history ?? []);
 		record.agentSockets.add(socket);
 		record.updatedAt = update.session.updatedAt;
-		broadcast(update.session.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+		if (catalogChanged) broadcastSessionToAll(record);
+		else broadcast(update.session.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 		return;
 	}
 	if (message.type === "agent.response") {
@@ -3513,7 +3547,7 @@ function handleWebSocketClose(socket: Bun.ServerWebSocket<SocketData>): void {
 		if (record.agentSockets.size === 0 && record.kind === "external") {
 			record.status = "offline";
 			record.active = false;
-			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			broadcastSessionToAll(record);
 		}
 	}
 }

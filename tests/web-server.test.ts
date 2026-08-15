@@ -726,6 +726,79 @@ function waitForSemanticHistory(url: string, sessionId: string): Promise<unknown
 	});
 }
 
+test("TUI metadata changes update every connected web catalog", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-live-tui-metadata-test-"));
+	const agentDir = join(tempDir, "pi-agent");
+	const sessionsDir = join(agentDir, "sessions", "project");
+	const statePath = join(tempDir, "web", "server.json");
+	const selectedId = `selected-${crypto.randomUUID()}`;
+	const tuiId = `tui-${crypto.randomUUID()}`;
+	await mkdir(sessionsDir, { recursive: true });
+	await writeFile(join(sessionsDir, `${selectedId}.jsonl`), `${JSON.stringify({ type: "session", version: 3, id: selectedId, cwd: tempDir, timestamp: new Date().toISOString() })}\n`);
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const client = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
+	const agentOpened = new Promise<void>((resolve, reject) => {
+		agent.onopen = () => resolve();
+		agent.onerror = () => reject(new Error("TUI metadata agent socket failed"));
+	});
+	const tuiSession = {
+		id: tuiId,
+		cwd: tempDir,
+		name: "Before rename",
+		status: "idle" as const,
+		source: "tui" as const,
+		createdAt: Date.now(),
+		updatedAt: Date.now(),
+		messageCount: 0,
+	};
+	let resolveSubscribed!: () => void;
+	let resolveRegistered!: () => void;
+	let resolveRenamed!: () => void;
+	let resolveBranch!: () => void;
+	const subscribed = new Promise<void>((resolve) => { resolveSubscribed = resolve; });
+	const registered = new Promise<void>((resolve) => { resolveRegistered = resolve; });
+	const renamed = new Promise<void>((resolve) => { resolveRenamed = resolve; });
+	const branchUpdated = new Promise<void>((resolve) => { resolveBranch = resolve; });
+	let timeout: ReturnType<typeof setTimeout>;
+	const timedOut = new Promise<never>((_resolve, reject) => {
+		timeout = setTimeout(() => {
+			client.close();
+			agent.close();
+			reject(new Error("TUI metadata did not propagate to the web catalog"));
+		}, 5_000);
+	});
+	client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+	client.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; session?: { id?: string; name?: string; branch?: string } };
+		if (message.type === "server.snapshot") client.send(JSON.stringify({ type: "client.subscribe", sessionId: selectedId }));
+		if (message.type === "server.history" && message.sessionId === selectedId) resolveSubscribed();
+		if (message.type !== "server.session" || message.session?.id !== tuiId) return;
+		if (message.session.name === "Before rename") resolveRegistered();
+		if (message.session.name === "Renamed in TUI") resolveRenamed();
+		if (message.session.branch === "feature/live-metadata") resolveBranch();
+	};
+	try {
+		await Promise.race([subscribed, timedOut]);
+		await Promise.race([agentOpened, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.hello", session: tuiSession, entries: [] }));
+		await Promise.race([registered, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "session_info_changed", name: "Renamed in TUI" } }));
+		await Promise.race([renamed, timedOut]);
+		agent.send(JSON.stringify({ type: "agent.update", session: { ...tuiSession, name: "Renamed in TUI", branch: "feature/live-metadata", updatedAt: Date.now() } }));
+		await Promise.race([branchUpdated, timedOut]);
+	} finally {
+		clearTimeout(timeout);
+		client.close();
+		agent.close();
+	}
+}, 10_000);
+
 test("an idle native session flushes its restored web follow-up queue on hello", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-restored-queue-test-"));
 	const statePath = join(tempDir, "web", "server.json");
