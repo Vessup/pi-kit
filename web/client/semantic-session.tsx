@@ -126,6 +126,8 @@ type SemanticSessionProps = {
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SESSION_DRAFT_PREFIX = "pi-web-session-draft-v1:";
+const SUBAGENTS_MINIMIZED_PREFIX = "pi-web-subagents-minimized-v1:";
+const subagentsMinimizedBySession = new Map<string, boolean>();
 
 function draftStorageKey(sessionId: string): string {
   return `${SESSION_DRAFT_PREFIX}${encodeURIComponent(sessionId)}`;
@@ -168,6 +170,30 @@ function saveSessionDraft(sessionId: string, draft: string): void {
     else localStorage.removeItem(draftStorageKey(sessionId));
   } catch {
     // Draft persistence is best-effort when storage is unavailable or full.
+  }
+}
+
+function subagentsMinimizedStorageKey(sessionId: string): string {
+  return `${SUBAGENTS_MINIMIZED_PREFIX}${encodeURIComponent(sessionId)}`;
+}
+
+function loadSubagentsMinimized(sessionId: string | undefined): boolean {
+  if (!sessionId) return false;
+  const retained = subagentsMinimizedBySession.get(sessionId);
+  if (retained !== undefined) return retained;
+  let minimized = false;
+  try { minimized = localStorage.getItem(subagentsMinimizedStorageKey(sessionId)) === "1"; } catch { /* use the in-memory default */ }
+  subagentsMinimizedBySession.set(sessionId, minimized);
+  return minimized;
+}
+
+function saveSubagentsMinimized(sessionId: string, minimized: boolean): void {
+  subagentsMinimizedBySession.set(sessionId, minimized);
+  try {
+    if (minimized) localStorage.setItem(subagentsMinimizedStorageKey(sessionId), "1");
+    else localStorage.removeItem(subagentsMinimizedStorageKey(sessionId));
+  } catch {
+    // The in-memory preference still survives session navigation.
   }
 }
 
@@ -914,7 +940,7 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
   const [sendMenuOpen, setSendMenuOpen] = React.useState(false);
   const [selectedSubagentId, setSelectedSubagentId] = React.useState<string | null>(null);
-  const [subagentsMinimized, setSubagentsMinimized] = React.useState(false);
+  const [subagentsMinimized, setSubagentsMinimized] = React.useState(() => loadSubagentsMinimized(session?.id));
   const [slashMenuDismissed, setSlashMenuDismissed] = React.useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = React.useState(0);
   const [showScrollToBottom, setShowScrollToBottom] = React.useState(false);
@@ -1631,7 +1657,11 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
                   title={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
                   aria-label={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
                   aria-expanded={!subagentsMinimized}
-                  onClick={() => setSubagentsMinimized((minimized) => !minimized)}
+                  onClick={() => setSubagentsMinimized((minimized) => {
+                    const next = !minimized;
+                    if (session?.id) saveSubagentsMinimized(session.id, next);
+                    return next;
+                  })}
                 >
                   {subagentsMinimized ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </button>
