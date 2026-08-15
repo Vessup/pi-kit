@@ -18,9 +18,9 @@ import subagentsExtension, {
 	subagentModelGuidance,
 	subagentModelRuntime,
 } from "../extensions/subagents.ts";
-import { truncateToolOutput } from "../extensions/subagents/format.ts";
+import { stringifyCompact, truncateChars, truncateToolOutput } from "../extensions/subagents/format.ts";
 import { MAX_TOOL_OUTPUT_BYTES } from "../extensions/subagents/types.ts";
-import { FooterNavigationEditor } from "../extensions/subagents/ui.ts";
+import { AgentDetailDialog, FooterNavigationEditor } from "../extensions/subagents/ui.ts";
 
 test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
 	const tools: string[] = [];
@@ -52,6 +52,13 @@ const usage = {
 	cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 },
 };
 
+test("compact formatting handles non-JSON values and preserves Unicode code points", () => {
+	assert.equal(stringifyCompact(undefined), "undefined");
+	assert.equal(stringifyCompact(Symbol("value")), "Symbol(value)");
+	assert.equal(stringifyCompact("🙂", 2), '"🙂…');
+	assert.equal(truncateChars("a🙂b", 2), "a🙂\n[… 1 characters omitted]");
+});
+
 test("subagent tool output truncates at a valid UTF-8 byte boundary", () => {
 	const source = `a${"🙂".repeat(Math.ceil(MAX_TOOL_OUTPUT_BYTES / 4) + 10)}`;
 	const result = truncateToolOutput(source);
@@ -67,6 +74,43 @@ test("subagent footer editor preserves key-release preferences", () => {
 	assert.equal(editor.wantsKeyRelease, true);
 	editor.wantsKeyRelease = false;
 	assert.equal(base.wantsKeyRelease, false);
+});
+
+test("subagent detail rendering caches wrapped transcript lines", () => {
+	let contentFormats = 0;
+	const agent = {
+		id: "worker",
+		status: "completed",
+		model: "provider/model",
+		effort: "medium",
+		createdAt: Date.now(),
+		prompt: "task",
+		usage,
+		transcript: [{ timestamp: Date.now(), role: "assistant", text: "hello" }],
+		streamingText: "",
+	};
+	const theme = {
+		fg(_color: string, text: string) {
+			if (text === "hello") contentFormats++;
+			return text;
+		},
+	};
+	const dialog = new AgentDetailDialog(agent as never, { requestRender() {} } as never, theme as never, {} as never, () => {});
+	try {
+		dialog.render(80);
+		dialog.render(80);
+		assert.equal(contentFormats, 1);
+		agent.streamingText = "streaming";
+		dialog.render(80);
+		assert.equal(contentFormats, 2);
+		dialog.render(79);
+		assert.equal(contentFormats, 3);
+		agent.transcript.push({ timestamp: Date.now(), role: "assistant", text: "next" });
+		dialog.render(79);
+		assert.equal(contentFormats, 4);
+	} finally {
+		dialog.dispose();
+	}
 });
 
 test("creating agents reserve capacity before their session exists", () => {

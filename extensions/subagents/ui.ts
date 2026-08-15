@@ -266,9 +266,17 @@ class AgentListDialog implements Component {
 	}
 }
 
-class AgentDetailDialog implements Component {
+export class AgentDetailDialog implements Component {
 	private scrollOffset = 0;
 	private timer: ReturnType<typeof setInterval>;
+	private transcriptCache: {
+		width: number;
+		length: number;
+		first: ManagedSubagent["transcript"][number] | undefined;
+		last: ManagedSubagent["transcript"][number] | undefined;
+		streamingText: string;
+		lines: string[];
+	} | undefined;
 
 	constructor(
 		private readonly agent: ManagedSubagent,
@@ -283,7 +291,9 @@ class AgentDetailDialog implements Component {
 	dispose(): void {
 		clearInterval(this.timer);
 	}
-	invalidate(): void {}
+	invalidate(): void {
+		this.transcriptCache = undefined;
+	}
 
 	handleInput(data: string): void {
 		if (this.keybindings.matches(data, "tui.select.cancel") || data === "b") return this.done({ action: "back" });
@@ -308,6 +318,20 @@ class AgentDetailDialog implements Component {
 	}
 
 	private transcriptLines(width: number): string[] {
+		const length = this.agent.transcript.length;
+		const first = this.agent.transcript[0];
+		const last = this.agent.transcript.at(-1);
+		const streamingText = this.agent.streamingText;
+		const cached = this.transcriptCache;
+		if (
+			cached
+			&& cached.width === width
+			&& cached.length === length
+			&& cached.first === first
+			&& cached.last === last
+			&& cached.streamingText === streamingText
+		) return cached.lines;
+
 		const lines: string[] = [];
 		for (const item of this.agent.transcript) {
 			lines.push(this.theme.fg("muted", `[${formatClock(item.timestamp)}] ${item.role}`));
@@ -315,11 +339,12 @@ class AgentDetailDialog implements Component {
 			for (const line of wrapTextWithAnsi(this.theme.fg(roleColor, item.text), Math.max(1, width))) lines.push(line);
 			lines.push("");
 		}
-		if (this.agent.streamingText) {
+		if (streamingText) {
 			lines.push(this.theme.fg("warning", "[streaming] assistant"));
-			for (const line of wrapTextWithAnsi(this.agent.streamingText, Math.max(1, width))) lines.push(line);
+			for (const line of wrapTextWithAnsi(streamingText, Math.max(1, width))) lines.push(line);
 		}
 		if (lines.length === 0) lines.push(this.theme.fg("muted", "(transcript is empty)"));
+		this.transcriptCache = { width, length, first, last, streamingText, lines };
 		return lines;
 	}
 

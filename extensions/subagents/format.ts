@@ -31,15 +31,19 @@ export function sanitizeName(value: string): string {
 export function stringifyCompact(value: unknown, max = 200): string {
 	let text: string;
 	try {
-		text = JSON.stringify(value);
+		text = JSON.stringify(value) ?? String(value);
 	} catch {
 		text = String(value);
 	}
-	return text.length > max ? `${text.slice(0, max)}…` : text;
+	const characters = Array.from(text);
+	return characters.length > max ? `${characters.slice(0, max).join("")}…` : text;
 }
 
 export function truncateChars(text: string, maximum: number): string {
-	return text.length <= maximum ? text : `${text.slice(0, maximum)}\n[… ${text.length - maximum} characters omitted]`;
+	const characters = Array.from(text);
+	return characters.length <= maximum
+		? text
+		: `${characters.slice(0, maximum).join("")}\n[… ${characters.length - maximum} characters omitted]`;
 }
 
 export function statusIcon(status: SubagentStatus): string {
