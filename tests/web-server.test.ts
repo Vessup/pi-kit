@@ -731,13 +731,20 @@ test("TUI metadata changes update every connected web catalog", async () => {
 	const agentDir = join(tempDir, "pi-agent");
 	const sessionsDir = join(agentDir, "sessions", "project");
 	const statePath = join(tempDir, "web", "server.json");
+	const fakeBin = join(tempDir, "bin");
+	const prMetadataFile = join(tempDir, "pr.json");
 	const selectedId = `selected-${crypto.randomUUID()}`;
 	const tuiId = `tui-${crypto.randomUUID()}`;
 	await mkdir(sessionsDir, { recursive: true });
+	await mkdir(fakeBin, { recursive: true });
 	await writeFile(join(sessionsDir, `${selectedId}.jsonl`), `${JSON.stringify({ type: "session", version: 3, id: selectedId, cwd: tempDir, timestamp: new Date().toISOString() })}\n`);
+	await writeFile(prMetadataFile, JSON.stringify({ number: 1, url: "https://github.com/Vessup/pi-kit/pull/1" }));
+	const fakeGh = join(fakeBin, "gh");
+	await writeFile(fakeGh, `#!/bin/sh\ncat ${JSON.stringify(prMetadataFile)}\n`);
+	await chmod(fakeGh, 0o755);
 	child = Bun.spawn({
 		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
-		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
+		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: agentDir },
 		stdout: "ignore", stderr: "ignore",
 	});
 	const { port } = await waitForState(statePath);
@@ -756,12 +763,14 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		createdAt: Date.now(),
 		updatedAt: Date.now(),
 		messageCount: 0,
+		pullRequest: { number: 1, url: "https://github.com/Vessup/pi-kit/pull/1" },
 	};
 	let resolveSnapshot!: () => void;
 	let resolveSubscribed!: () => void;
 	let resolveRegistered!: () => void;
 	let resolveRenamed!: () => void;
 	let resolveBranch!: () => void;
+	let resolvePullRequest!: () => void;
 	let resolveWorking!: () => void;
 	let resolveIdle!: () => void;
 	let resolvePreview!: () => void;
@@ -772,6 +781,7 @@ test("TUI metadata changes update every connected web catalog", async () => {
 	const registered = new Promise<void>((resolve) => { resolveRegistered = resolve; });
 	const renamed = new Promise<void>((resolve) => { resolveRenamed = resolve; });
 	const branchUpdated = new Promise<void>((resolve) => { resolveBranch = resolve; });
+	const pullRequestUpdated = new Promise<void>((resolve) => { resolvePullRequest = resolve; });
 	const working = new Promise<void>((resolve) => { resolveWorking = resolve; });
 	const idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
 	const previewUpdated = new Promise<void>((resolve) => { resolvePreview = resolve; });
@@ -792,7 +802,7 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		const message = JSON.parse(String(data)) as {
 			type?: string;
 			sessionId?: string;
-			session?: { id?: string; name?: string; branch?: string; status?: string; preview?: string; compaction?: { reason?: string } };
+			session?: { id?: string; name?: string; branch?: string; status?: string; preview?: string; pullRequest?: { number?: number }; compaction?: { reason?: string } };
 		};
 		if (message.type === "server.snapshot") resolveSnapshot();
 		if (message.type === "server.history" && message.sessionId === selectedId) resolveSubscribed();
@@ -800,6 +810,7 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		if (message.session.name === "Before rename") resolveRegistered();
 		if (message.session.name === "Renamed in TUI") resolveRenamed();
 		if (message.session.branch === "feature/live-metadata") resolveBranch();
+		if (message.session.pullRequest?.number === 3) resolvePullRequest();
 		if (message.session.status === "working" && !message.session.compaction) {
 			observedWorking = true;
 			resolveWorking();
@@ -823,8 +834,10 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		await Promise.race([subscribed, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "session_info_changed", name: "Renamed in TUI" } }));
 		await Promise.race([renamed, timedOut]);
+		await writeFile(prMetadataFile, JSON.stringify({ number: 3, url: "https://github.com/Vessup/pi-kit/pull/3" }));
 		agent.send(JSON.stringify({ type: "agent.update", session: { ...tuiSession, name: "Renamed in TUI", branch: "feature/live-metadata", updatedAt: Date.now() } }));
 		await Promise.race([branchUpdated, timedOut]);
+		await Promise.race([pullRequestUpdated, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "agent_start" } }));
 		await Promise.race([working, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "agent_end" } }));

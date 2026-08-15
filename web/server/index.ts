@@ -137,6 +137,7 @@ type SessionRecord = {
 	pendingWorktreeSourceDeletion?: { sessionId: string; sessionFile: string };
 	/** False until a managed runtime has replaced its provisional startup ID. */
 	catalogReady?: boolean;
+	gitMetadataGeneration?: number;
 };
 
 type SessionFileScan = {
@@ -901,22 +902,30 @@ async function commandOutput(command: string[], cwd: string, timeoutMs = 10_000)
 }
 
 async function hydrateGitMetadata(record: SessionRecord): Promise<void> {
-	const branch = await commandOutput(["git", "branch", "--show-current"], record.cwd);
-	if (branch) record.branch = branch;
-	const raw = await commandOutput(["gh", "pr", "view", "--json", "number,url"], record.cwd);
+	const generation = (record.gitMetadataGeneration ?? 0) + 1;
+	record.gitMetadataGeneration = generation;
+	const cwd = record.cwd;
+	const branch = await commandOutput(["git", "branch", "--show-current"], cwd);
+	const raw = await commandOutput(["gh", "pr", "view", "--json", "number,url"], cwd);
+	let pullRequest: WebSession["pullRequest"];
 	if (raw) {
 		try {
 			const value: unknown = JSON.parse(raw);
 			if (isRecord(value) && Number.isInteger(value.number) && typeof value.url === "string") {
 				const url = new URL(value.url);
 				if (url.protocol === "https:" || url.protocol === "http:") {
-					record.pullRequest = { number: value.number as number, url: url.toString() };
+					pullRequest = { number: value.number as number, url: url.toString() };
 				}
 			}
 		} catch {
 			// A branch without an open PR is expected.
 		}
 	}
+	if (record.gitMetadataGeneration !== generation || record.cwd !== cwd || sessions.get(record.id) !== record) return;
+	if (branch) record.branch = branch;
+	// A failed/no-match `gh pr view` is authoritative for the current branch and
+	// must clear a PR cached before the TUI changed branches.
+	record.pullRequest = pullRequest;
 	broadcastSessionToAll(record);
 }
 
@@ -2210,7 +2219,6 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 	};
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
-	void hydrateGitMetadata(record);
 
 	const managed = new ManagedRpcSession({
 		cwd,
@@ -2322,6 +2330,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		record.status = "idle";
 		record.catalogReady = true;
 		broadcastSessionToAll(record);
+		void hydrateGitMetadata(record);
 		for (const socket of record.clientSockets) {
 			socket.data.sessionId = record.id;
 			sendSessionState(socket, record);
@@ -2943,6 +2952,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		}
 		if (record.file) sessionsByFile.set(normalizePath(record.file), record);
 		broadcastSessionToAll(record);
+		void hydrateGitMetadata(record);
 		// Native sessions use the same bounded semantic history as managed sessions;
 		// no browser connection asks Pi to paint an additional TUI viewport.
 		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history.slice(-600) } satisfies ServerHistoryMessage);
@@ -3066,11 +3076,13 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		// message_end/file-derived metadata after hello during rolling upgrades.
 		const session = existing ? { ...lifecycleSession, preview: existing.preview } : lifecycleSession;
 		const catalogChanged = catalogSessionChanged(existing, session);
+		const gitContextChanged = existing?.cwd !== session.cwd || existing?.branch !== session.branch;
 		const record = upsertSession(session, "external", existing?.history ?? []);
 		record.agentSockets.add(socket);
 		record.updatedAt = update.session.updatedAt;
 		if (catalogChanged) broadcastSessionToAll(record);
 		else broadcast(update.session.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+		if (gitContextChanged) void hydrateGitMetadata(record);
 		return;
 	}
 	if (message.type === "agent.response") {
