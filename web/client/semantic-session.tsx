@@ -76,6 +76,7 @@ import { toolHasArgumentDetails } from "./tool-expansion";
 import { cn } from "./lib/utils";
 import { moveWebQueuedMessage, type SemanticImage, type WebQueuedMessage, type WebQueueReplacement, type WebSession, type WebSessionOptions, type WebSlashCommand, type WebSubagent, type WebUsage } from "../protocol";
 import { assistantTerminalNotice } from "../assistant-message";
+import { renderTerminalOutput } from "../../terminal-output";
 import { assertClientPromptPayloadFits } from "./image-payload";
 
 export type SemanticEntry = {
@@ -355,6 +356,7 @@ function HighlightedCode({ text, language }: { text: string; language?: string }
 }
 
 function FormattedOutput({ text, toolName, args }: { text: string; toolName: string; args?: Record<string, unknown> }) {
+  if (toolName === "bash") text = renderTerminalOutput(text);
   if (toolName === "read") return text ? <HighlightedCode text={text} language={syntaxLanguage(String(args?.path ?? ""))} /> : null;
   if (toolName.startsWith("subagent_")) return text ? <Markdown preserveSoftBreaks>{text}</Markdown> : null;
   const documents = parseJsonDocuments(text);
