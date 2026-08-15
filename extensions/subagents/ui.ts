@@ -66,6 +66,12 @@ export class FooterNavigationEditor implements EditorComponent, Focusable {
 	set focused(value: boolean) {
 		if ("focused" in this.base) this.base.focused = value;
 	}
+	get wantsKeyRelease(): boolean | undefined {
+		return this.base.wantsKeyRelease;
+	}
+	set wantsKeyRelease(value: boolean | undefined) {
+		this.base.wantsKeyRelease = value;
+	}
 	get onSubmit(): ((text: string) => void) | undefined {
 		return this.base.onSubmit;
 	}
@@ -320,7 +326,7 @@ class AgentDetailDialog implements Component {
 	render(width: number): string[] {
 		const inner = Math.max(1, width - 4);
 		const allLines = this.transcriptLines(inner);
-		const maxOffset = Math.max(0, allLines.length - 1);
+		const maxOffset = Math.max(0, allLines.length - DETAIL_VIEW_LINES);
 		this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
 		const end = Math.max(0, allLines.length - this.scrollOffset);
 		const start = Math.max(0, end - DETAIL_VIEW_LINES);
@@ -390,7 +396,8 @@ export async function showManager(manager: SubagentManager, ctx: ExtensionContex
 	let detailId: string | undefined;
 	while (true) {
 		let result: ManagerDialogResult;
-		if (detailId && manager.agents.has(detailId)) {
+		const fromDetail = Boolean(detailId && manager.agents.has(detailId));
+		if (fromDetail && detailId) {
 			const agent = manager.getAgent(detailId);
 			result = await ctx.ui.custom<ManagerDialogResult>(
 				(tui, theme, keybindings, done) => new AgentDetailDialog(agent, tui, theme, keybindings, done),
@@ -414,7 +421,7 @@ export async function showManager(manager: SubagentManager, ctx: ExtensionContex
 			continue;
 		}
 
-		detailId = result.id;
+		detailId = fromDetail ? result.id : undefined;
 		try {
 			if (result.action === "model") {
 				const models = await manager.availableModels(ctx);

@@ -18,6 +18,9 @@ import subagentsExtension, {
 	subagentModelGuidance,
 	subagentModelRuntime,
 } from "../extensions/subagents.ts";
+import { truncateToolOutput } from "../extensions/subagents/format.ts";
+import { MAX_TOOL_OUTPUT_BYTES } from "../extensions/subagents/types.ts";
+import { FooterNavigationEditor } from "../extensions/subagents/ui.ts";
 
 test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
 	const tools: string[] = [];
@@ -48,6 +51,23 @@ const usage = {
 	totalTokens: 19,
 	cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 },
 };
+
+test("subagent tool output truncates at a valid UTF-8 byte boundary", () => {
+	const source = `a${"🙂".repeat(Math.ceil(MAX_TOOL_OUTPUT_BYTES / 4) + 10)}`;
+	const result = truncateToolOutput(source);
+	const output = result.split("\n\n[Output truncated:", 1)[0]!;
+	assert.ok(Buffer.byteLength(output, "utf8") <= MAX_TOOL_OUTPUT_BYTES);
+	assert.equal(output.endsWith("�"), false);
+	assert.match(result, new RegExp(`Output truncated: ${Buffer.byteLength(source, "utf8") - Buffer.byteLength(output, "utf8")} bytes omitted`));
+});
+
+test("subagent footer editor preserves key-release preferences", () => {
+	const base = { focused: false, wantsKeyRelease: true };
+	const editor = new FooterNavigationEditor(base as never, {} as never, {} as never, () => {});
+	assert.equal(editor.wantsKeyRelease, true);
+	editor.wantsKeyRelease = false;
+	assert.equal(base.wantsKeyRelease, false);
+});
 
 test("creating agents reserve capacity before their session exists", () => {
 	assert.equal(countsAgainstSubagentLimit({ status: "creating" }), true);

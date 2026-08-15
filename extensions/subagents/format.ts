@@ -73,11 +73,21 @@ export function statusColor(status: SubagentStatus): "warning" | "success" | "er
 }
 
 export function truncateToolOutput(text: string): string {
-	const bytes = Buffer.byteLength(text, "utf8");
-	if (bytes <= MAX_TOOL_OUTPUT_BYTES) return text;
-	let output = text.slice(0, MAX_TOOL_OUTPUT_BYTES);
-	while (Buffer.byteLength(output, "utf8") > MAX_TOOL_OUTPUT_BYTES) output = output.slice(0, -1);
-	return `${output}\n\n[Output truncated: ${bytes - Buffer.byteLength(output, "utf8")} bytes omitted. Re-read a specific subagent or use the transcript modal for details.]`;
+	const buffer = Buffer.from(text, "utf8");
+	if (buffer.length <= MAX_TOOL_OUTPUT_BYTES) return text;
+	let end = MAX_TOOL_OUTPUT_BYTES;
+	let output = "";
+	while (end > 0) {
+		try {
+			output = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, end));
+			break;
+		} catch {
+			// A valid JavaScript string can only leave a partial UTF-8 code point at
+			// the byte boundary, so at most three trailing bytes are discarded.
+			end--;
+		}
+	}
+	return `${output}\n\n[Output truncated: ${buffer.length - end} bytes omitted. Re-read a specific subagent or use the transcript modal for details.]`;
 }
 
 export function modelName(model: { provider: string; id: string } | undefined): string {
