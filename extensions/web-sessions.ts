@@ -36,6 +36,7 @@ import type {
 import { WEB_STATE_VERSION } from "../web/protocol.js";
 import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
+import { WEB_COMPACT_COMMAND } from "../web/compact-command.js";
 import { boundedWebHistory } from "../web/history.js";
 import { managedWorktreeFromEntries } from "../web/server/worktrees.js";
 import { readWebTailscaleSetting, writeWebTailscaleSetting } from "./web-settings.js";
@@ -79,6 +80,14 @@ function bridgeCommandList(pi: ExtensionAPI) {
 		}));
 	if (!commands.some((command) => command.name === "reload")) {
 		commands.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
+	}
+	if (!commands.some((command) => command.name === "compact")) {
+		commands.unshift({
+			name: WEB_COMPACT_COMMAND.name,
+			description: WEB_COMPACT_COMMAND.description,
+			source: "extension",
+			location: "temporary",
+		});
 	}
 	return commands;
 }

@@ -1778,6 +1778,58 @@ for await (const line of lines) {
 	expect((await Bun.$`git -C ${repository} branch --list startup-fails`.text()).trim()).toContain("startup-fails");
 }, 15_000);
 
+test("native sessions route the web /compact command with optional instructions", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-compact-test-"));
+	const statePath = join(tempDir, "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const sessionId = `compact-${crypto.randomUUID()}`;
+	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({
+				type: "agent.hello",
+				session: { id: sessionId, cwd: tempDir, status: "idle", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+				entries: [],
+			}));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("compact agent websocket failed"));
+	});
+	const command = new Promise<{ requestId: string; customInstructions?: string }>((resolve, reject) => {
+		const timeout = setTimeout(() => reject(new Error("compact command was not routed to native Pi")), 3_000);
+		agent.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; customInstructions?: string } };
+			if (message.type !== "agent.command" || !message.requestId || message.command?.type !== "compact") return;
+			clearTimeout(timeout);
+			resolve({ requestId: message.requestId, customInstructions: message.command.customInstructions });
+		};
+	});
+	const result = new Promise<void>((resolve, reject) => {
+		const client = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+		const requestId = crypto.randomUUID();
+		const timeout = setTimeout(() => { client.close(); reject(new Error("compact client response timed out")); }, 5_000);
+		client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+		client.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; requestId?: string; success?: boolean; error?: string };
+			if (message.type === "server.snapshot") client.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "/compact preserve file names", images: [] }));
+			if (message.type !== "server.response" || message.requestId !== requestId) return;
+			clearTimeout(timeout);
+			client.close();
+			message.success ? resolve() : reject(new Error(message.error ?? "compact failed"));
+		};
+	});
+	const routed = await command;
+	expect(routed.customInstructions).toBe("preserve file names");
+	agent.send(JSON.stringify({ type: "agent.response", requestId: routed.requestId, success: true, data: { accepted: true } }));
+	await result;
+	agent.close();
+}, 10_000);
+
 test("web reload survives a native bridge reconnect", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-reload-test-"));
 	const statePath = join(tempDir, "server.json");

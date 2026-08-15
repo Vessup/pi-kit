@@ -44,6 +44,7 @@ import { SemanticSession, updateStreamingMessage, type ActiveTool, type Semantic
 import { preserveSessionTelemetry, preserveSessionsTelemetry } from "./session-telemetry";
 import { cn } from "./lib/utils";
 import { recentRepositories, type RecentRepository } from "./recent-repositories";
+import { includeWebCompactCommand, parseWebCompactCommand } from "../compact-command";
 import { includeWebReloadCommand, isWebReloadCommand } from "../reload-command";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { displaySessionStatus } from "./session-status";
@@ -1213,7 +1214,7 @@ export function App() {
       setSessionOptions((current) => ({
         models: Array.isArray(options.models) ? options.models : [],
         thinkingLevels: Array.isArray(options.thinkingLevels) ? options.thinkingLevels : [],
-        commands: includeWebReloadCommand(Array.isArray(options.commands) ? options.commands : current.commands),
+        commands: includeWebCompactCommand(includeWebReloadCommand(Array.isArray(options.commands) ? options.commands : current.commands)),
       }));
     } catch {
       if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) setSessionOptions((current) => ({ ...current, models: [], thinkingLevels: [] }));
@@ -1224,10 +1225,10 @@ export function App() {
     try {
       const response = await sendSessionCommand(sessionId, { type: "get_commands" }) as { commands?: WebSlashCommand[] } | undefined;
       if (selectedIdRef.current !== sessionId || optionsGenerationRef.current !== generation) return;
-      setSessionOptions((current) => ({ ...current, commands: includeWebReloadCommand(Array.isArray(response?.commands) ? response.commands : []) }));
+      setSessionOptions((current) => ({ ...current, commands: includeWebCompactCommand(includeWebReloadCommand(Array.isArray(response?.commands) ? response.commands : [])) }));
     } catch {
       if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) {
-        setSessionOptions((current) => ({ ...current, commands: includeWebReloadCommand(current.commands) }));
+        setSessionOptions((current) => ({ ...current, commands: includeWebCompactCommand(includeWebReloadCommand(current.commands)) }));
       }
     }
   }, []);
@@ -1279,7 +1280,7 @@ export function App() {
     assertClientPromptPayloadFits(promptFrame);
     const queuedFollowUp = streamingBehavior === "followUp" && selectedSession?.status === "working";
     const worktreeCommand = /^\/worktree(?:\s|$)/.test(message.trim());
-    const controlCommand = isWebReloadCommand(message) || worktreeCommand;
+    const controlCommand = isWebReloadCommand(message) || parseWebCompactCommand(message) !== undefined || worktreeCommand;
     const optimisticallyWorking = !queuedFollowUp && !controlCommand && selectedSession?.status !== "working";
     const previousStatus = selectedSession?.status;
     if (optimisticallyWorking) {

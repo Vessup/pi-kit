@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { includeWebCompactCommand, parseWebCompactCommand } from "../web/compact-command.ts";
 import { includeWebReloadCommand, isWebReloadCommand } from "../web/reload-command.ts";
 import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.ts";
 
@@ -55,13 +56,21 @@ test("web reload routing only accepts the exact built-in command", () => {
 	expect(isWebReloadCommand("please /reload")).toBe(false);
 });
 
-test("the web slash menu exposes reload across stale native command metadata", () => {
-	const commands = includeWebReloadCommand([
+test("web compact routing accepts optional instructions without matching prose", () => {
+	expect(parseWebCompactCommand("/compact")).toEqual({});
+	expect(parseWebCompactCommand("/compact preserve file names ")).toEqual({ customInstructions: "preserve file names" });
+	expect(parseWebCompactCommand("please /compact")).toBeUndefined();
+	expect(parseWebCompactCommand("/compacted")).toBeUndefined();
+});
+
+test("the web slash menu exposes control commands across stale native metadata", () => {
+	const commands = includeWebCompactCommand(includeWebReloadCommand([
 		{ name: "web-reload", description: "internal", source: "extension", location: "temporary" },
 		{ name: "address-pr", description: "Address a PR", source: "prompt", location: "user" },
-	]);
-	expect(commands.map((command) => command.name)).toEqual(["reload", "address-pr"]);
+	]));
+	expect(commands.map((command) => command.name)).toEqual(["compact", "reload", "address-pr"]);
 	expect(includeWebReloadCommand(commands).filter((command) => command.name === "reload")).toHaveLength(1);
+	expect(includeWebCompactCommand(commands).filter((command) => command.name === "compact")).toHaveLength(1);
 });
 
 test("web skill commands stay intact with their arguments", async () => {
