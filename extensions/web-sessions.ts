@@ -33,7 +33,7 @@ import type {
 	ServerToAgentMessage,
 	WebSession,
 } from "../web/protocol.js";
-import { WEB_STATE_VERSION } from "../web/protocol.js";
+import { mergeWebSubagentUpdates, WEB_STATE_VERSION } from "../web/protocol.js";
 import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
 import { WEB_COMPACT_COMMAND } from "../web/compact-command.js";
@@ -385,9 +385,9 @@ function flush(state: BridgeState): void {
 }
 
 function discardPendingCoveredByHello(state: BridgeState): void {
-	const latestSubagents = [...state.pending].reverse().find((message) => message.type === "agent.subagents");
+	// Hello includes authoritative history and the fully merged subagent snapshot.
+	// Replaying an old delta after it would duplicate transcript/streaming content.
 	state.pending = state.pending.filter((message) => message.type === "agent.response");
-	if (latestSubagents) state.pending.push(latestSubagents);
 }
 
 function statusForContext(ctx: ExtensionContext): WebSession["status"] {
@@ -418,6 +418,14 @@ async function refreshGitMetadata(pi: ExtensionAPI, state: BridgeState): Promise
 	}
 	const pullRequest = branch ? await findPullRequest(pi, state.ctx.cwd) : undefined;
 	if (!state.closed) updateSession(state, { branch, pullRequest });
+}
+
+export function applySubagentStatusToSession(session: WebSession, event: SubagentStatusEvent): WebSession {
+	return {
+		...session,
+		subagents: event.remove ? [] : mergeWebSubagentUpdates(session.subagents, event.agents),
+		subagentUsage: event.usage,
+	};
 }
 
 function updateSession(state: BridgeState, patch: Partial<WebSession> = {}): void {
@@ -538,15 +546,12 @@ async function executeAgentCommand(
 				// Invoke the main abort before acknowledging, then let subagent teardown
 				// settle in the background. Compaction can delay that settlement well
 				// past the browser's command bound even though Stop has taken effect.
-				const settlement = abortSessionAndSubagents({
+				void abortSessionAndSubagents({
 					sessionId: state.session.id,
 					abortMain: () => state.ctx.abort(),
 					emit: (request) => pi.events.emit(SUBAGENT_ABORT_EVENT, request),
 				});
 				respond(state, requestId, true, { accepted: true });
-				void settlement.catch((error) => {
-					console.error(`Pi web Stop failed after acknowledgement: ${error instanceof Error ? error.message : String(error)}`);
-				});
 				return;
 			}
 			case "replace_queue":
@@ -851,6 +856,9 @@ export default function webSessions(pi: ExtensionAPI): void {
 	pi.events.on(SUBAGENT_STATUS_EVENT, (value) => {
 		const event = value as SubagentStatusEvent;
 		if (!bridge || event.sessionId !== bridge.session.id) return;
+		// Retain the authoritative merged snapshot for hello. The incremental frame
+		// remains the normal low-bandwidth path while connected.
+		bridge.session = applySubagentStatusToSession(bridge.session, event);
 		send(bridge, {
 			type: "agent.subagents",
 			sessionId: event.sessionId,

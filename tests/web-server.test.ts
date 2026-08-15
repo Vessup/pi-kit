@@ -947,6 +947,7 @@ for await (const line of lines) {
   } else if (request.type === "switch_session") {
     sessionFile = request.sessionPath;
   } else if (request.type === "get_entries") data = { entries: [], leafId: null };
+  else if (request.type === "get_messages") data = { messages: [] };
   else if (request.type === "get_session_stats") data = {};
   process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
 }
@@ -1534,8 +1535,15 @@ test("saved-session metadata refresh clears hydrated ownership and skips malform
 	expect(initialCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toEqual(managedWorktree);
 	expect(initialCatalog.sessions.find((session) => session.id === malformedSessionId)?.managedWorktree).toEqual(managedWorktree);
 
+	const messageLine = JSON.stringify({ type: "message", id: "latest", parentId: "owned", timestamp: new Date().toISOString(), message: { role: "user", content: "incremental metadata" } });
+	const splitAt = Math.floor(messageLine.length / 2);
+	await appendFile(clearedSessionFile, messageLine.slice(0, splitAt));
+	const partialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; messageCount?: number; preview?: string }> };
+	const partial = partialCatalog.sessions.find((session) => session.id === clearedSessionId);
+	expect(partial?.messageCount).toBe(0);
+	expect(partial?.preview).toBeUndefined();
 	await appendFile(clearedSessionFile, [
-		JSON.stringify({ type: "message", id: "latest", parentId: "owned", timestamp: new Date().toISOString(), message: { role: "user", content: "incremental metadata" } }),
+		messageLine.slice(splitAt),
 		JSON.stringify({ type: "custom", id: "cleared", parentId: "latest", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { ...managedWorktree, managed: false } }),
 	].join("\n") + "\n");
 	const refreshedCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown; messageCount?: number; preview?: string }> };

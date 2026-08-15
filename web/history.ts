@@ -10,24 +10,39 @@ function isRecord(value: unknown): value is RecordValue {
 	return typeof value === "object" && value !== null;
 }
 
-function sanitizedEntry(entry: unknown): { entry: unknown; bytes: number } | undefined {
-	let json: string;
-	try {
-		json = JSON.stringify(entry, (key, value: unknown) => {
-			if (isRecord(value) && value.type === "image" && typeof value.data === "string" && value.data.length > MAX_HISTORY_IMAGE_CHARS) {
-				return { type: "text", text: `[Pi Web omitted an oversized ${typeof value.mimeType === "string" ? value.mimeType : "image"} attachment]` };
-			}
-			if (typeof value !== "string") return value;
-			if (key === "data") return value.length <= MAX_HISTORY_IMAGE_CHARS ? value : undefined;
-			if (value.length <= MAX_HISTORY_STRING_CHARS) return value;
-			return `${value.slice(0, MAX_HISTORY_STRING_CHARS)}\n\n[Pi Web truncated ${value.length - MAX_HISTORY_STRING_CHARS} characters]`;
-		});
-	} catch {
-		return undefined;
+function sanitizedEntry(entry: unknown, maxBytes: number): { entry: unknown; bytes: number } | undefined {
+	const serialize = (omitImages: boolean): { json: string; hadImages: boolean } | undefined => {
+		let hadImages = false;
+		try {
+			const json = JSON.stringify(entry, (key, value: unknown) => {
+				if (isRecord(value) && value.type === "image" && typeof value.data === "string") {
+					hadImages = true;
+					if (omitImages || value.data.length > MAX_HISTORY_IMAGE_CHARS) {
+						return { type: "text", text: `[Pi Web omitted an oversized ${typeof value.mimeType === "string" ? value.mimeType : "image"} attachment]` };
+					}
+				}
+				if (typeof value !== "string") return value;
+				if (key === "data") return value.length <= MAX_HISTORY_IMAGE_CHARS ? value : undefined;
+				if (value.length <= MAX_HISTORY_STRING_CHARS) return value;
+				return `${value.slice(0, MAX_HISTORY_STRING_CHARS)}\n\n[Pi Web truncated ${value.length - MAX_HISTORY_STRING_CHARS} characters]`;
+			});
+			return { json, hadImages };
+		} catch {
+			return undefined;
+		}
+	};
+	let serialized = serialize(false);
+	if (!serialized) return undefined;
+	let bytes = encoder.encode(serialized.json).byteLength;
+	// Several individually valid images can exceed the aggregate history budget.
+	// Keep the authored message and replace its attachments instead of dropping it.
+	if (bytes > maxBytes && serialized.hadImages) {
+		serialized = serialize(true);
+		if (!serialized) return undefined;
+		bytes = encoder.encode(serialized.json).byteLength;
 	}
-	const bytes = encoder.encode(json).byteLength;
 	try {
-		return { entry: JSON.parse(json) as unknown, bytes };
+		return { entry: JSON.parse(serialized.json) as unknown, bytes };
 	} catch {
 		return undefined;
 	}
@@ -72,14 +87,14 @@ export function boundedWebHistory(
 		return isRecord(entry) && entry.type === "message" ? [entry] : [];
 	});
 	const summary = visible.find((entry) => isRecord(entry) && typeof entry.id === "string" && entry.id.startsWith("web-compaction-"));
-	const sanitizedSummary = summary ? sanitizedEntry(summary) : undefined;
+	const sanitizedSummary = summary ? sanitizedEntry(summary, maxBytes) : undefined;
 	const selected: unknown[] = [];
 	let bytes = 2 + (sanitizedSummary && sanitizedSummary.bytes + 2 <= maxBytes ? sanitizedSummary.bytes + 1 : 0);
 	const availableEntries = maxEntries - (sanitizedSummary && sanitizedSummary.bytes + 2 <= maxBytes ? 1 : 0);
 	for (let index = visible.length - 1; index >= 0 && selected.length < availableEntries; index -= 1) {
 		const entry = visible[index];
 		if (entry === summary) continue;
-		const sanitized = sanitizedEntry(entry);
+		const sanitized = sanitizedEntry(entry, maxBytes);
 		if (!sanitized || sanitized.bytes + bytes > maxBytes) continue;
 		selected.push(sanitized.entry);
 		bytes += sanitized.bytes + 1;

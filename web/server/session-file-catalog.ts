@@ -2,9 +2,9 @@ import { closeSync, lstatSync, openSync, readSync, readdirSync, readFileSync, re
 import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { WebSession } from "../protocol.js";
-import { replacementFromEntries } from "../worktree-replacement.js";
+import { replacementFromEntries, WORKTREE_REPLACEMENT_ENTRY } from "../worktree-replacement.js";
 import type { ManagedSessionStore } from "./managed-session-store.js";
-import { managedWorktreeFromEntries } from "./worktrees.js";
+import { managedWorktreeFromEntries, WORKTREE_SESSION_ENTRY } from "./worktrees.js";
 
 export type SessionFileScan = {
 	session: WebSession;
@@ -18,7 +18,14 @@ export type SessionFileScan = {
 
 export function createSessionFileCatalog(options: { sessionsDir: string; managedSessionStore: ManagedSessionStore }) {
 	const { sessionsDir, managedSessionStore } = options;
-	const savedSessionMetadataCache = new Map<string, { ino: number; mtimeMs: number; size: number; scan: SessionFileScan; metadataEntries: Record<string, unknown>[] }>();
+	const savedSessionMetadataCache = new Map<string, {
+		ino: number;
+		mtimeMs: number;
+		size: number;
+		parsedBytes: number;
+		scan: SessionFileScan;
+		metadataEntries: Record<string, unknown>[];
+	}>();
 
 	function normalizePath(path: string): string {
 		const resolved = normalize(resolve(path));
@@ -239,7 +246,11 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 			const cached = savedSessionMetadataCache.get(file);
 			if (cached?.ino === stats.ino && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached.scan;
 			const incremental = cached !== undefined && cached.ino === stats.ino && stats.size > cached.size;
-			const text = incremental ? readFileSuffix(file, cached.size, stats.size) : readFileSync(file, "utf8");
+			const start = incremental ? cached.parsedBytes : 0;
+			const rawText = incremental ? readFileSuffix(file, start, stats.size) : readFileSync(file, "utf8");
+			const completeEnd = rawText.lastIndexOf("\n");
+			const text = completeEnd < 0 ? "" : rawText.slice(0, completeEnd + 1);
+			const parsedBytes = start + Buffer.byteLength(text);
 			const lines = text.split(/\n/).map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line)).filter(Boolean);
 			if (!incremental && lines.length === 0) return undefined;
 			const header = incremental
@@ -265,7 +276,9 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 				if (entry.type === "session_info" && typeof entry.name === "string") name = entry.name;
 				if (entry.type === "model_change" && typeof entry.modelId === "string") model = entry.modelId;
 				if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") thinkingLevel = entry.thinkingLevel;
-				if (entry.type === "custom") metadataEntries.push(entry);
+				if (entry.type === "custom" && (entry.customType === WORKTREE_SESSION_ENTRY || entry.customType === WORKTREE_REPLACEMENT_ENTRY)) {
+					metadataEntries.push(entry);
+				}
 				if (entry.type === "message") {
 					messageCount += 1;
 					const message = isRecord(entry.message) ? entry.message : undefined;
@@ -306,10 +319,31 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 				managedWorktreeScanned: true,
 				replacement: replacementFromEntries(metadataEntries),
 			};
-			savedSessionMetadataCache.set(file, { ino: stats.ino, mtimeMs: stats.mtimeMs, size: stats.size, scan, metadataEntries });
+			savedSessionMetadataCache.set(file, { ino: stats.ino, mtimeMs: stats.mtimeMs, size: stats.size, parsedBytes, scan, metadataEntries });
 			return scan;
 		} catch {
 			return undefined;
+		}
+	}
+
+	function parseSessionHistoryFile(file: string, maxBytes = 16 * 1024 * 1024): unknown[] {
+		try {
+			const stats = statSync(file);
+			const start = Math.max(0, stats.size - maxBytes);
+			let text = readFileSuffix(file, start, stats.size);
+			if (start > 0) {
+				const firstNewline = text.indexOf("\n");
+				text = firstNewline < 0 ? "" : text.slice(firstNewline + 1);
+			}
+			const completeEnd = text.lastIndexOf("\n");
+			if (completeEnd < 0) return [];
+			return text.slice(0, completeEnd + 1).split(/\n/).flatMap((line) => {
+				const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+				if (!normalized) return [];
+				try { return [JSON.parse(normalized) as unknown]; } catch { return []; }
+			});
+		} catch {
+			return [];
 		}
 	}
 
@@ -373,7 +407,7 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 		normalizePath, sessionFileKey, isManagedSessionFile, replaceManagedSessionFile, deleteManagedSessionFile,
 		isWithinDir, canonicalSessionFile, isRecord, persistInitialSession, toNumber, zeroWebUsage, addWebUsage,
 		usageFromEntries, extractTextContent, compactionEntryFromEvent, extractPreviewFromHistory,
-		extractSessionMetadataFromEntries, parseSessionFile, parseSessionMetadataFile, listSavedSessionFiles,
+		extractSessionMetadataFromEntries, parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
 		removeMissingSessionMetadata, scanSavedSessions, deriveForkMessages,
 	};
 }

@@ -41,6 +41,10 @@ export class CommandDeliveryUncertainError extends Error {
 	}
 }
 
+export function isUncertainRpcDeliveryCommand(command: string): boolean {
+	return command === "prompt" || command === "compact";
+}
+
 export class ManagedRpcSession {
 	private readonly options: ManagedRpcSessionOptions;
 	private process: Bun.Subprocess | undefined;
@@ -201,7 +205,7 @@ export class ManagedRpcSession {
 		for (const [id, pending] of this.pending.entries()) {
 			this.pending.delete(id);
 			try {
-				pending.reject(pending.command === "prompt"
+				pending.reject(isUncertainRpcDeliveryCommand(pending.command)
 					? new CommandDeliveryUncertainError(error.message)
 					: error);
 			} catch {
@@ -221,11 +225,41 @@ export class ManagedRpcSession {
 		}
 	}
 
-	private async deliver(command: Record<string, unknown>, bypassReloadBarrier = false): Promise<void> {
-		if (!bypassReloadBarrier && this.reloadInFlight) await this.reloadInFlight;
-		if (this.stopped) throw new Error("RPC session stopped");
-		if (!this.process) await this.start();
-		await this.writeLine(`${JSON.stringify({ id: `${this.requestPrefix}-${randomUUID()}`, ...command })}\n`);
+	private async deliver(
+		command: Record<string, unknown>,
+		bypassReloadBarrier = false,
+		timeoutMs: number | null = null,
+	): Promise<void> {
+		const deadline = timeoutMs === null ? undefined : Date.now() + timeoutMs;
+		const commandName = typeof command.type === "string" ? command.type : "unknown";
+		const operation = (async () => {
+			if (!bypassReloadBarrier && this.reloadInFlight) await this.reloadInFlight;
+			if (this.stopped) throw new Error("RPC session stopped");
+			if (!this.process) await this.start();
+			let writeStarted = false;
+			await this.writeLine(
+				`${JSON.stringify({ id: `${this.requestPrefix}-${randomUUID()}`, ...command })}\n`,
+				() => {
+					if (deadline !== undefined && Date.now() >= deadline) return false;
+					writeStarted = true;
+					return true;
+				},
+			);
+			if (!writeStarted) throw new Error(`RPC command ${commandName} timed out after ${timeoutMs}ms`);
+		})();
+		if (deadline === undefined) return await operation;
+		const remaining = Math.max(0, deadline - Date.now());
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await Promise.race([
+				operation,
+				new Promise<never>((_resolve, reject) => {
+					timeout = setTimeout(() => reject(new Error(`RPC command ${commandName} timed out after ${timeoutMs}ms`)), remaining);
+				}),
+			]);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
 	}
 
 	async send<T = unknown>(
@@ -261,7 +295,7 @@ export class ManagedRpcSession {
 					if (!pending) return;
 					this.pending.delete(id);
 					const message = `RPC command ${pending.command} timed out after ${timeoutMs}ms`;
-					pending.reject(pending.command === "prompt" ? new CommandDeliveryUncertainError(message) : new Error(message));
+					pending.reject(isUncertainRpcDeliveryCommand(pending.command) ? new CommandDeliveryUncertainError(message) : new Error(message));
 				}, timeoutMs);
 			}
 			void this.writeLine(`${JSON.stringify(payload)}\n`, () => this.pending.has(id)).catch((error: unknown) => {
@@ -269,7 +303,7 @@ export class ManagedRpcSession {
 				if (!pending) return;
 				this.pending.delete(id);
 				const cause = error instanceof Error ? error : new Error(String(error));
-				pending.reject(commandName === "prompt" ? new CommandDeliveryUncertainError(cause.message) : cause);
+				pending.reject(isUncertainRpcDeliveryCommand(commandName) ? new CommandDeliveryUncertainError(cause.message) : cause);
 			});
 		});
 	}
@@ -392,7 +426,9 @@ export class ManagedRpcSession {
 	}
 
 	async abort(): Promise<void> {
-		await this.deliver({ type: "abort" });
+		// Stop must bypass a wedged reload, but still acknowledge only after its
+		// serialized frame is written. Expired queued writes are skipped.
+		await this.deliver({ type: "abort" }, true, RPC_REQUEST_TIMEOUT_MS);
 	}
 
 	async bash(command: string): Promise<unknown> {

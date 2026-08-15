@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { abortSessionAndSubagents, applyTailscaleSettingTransaction, isScopedModelAllowed, splitWebWorktreeCommandArgs } from "../extensions/web-sessions.ts";
+import { abortSessionAndSubagents, applySubagentStatusToSession, applyTailscaleSettingTransaction, isScopedModelAllowed, splitWebWorktreeCommandArgs } from "../extensions/web-sessions.ts";
 
 test("web Stop aborts the main session and waits for subagent propagation", async () => {
 	let releaseSubagents!: () => void;
@@ -34,6 +34,38 @@ test("web Stop still aborts when an optional subagent listener fails", async () 
 		emit: () => { throw new Error("listener failed"); },
 	});
 	expect(mainAborted).toBe(true);
+});
+
+test("the bridge retains an authoritative subagent snapshot for reconnect hello", () => {
+	const usage = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	const base = {
+		id: "worker",
+		status: "working" as const,
+		model: "test/model",
+		effort: "high",
+		turns: 1,
+		currentTool: null,
+		queued: 0,
+		createdAt: 1,
+		updatedAt: 2,
+		completedAt: null,
+		error: null,
+		usage,
+	};
+	const session = { id: "session-1", cwd: "/tmp", status: "idle" as const, source: "tui" as const, createdAt: 1, updatedAt: 1, messageCount: 0 };
+	const first = applySubagentStatusToSession(session, {
+		sessionId: session.id,
+		agents: [{ ...base, transcriptReset: true, transcriptDelta: [{ timestamp: 1, role: "assistant", text: "first" }], streamingTextReset: true, streamingTextDelta: "hel" }],
+		usage,
+	});
+	const second = applySubagentStatusToSession(first, {
+		sessionId: session.id,
+		agents: [{ ...base, updatedAt: 3, transcriptDelta: [{ timestamp: 2, role: "assistant", text: "second" }], streamingTextDelta: "lo" }],
+		usage,
+	});
+	expect(second.subagents?.[0]?.transcript?.map((item) => item.text)).toEqual(["first", "second"]);
+	expect(second.subagents?.[0]?.streamingText).toBe("hello");
+	expect(applySubagentStatusToSession(second, { sessionId: session.id, agents: [], usage }).subagents).toEqual([]);
 });
 
 test("web worktree forwarding preserves spaces in quoted arguments", () => {

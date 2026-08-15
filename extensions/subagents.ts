@@ -1064,14 +1064,15 @@ class SubagentManager {
 			agent.completedAt = Date.now();
 			this.activity(agent, "terminated and released session resources");
 		}
-		if (remove) {
-			this.agents.delete(id);
-			this.archivedAgents.delete(id);
-			this.webTranscriptCursors.delete(id);
-			this.webStreamingSnapshots.delete(id);
-			this.footerSelected = false;
-			this.publishFooter();
-		}
+		this.agents.delete(id);
+		this.webTranscriptCursors.delete(id);
+		this.webStreamingSnapshots.delete(id);
+		if (remove) this.archivedAgents.delete(id);
+		else if (shouldArchiveTerminalSubagent(agent)) this.archivedAgents.set(id, agent);
+		this.footerSelected = false;
+		this.publishFooter();
+		if (this.webStatusPublishTimer) clearTimeout(this.webStatusPublishTimer);
+		this.publishWebStatus();
 		return agent;
 	}
 

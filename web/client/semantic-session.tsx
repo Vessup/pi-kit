@@ -965,6 +965,8 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
   const lastScrollTopRef = React.useRef(0);
   const autoScrollFrameRef = React.useRef<number | null>(null);
   const historyRevisionRef = React.useRef(historyRevision);
+  const manuallyExpandedRef = React.useRef(new Set<string>());
+  const autoExpandedRef = React.useRef<string | null>(null);
   const viewportAnchorRef = React.useRef<{
     element: HTMLElement | null;
     range: Range | null;
@@ -981,7 +983,6 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
     historyRevisionRef.current = historyRevision;
     lockedScrollHeightRef.current = null;
     viewportAnchorRef.current = null;
-    initialScrollPendingRef.current = true;
     followOutputRef.current = true;
     scrollIntentRef.current = null;
     if (scrollSpacerRef.current) scrollSpacerRef.current.style.height = "0px";
@@ -989,6 +990,8 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
     showScrollToBottomRef.current = false;
     setShowScrollToBottom(false);
     setExpandedItems(new Set());
+    manuallyExpandedRef.current.clear();
+    autoExpandedRef.current = null;
   }, [historyRevision]);
 
   const updateScrollButton = React.useCallback((visible: boolean) => {
@@ -1145,9 +1148,6 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
     viewportAnchorRef.current = null;
     lockedScrollHeightRef.current = null;
   }
-
-  const manuallyExpandedRef = React.useRef(new Set<string>());
-  const autoExpandedRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     setExpandedItems(new Set());

@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
+import { isUncertainRpcDeliveryCommand } from "../web/server/managed-rpc-session.ts";
 import { SerializedWriter } from "../web/server/serialized-writer.ts";
+
+test("prompts and compaction remain uncertain after transport acknowledgement loss", () => {
+	expect(isUncertainRpcDeliveryCommand("prompt")).toBe(true);
+	expect(isUncertainRpcDeliveryCommand("compact")).toBe(true);
+	expect(isUncertainRpcDeliveryCommand("set_session_name")).toBe(false);
+});
 
 test("serialized writes acknowledge completion and preserve order", async () => {
 	const releases: Array<() => void> = [];

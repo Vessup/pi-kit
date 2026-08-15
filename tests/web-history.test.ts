@@ -50,6 +50,26 @@ test("oversized history images become explicit omission markers", () => {
 	expect(JSON.stringify(history)).toContain("omitted an oversized image/png attachment");
 });
 
+test("aggregate image size cannot drop an otherwise valid prompt", () => {
+	const history = boundedWebHistory([{
+		type: "message",
+		id: "multi-image",
+		message: {
+			role: "user",
+			content: [
+				{ type: "text", text: "compare these" },
+				{ type: "image", mimeType: "image/png", data: "a".repeat(700) },
+				{ type: "image", mimeType: "image/jpeg", data: "b".repeat(700) },
+			],
+		},
+	}], { maxBytes: 1_000 });
+	const serialized = JSON.stringify(history);
+	expect(history).toHaveLength(1);
+	expect(serialized).toContain("compare these");
+	expect(serialized).toContain("omitted an oversized image/png attachment");
+	expect(serialized).toContain("omitted an oversized image/jpeg attachment");
+});
+
 test("managed context messages become bounded semantic history", () => {
 	const history = messagesToWebHistory([
 		{ role: "compactionSummary", summary: "prior work", tokensBefore: 100, timestamp: 1 },

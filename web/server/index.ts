@@ -55,7 +55,7 @@ import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js"
 import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
 import { boundedWebHistory, messagesToWebHistory, WEB_HISTORY_MAX_BYTES, WEB_HISTORY_MAX_ENTRIES, webHistoryByteLength } from "../history.js";
-import { CommandDeliveryUncertainError, CommandRejectedError, ManagedRpcSession, type ManagedRpcSessionOptions } from "./managed-rpc-session.js";
+import { CommandDeliveryUncertainError, CommandRejectedError, isUncertainRpcDeliveryCommand, ManagedRpcSession, type ManagedRpcSessionOptions } from "./managed-rpc-session.js";
 import {
 	disableTailscaleServe,
 	ensureTailscaleServe,
@@ -175,7 +175,7 @@ const {
 	normalizePath, sessionFileKey, isManagedSessionFile, replaceManagedSessionFile, deleteManagedSessionFile,
 	isWithinDir, canonicalSessionFile, isRecord, persistInitialSession, toNumber, zeroWebUsage, addWebUsage,
 	extractTextContent, compactionEntryFromEvent, extractPreviewFromHistory,
-	parseSessionFile, parseSessionMetadataFile, listSavedSessionFiles,
+	parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
 	scanSavedSessions, deriveForkMessages,
 } = createSessionFileCatalog({ sessionsDir, managedSessionStore });
 
@@ -1017,7 +1017,8 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		usage: resumed?.session.usage,
 		contextUsage: resumed?.session.contextUsage,
 		kind: "managed",
-		history: resumed?.history ?? [],
+		history: existingRecord?.history ?? resumed?.history ?? [],
+		historyReady: existingRecord?.historyReady ?? false,
 		active: true,
 		agentSockets: new Set(),
 		clientSockets: existingRecord?.clientSockets ?? new Set(),
@@ -1147,7 +1148,9 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		try {
 			replaceRecordHistory(record, messagesToWebHistory((await managed.getMessages()).messages));
 		} catch {
-			// Keep the bounded resume history until the RPC runtime reports context.
+			// A failed context request must not publish a blank active resume. Read only
+			// a bounded suffix instead of hydrating the append-only session archive.
+			if (!record.historyReady && record.file) replaceRecordHistory(record, parseSessionHistoryFile(record.file));
 		}
 		try {
 			updateRecordFromStats(record, await managed.getSessionStats());
@@ -1586,7 +1589,7 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 				owner.externalPending.delete(requestId);
 				owner.externalRequestTargets.delete(requestId);
 				const message = "Pi session command timed out";
-				reject(command.type === "prompt" ? new CommandDeliveryUncertainError(message) : new Error(message));
+				reject(isUncertainRpcDeliveryCommand(command.type) ? new CommandDeliveryUncertainError(message) : new Error(message));
 			}, timeoutMs);
 			pendingRequest = {
 				owner: record,
@@ -1609,7 +1612,8 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 				record.externalPending.delete(requestId);
 				record.externalRequestTargets.delete(requestId);
 				clearTimeout(timeout);
-				reject(error instanceof Error ? error : new Error(String(error)));
+				const cause = error instanceof Error ? error : new Error(String(error));
+				reject(isUncertainRpcDeliveryCommand(command.type) ? new CommandDeliveryUncertainError(cause.message) : cause);
 			}
 		});
 		if (command.type === "get_session_options") {
@@ -1642,6 +1646,11 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		const authoritativeHistory = hello.historyMode === "replace" || helloHistory.length > 0;
 		const record = upsertSession(hello.session, kind, authoritativeHistory ? helloHistory : []);
 		if (authoritativeHistory) replaceRecordHistory(record, helloHistory);
+		else if (!record.historyReady && record.file) {
+			// Bridges loaded before historyMode existed reconnect with an empty hello.
+			// Restore a bounded disk suffix without hydrating the full JSONL archive.
+			replaceRecordHistory(record, parseSessionHistoryFile(record.file));
+		}
 		record.preview = extractPreviewFromHistory(record.history) ?? record.preview;
 		record.managedWorktree = helloManagedWorktree ?? record.managedWorktree;
 		record.agentSockets.add(socket);
@@ -2278,8 +2287,8 @@ function handleWebSocketClose(socket: Bun.ServerWebSocket<SocketData>): void {
 			if (pending?.surviveDisconnect) continue;
 			if (pending) {
 				record.externalPending.delete(requestId);
-				pending.reject(pending.commandType === "prompt"
-					? new CommandDeliveryUncertainError("Agent socket closed before prompt acknowledgement")
+				pending.reject(pending.commandType && isUncertainRpcDeliveryCommand(pending.commandType)
+					? new CommandDeliveryUncertainError(`Agent socket closed before ${pending.commandType} acknowledgement`)
 					: new Error("Agent socket closed"));
 			}
 		}

@@ -83,6 +83,15 @@ function mergeSemanticHistory(previous: SemanticEntry[], incoming: SemanticEntry
   });
   return [...reconciled, ...retained];
 }
+
+function semanticHistoriesEqual(previous: SemanticEntry[], incoming: SemanticEntry[]): boolean {
+  if (previous.length !== incoming.length) return false;
+  return previous.every((entry, index) => {
+    const next = incoming[index];
+    if (!next || entry.id !== next.id) return false;
+    try { return JSON.stringify(entry) === JSON.stringify(next); } catch { return false; }
+  });
+}
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
 
@@ -839,6 +848,7 @@ export function App() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const [entries, setEntries] = React.useState<SemanticEntry[]>([]);
+  const entriesRef = React.useRef<SemanticEntry[]>([]);
   const [historyRevision, setHistoryRevision] = React.useState(0);
   const [streamingMessage, setStreamingMessage] = React.useState<Record<string, unknown> | null>(null);
   const [streamingMessageKey, setStreamingMessageKey] = React.useState<string | null>(null);
@@ -861,6 +871,7 @@ export function App() {
   React.useEffect(() => { savePreference(SESSION_SORT_KEY, sessionSort); }, [sessionSort]);
   React.useEffect(() => { savePreference(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects)); }, [collapsedProjects]);
   React.useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  React.useEffect(() => { entriesRef.current = entries; }, [entries]);
 
   const loadAllSessions = React.useCallback(async () => {
     try {
@@ -930,6 +941,7 @@ export function App() {
     setConnected(false);
     setTranscriptLoading(true);
     if (switchingSessions) {
+      entriesRef.current = [];
       setEntries([]);
       setStreamingMessage(null);
       setStreamingMessageKey(null);
@@ -969,14 +981,25 @@ export function App() {
       if (type === "server.history") {
         const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[]; replace?: boolean };
         if (payload.sessionId === selectedIdRef.current) {
-          if (payload.entries) setEntries((previous) => (payload.replace || switchingSessions) ? payload.entries! : mergeSemanticHistory(previous, payload.entries!));
+          const incoming = payload.entries;
+          const transcriptChanged = Boolean(payload.replace && incoming && (switchingSessions || !semanticHistoriesEqual(entriesRef.current, incoming)));
+          if (incoming) {
+            if (payload.replace || switchingSessions) {
+              entriesRef.current = incoming;
+              setEntries(incoming);
+            } else {
+              setEntries((previous) => mergeSemanticHistory(previous, incoming));
+            }
+          }
           if (payload.replace) {
-            setHistoryRevision((revision) => revision + 1);
+            // A reconnect snapshot still clears transient stream/tool state, but an
+            // identical transcript must not eject a reader from their scroll anchor.
             setStreamingMessage(null);
             setStreamingMessageKey(null);
             streamingMessageKeyRef.current = null;
             setActiveTools([]);
           }
+          if (transcriptChanged) setHistoryRevision((revision) => revision + 1);
           setTranscriptLoading(false);
         }
         return;
