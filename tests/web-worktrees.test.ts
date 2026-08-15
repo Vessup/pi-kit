@@ -320,16 +320,22 @@ test("async managed cleanup yields before spawning Git verification", async () =
 			import { removeManagedWorktreeAsync } from ${JSON.stringify(moduleUrl)};
 			const started = Date.now();
 			const cleanup = removeManagedWorktreeAsync({ path: "/missing/topic", repoRoot: "/missing", name: "topic", branch: "topic", branchCreated: true });
-			console.log(Date.now() - started);
+			const elapsed = Date.now() - started;
+			if (elapsed >= 500) {
+				console.error(\`removeManagedWorktreeAsync blocked for \${elapsed}ms before returning\`);
+				process.exitCode = 2;
+			}
 			await cleanup.catch(() => undefined);
 		`],
 		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
-		stdout: "pipe",
+		stdout: "ignore",
 		stderr: "pipe",
 	});
-	const elapsed = Number((await new Response(probe.stdout).text()).trim());
-	expect(await probe.exited).toBe(0);
-	expect(elapsed).toBeLessThan(500);
+	const [stderr, exitCode] = await Promise.all([
+		new Response(probe.stderr).text(),
+		probe.exited,
+	]);
+	if (exitCode !== 0) throw new Error(`Async cleanup probe failed: ${stderr.trim() || `exit ${exitCode}`}`);
 }, 5_000);
 
 test("managed worktree metadata is parsed and cleanup removes its checkout and branch", async () => {

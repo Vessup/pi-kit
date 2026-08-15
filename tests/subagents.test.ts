@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import {
+import subagentsExtension, {
 	abortRunningSubagentSessions,
 	appendBoundedStreamingText,
 	countsAgainstSubagentLimit,
@@ -18,6 +18,30 @@ import {
 	subagentModelGuidance,
 	subagentModelRuntime,
 } from "../extensions/subagents.ts";
+import { stringifyCompact, truncateChars, truncateToolOutput } from "../extensions/subagents/format.ts";
+import { MAX_TOOL_OUTPUT_BYTES } from "../extensions/subagents/types.ts";
+import { AgentDetailDialog, FooterNavigationEditor } from "../extensions/subagents/ui.ts";
+
+test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
+	const tools: string[] = [];
+	const commands: string[] = [];
+	const hooks: string[] = [];
+	const events: string[] = [];
+	const pi = {
+		events: { on(name: string) { events.push(name); }, emit() {} },
+		on(name: string) { hooks.push(name); },
+		registerTool(tool: { name: string }) { tools.push(tool.name); },
+		registerCommand(name: string) { commands.push(name); },
+		getActiveTools() { return []; },
+	};
+
+	subagentsExtension(pi as never);
+
+	assert.deepEqual(tools, ["subagent_create", "subagent_read", "subagent_send", "subagent_configure", "subagent_terminate"]);
+	assert.deepEqual(commands, ["subagents", "subagents-cleanup"]);
+	assert.deepEqual(hooks, ["before_agent_start", "session_start", "input", "agent_start", "agent_settled", "session_shutdown"]);
+	assert.deepEqual(events, ["vessup:subagents:abort"]);
+});
 
 const usage = {
 	input: 10,
@@ -27,6 +51,67 @@ const usage = {
 	totalTokens: 19,
 	cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 },
 };
+
+test("compact formatting handles non-JSON values and preserves Unicode code points", () => {
+	assert.equal(stringifyCompact(undefined), "undefined");
+	assert.equal(stringifyCompact(Symbol("value")), "Symbol(value)");
+	assert.equal(stringifyCompact("🙂", 2), '"🙂…');
+	assert.equal(truncateChars("a🙂b", 2), "a🙂\n[… 1 characters omitted]");
+});
+
+test("subagent tool output truncates at a valid UTF-8 byte boundary", () => {
+	const source = `a${"🙂".repeat(Math.ceil(MAX_TOOL_OUTPUT_BYTES / 4) + 10)}`;
+	const result = truncateToolOutput(source);
+	const output = result.split("\n\n[Output truncated:", 1)[0]!;
+	assert.ok(Buffer.byteLength(output, "utf8") <= MAX_TOOL_OUTPUT_BYTES);
+	assert.equal(output.endsWith("�"), false);
+	assert.match(result, new RegExp(`Output truncated: ${Buffer.byteLength(source, "utf8") - Buffer.byteLength(output, "utf8")} bytes omitted`));
+});
+
+test("subagent footer editor preserves key-release preferences", () => {
+	const base = { focused: false, wantsKeyRelease: true };
+	const editor = new FooterNavigationEditor(base as never, {} as never, {} as never, () => {});
+	assert.equal(editor.wantsKeyRelease, true);
+	editor.wantsKeyRelease = false;
+	assert.equal(base.wantsKeyRelease, false);
+});
+
+test("subagent detail rendering caches wrapped transcript lines", () => {
+	let contentFormats = 0;
+	const agent = {
+		id: "worker",
+		status: "completed",
+		model: "provider/model",
+		effort: "medium",
+		createdAt: Date.now(),
+		prompt: "task",
+		usage,
+		transcript: [{ timestamp: Date.now(), role: "assistant", text: "hello" }],
+		streamingText: "",
+	};
+	const theme = {
+		fg(_color: string, text: string) {
+			if (text === "hello") contentFormats++;
+			return text;
+		},
+	};
+	const dialog = new AgentDetailDialog(agent as never, { requestRender() {} } as never, theme as never, {} as never, () => {});
+	try {
+		dialog.render(80);
+		dialog.render(80);
+		assert.equal(contentFormats, 1);
+		agent.streamingText = "streaming";
+		dialog.render(80);
+		assert.equal(contentFormats, 2);
+		dialog.render(79);
+		assert.equal(contentFormats, 3);
+		agent.transcript.push({ timestamp: Date.now(), role: "assistant", text: "next" });
+		dialog.render(79);
+		assert.equal(contentFormats, 4);
+	} finally {
+		dialog.dispose();
+	}
+});
 
 test("creating agents reserve capacity before their session exists", () => {
 	assert.equal(countsAgainstSubagentLimit({ status: "creating" }), true);
