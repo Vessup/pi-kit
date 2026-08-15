@@ -40,9 +40,14 @@ test("web worktrees are created under the primary repository .pi directory", asy
 
 	const result = await createWebWorktree(repository, "feature-one");
 	expect(await realpath(result.path)).toBe(await realpath(join(repository, ".pi", "worktrees", "feature-one")));
-	await expect(createWebWorktree(repository, "feature-one")).rejects.toThrow(`Worktree path already exists: ${result.path}`);
+	const reused = await createWebWorktree(repository, "feature-one");
+	expect(reused).toMatchObject({ path: result.path, name: "feature-one", branch: "feature-one", branchCreated: false, setupRan: false });
+	await expect(createWebWorktree(repository, "feature-one", { branch: "different-branch" })).rejects.toThrow("not requested branch different-branch");
 	expect(result).toMatchObject({ name: "feature-one", branch: "feature-one", branchCreated: true });
 	expect((await Bun.$`git -C ${result.path} branch --show-current`.text()).trim()).toBe("feature-one");
+	const stalePath = join(repository, ".pi", "worktrees", "stale");
+	await mkdir(stalePath, { recursive: true });
+	await expect(createWebWorktree(repository, "stale")).rejects.toThrow("already exists but cannot be reused");
 
 	await writeFile(join(repository, "README.md"), "second\n");
 	await Bun.$`git -C ${repository} commit -am second -q`;

@@ -473,7 +473,8 @@ export async function createWebWorktree(
 ): Promise<CreatedWebWorktree> {
 	ensureSupportedGit();
 	const name = validateWorktreeName(requestedName);
-	const branch = validateLocalBranchName(options.branch?.trim() || name);
+	const requestedBranch = options.branch?.trim();
+	const branch = validateLocalBranchName(requestedBranch || name);
 	gitOutput(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 	const repoRoot = primaryRepositoryRoot(cwd);
 	const path = join(repoRoot, ".pi", "worktrees", name);
@@ -486,7 +487,32 @@ export async function createWebWorktree(
 			throw new Error(`Could not inspect worktree path ${path}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	if (pathExists) throw new Error(`Worktree path already exists: ${path}`);
+	if (pathExists) {
+		let existing: ExistingWebWorktree;
+		try {
+			existing = inspectExistingWorktree(repoRoot, path);
+		} catch (error) {
+			throw new Error(`Worktree path already exists but cannot be reused: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (existing.ref.kind !== "branch") throw new Error(`Existing worktree at ${path} is detached; check out a branch before reusing it`);
+		if (requestedBranch && existing.ref.value !== branch) {
+			throw new Error(`Existing worktree at ${path} has branch ${existing.ref.value}, not requested branch ${branch}`);
+		}
+		const existingBranch = validateLocalBranchName(existing.ref.value);
+		const head = gitOutput(existing.path, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase();
+		return {
+			path: existing.path,
+			repoRoot,
+			name,
+			branch: existingBranch,
+			// Reuse does not prove this request created the branch. Preserve it when
+			// the final session eventually removes the managed checkout.
+			branchCreated: false,
+			startPoint: `refs/heads/${existingBranch}`,
+			initialCommit: head,
+			setupRan: false,
+		};
+	}
 
 	const explicitStart = options.startPoint === undefined ? undefined : resolveStartPoint(repoRoot, options.startPoint);
 	const branchExists = localBranchExists(repoRoot, branch);

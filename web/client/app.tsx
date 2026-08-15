@@ -325,7 +325,7 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New session</DialogTitle>
-          <DialogDescription>Choose a repository or directory. Add a worktree name to create a linked checkout first.</DialogDescription>
+          <DialogDescription>Choose a repository or directory. Add a worktree name to create or reuse a linked checkout.</DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
           <div className="space-y-2">
@@ -348,7 +348,7 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
           <div className="space-y-2">
             <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-worktree`}>worktree name</label>
             <Input id={`${repositoryListId}-worktree`} value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional managed directory name" />
-            <p className="text-xs text-zinc-500">Creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The branch can have a different, namespaced name.</p>
+            <p className="text-xs text-zinc-500">Creates or reuses <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The branch can have a different, namespaced name.</p>
           </div>
           {worktreeName.trim() && <>
             <div className="space-y-2">
