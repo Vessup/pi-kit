@@ -830,6 +830,7 @@ test("TUI metadata changes update every connected web catalog", async () => {
 	let resolveRenamed!: () => void;
 	let resolveBranch!: () => void;
 	let resolvePullRequest!: () => void;
+	let resolveCompletedPullRequest!: () => void;
 	let resolveWorking!: () => void;
 	let resolveIdle!: () => void;
 	let resolvePreview!: () => void;
@@ -841,6 +842,7 @@ test("TUI metadata changes update every connected web catalog", async () => {
 	const renamed = new Promise<void>((resolve) => { resolveRenamed = resolve; });
 	const branchUpdated = new Promise<void>((resolve) => { resolveBranch = resolve; });
 	const pullRequestUpdated = new Promise<void>((resolve) => { resolvePullRequest = resolve; });
+	const completedPullRequestUpdated = new Promise<void>((resolve) => { resolveCompletedPullRequest = resolve; });
 	const working = new Promise<void>((resolve) => { resolveWorking = resolve; });
 	const idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
 	const previewUpdated = new Promise<void>((resolve) => { resolvePreview = resolve; });
@@ -870,6 +872,7 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		if (message.session.name === "Renamed in TUI") resolveRenamed();
 		if (message.session.branch === "feature/live-metadata") resolveBranch();
 		if (message.session.pullRequest?.number === 3) resolvePullRequest();
+		if (message.session.pullRequest?.number === 4) resolveCompletedPullRequest();
 		if (message.session.status === "working" && !message.session.compaction) {
 			observedWorking = true;
 			resolveWorking();
@@ -899,8 +902,10 @@ test("TUI metadata changes update every connected web catalog", async () => {
 		await Promise.race([pullRequestUpdated, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "agent_start" } }));
 		await Promise.race([working, timedOut]);
+		await writeFile(prMetadataFile, JSON.stringify({ number: 4, url: "https://github.com/Vessup/pi-kit/pull/4" }));
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "agent_end" } }));
 		await Promise.race([idle, timedOut]);
+		await Promise.race([completedPullRequestUpdated, timedOut]);
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "message_end", message: { role: "assistant", content: "Latest assistant preview" } } }));
 		agent.send(JSON.stringify({ type: "agent.update", session: { ...tuiSession, name: "Renamed in TUI", branch: "feature/live-metadata", preview: "Stale first preview", updatedAt: Date.now() } }));
 		agent.send(JSON.stringify({ type: "agent.event", sessionId: tuiId, event: { type: "session_info_changed", name: "Preview barrier" } }));

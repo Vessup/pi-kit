@@ -1784,6 +1784,9 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			} else if (subagentsChanged) {
 				broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 			}
+			// PRs are commonly opened during an agent run without changing branches.
+			// Refresh after completion so the catalog does not retain the pre-PR lookup.
+			if (event.event.type === "agent_end") void hydrateGitMetadata(record);
 		}
 		return;
 	}
