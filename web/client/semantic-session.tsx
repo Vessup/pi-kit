@@ -1542,9 +1542,18 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
             lastScrollTopRef.current = target.scrollTop;
           }
         }
-        await onSend(message, images, behavior);
+        const submittedImages = images;
+        // Delivery can remain pending for long-running control commands such as
+        // /compact. Clear immediately so a delivered command never looks unsent.
         setDraft("");
         setImages([]);
+        try {
+          await onSend(message, submittedImages, behavior);
+        } catch (cause) {
+          setDraft((current) => current || message);
+          setImages((current) => current.length > 0 ? current : submittedImages);
+          throw cause;
+        }
       }
       setSendError(null);
     } catch (cause) {

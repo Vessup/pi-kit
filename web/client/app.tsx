@@ -49,6 +49,7 @@ import { includeWebReloadCommand, isWebReloadCommand } from "../reload-command";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { displaySessionStatus } from "./session-status";
 import { agentEndTerminalNotice } from "../assistant-message";
+import { localCommandEntryId, preserveLocalCommandEntries } from "./local-command";
 
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
 
@@ -983,13 +984,16 @@ export function App() {
         const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[]; replace?: boolean };
         if (payload.sessionId === selectedIdRef.current) {
           const incoming = payload.entries;
-          const transcriptChanged = Boolean(payload.replace && incoming && (switchingSessions || !semanticHistoriesEqual(entriesRef.current, incoming)));
-          if (incoming) {
+          const replacement = incoming && (payload.replace || switchingSessions)
+            ? preserveLocalCommandEntries(entriesRef.current, incoming)
+            : incoming;
+          const transcriptChanged = Boolean(payload.replace && replacement && (switchingSessions || !semanticHistoriesEqual(entriesRef.current, replacement)));
+          if (replacement) {
             if (payload.replace || switchingSessions) {
-              entriesRef.current = incoming;
-              setEntries(incoming);
+              entriesRef.current = replacement;
+              setEntries(replacement);
             } else {
-              setEntries((previous) => mergeSemanticHistory(previous, incoming));
+              setEntries((previous) => mergeSemanticHistory(previous, replacement));
             }
           }
           if (payload.replace) {
@@ -1013,7 +1017,11 @@ export function App() {
         pendingRequestsRef.current.delete(payload.requestId);
         if (payload.success) pending.resolve(payload.data);
         else {
-          setEntries((previous) => previous.filter((entry) => entry.id !== pending.optimisticId));
+          setEntries((previous) => {
+            const next = previous.filter((entry) => entry.id !== pending.optimisticId);
+            entriesRef.current = next;
+            return next;
+          });
           pending.reject(new Error(payload.error ?? "Request failed"));
         }
         return;
@@ -1054,26 +1062,37 @@ export function App() {
       } else if (eventType === "web_queue_delivery" && event.item && typeof event.item === "object") {
         const item = event.item as WebQueuedMessage;
         if (typeof item.id !== "string" || typeof item.message !== "string") return;
-        const optimisticId = `optimistic-queued-${item.id}`;
+        const optimisticId = parseWebCompactCommand(item.message) !== undefined
+          ? localCommandEntryId(item.id)
+          : `optimistic-queued-${item.id}`;
         if (event.phase === "started") {
           // Atomically move the follow-up out of the editable queue and into the
           // normal transcript before the server asks Pi to begin its turn.
           setQueuedMessages((previous) => previous.filter((queued) => queued.id !== item.id));
-          setEntries((previous) => previous.some((entry) => entry.id === optimisticId) ? previous : [...previous, {
-            id: optimisticId,
-            type: "message",
-            timestamp: new Date().toISOString(),
-            message: {
-              role: "user",
-              timestamp: Date.now(),
-              content: [
-                ...(item.message ? [{ type: "text", text: item.message }] : []),
-                ...(item.images ?? []).map((image) => ({ ...image })),
-              ],
-            },
-          }]);
+          setEntries((previous) => {
+            if (previous.some((entry) => entry.id === optimisticId)) return previous;
+            const next = [...previous, {
+              id: optimisticId,
+              type: "message" as const,
+              timestamp: new Date().toISOString(),
+              message: {
+                role: "user",
+                timestamp: Date.now(),
+                content: [
+                  ...(item.message ? [{ type: "text", text: item.message }] : []),
+                  ...(item.images ?? []).map((image) => ({ ...image })),
+                ],
+              },
+            }];
+            entriesRef.current = next;
+            return next;
+          });
         } else if (event.phase === "failed") {
-          setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+          setEntries((previous) => {
+            const next = previous.filter((entry) => entry.id !== optimisticId);
+            entriesRef.current = next;
+            return next;
+          });
         }
       } else if (eventType === "message_start" && event.message && typeof event.message === "object" && (event.message as Record<string, unknown>).role === "assistant") {
         const assistant = event.message as Record<string, unknown>;
@@ -1307,14 +1326,17 @@ export function App() {
     assertClientPromptPayloadFits(promptFrame);
     const queuedFollowUp = streamingBehavior === "followUp" && selectedSession?.status === "working";
     const worktreeCommand = /^\/worktree(?:\s|$)/.test(message.trim());
-    const controlCommand = isWebReloadCommand(message) || parseWebCompactCommand(message) !== undefined || worktreeCommand;
+    const compactCommand = parseWebCompactCommand(message);
+    const controlCommand = isWebReloadCommand(message) || compactCommand !== undefined || worktreeCommand;
     const optimisticallyWorking = !queuedFollowUp && !controlCommand && selectedSession?.status !== "working";
     const previousStatus = selectedSession?.status;
     if (optimisticallyWorking) {
       setCurrentSession((current) => current?.id === sessionId ? { ...current, status: "working" } : current);
       setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, status: "working" } : session));
     }
-    const optimisticId = `optimistic-${requestId}`;
+    const optimisticId = compactCommand !== undefined && !queuedFollowUp
+      ? localCommandEntryId(requestId)
+      : `optimistic-${requestId}`;
     const optimistic: SemanticEntry = {
       id: optimisticId,
       type: "message",
@@ -1329,7 +1351,11 @@ export function App() {
       },
     };
     if (!queuedFollowUp) {
-      setEntries((previous) => [...previous, optimistic]);
+      setEntries((previous) => {
+        const next = [...previous, optimistic];
+        entriesRef.current = next;
+        return next;
+      });
       // Let React commit and the browser paint the local user bubble before the
       // native bridge receives the prompt and renders it in the TUI.
       if (!controlCommand) await waitForVisibleBrowserPaint();
@@ -1344,7 +1370,13 @@ export function App() {
           promptFrameSent = true;
         } catch (cause) {
           pendingRequestsRef.current.delete(requestId);
-          if (!queuedFollowUp) setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+          if (!queuedFollowUp) {
+            setEntries((previous) => {
+              const next = previous.filter((entry) => entry.id !== optimisticId);
+              entriesRef.current = next;
+              return next;
+            });
+          }
           reject(cause instanceof Error ? cause : new Error(String(cause)));
         }
       });
