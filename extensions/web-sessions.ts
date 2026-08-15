@@ -22,6 +22,7 @@ import type {
 	AgentCommand,
 	AgentEventMessage,
 	AgentHelloMessage,
+	AgentHistoryMessage,
 	AgentResponseMessage,
 	AgentSessionReplacedMessage,
 	AgentSubagentsMessage,
@@ -35,6 +36,8 @@ import type {
 import { WEB_STATE_VERSION } from "../web/protocol.js";
 import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
+import { boundedWebHistory } from "../web/history.js";
+import { managedWorktreeFromEntries } from "../web/server/worktrees.js";
 import { readWebTailscaleSetting, writeWebTailscaleSetting } from "./web-settings.js";
 import {
 	consumeWorktreeReplacement,
@@ -287,6 +290,11 @@ function addWebUsage(target: NonNullable<WebSession["usage"]>, value: unknown): 
 	}
 }
 
+function contextUsage(ctx: ExtensionContext): WebSession["contextUsage"] {
+	const usage = ctx.getContextUsage();
+	return usage ? { ...usage } : ctx.model ? { tokens: null, contextWindow: ctx.model.contextWindow, percent: null } : undefined;
+}
+
 function sessionMetrics(ctx: ExtensionContext): Pick<WebSession, "usage" | "contextUsage"> {
 	const usage = zeroWebUsage();
 	for (const entry of ctx.sessionManager.getEntries()) {
@@ -296,11 +304,14 @@ function sessionMetrics(ctx: ExtensionContext): Pick<WebSession, "usage" | "cont
 			addWebUsage(usage, entry.usage);
 		}
 	}
-	const contextUsage = ctx.getContextUsage();
-	return {
-		usage,
-		contextUsage: contextUsage ? { ...contextUsage } : ctx.model ? { tokens: null, contextWindow: ctx.model.contextWindow, percent: null } : undefined,
-	};
+	return { usage, contextUsage: contextUsage(ctx) };
+}
+
+function refreshIncrementalMetrics(state: BridgeState, usageValue: unknown): void {
+	const current = state.metrics.usage ?? zeroWebUsage();
+	const usage = { ...current, cost: { ...current.cost } };
+	addWebUsage(usage, usageValue);
+	state.metrics = { usage, contextUsage: contextUsage(state.ctx) };
 }
 
 function safeClone(value: unknown): Record<string, unknown> {
@@ -364,6 +375,12 @@ function flush(state: BridgeState): void {
 	for (const message of state.pending.splice(0)) state.socket.send(JSON.stringify(message));
 }
 
+function discardPendingCoveredByHello(state: BridgeState): void {
+	const latestSubagents = [...state.pending].reverse().find((message) => message.type === "agent.subagents");
+	state.pending = state.pending.filter((message) => message.type === "agent.response");
+	if (latestSubagents) state.pending.push(latestSubagents);
+}
+
 function statusForContext(ctx: ExtensionContext): WebSession["status"] {
 	return ctx.isIdle() ? "idle" : "working";
 }
@@ -394,8 +411,7 @@ async function refreshGitMetadata(pi: ExtensionAPI, state: BridgeState): Promise
 	if (!state.closed) updateSession(state, { branch, pullRequest });
 }
 
-function updateSession(state: BridgeState, patch: Partial<WebSession> = {}, refreshMetrics = false): void {
-	if (refreshMetrics) state.metrics = sessionMetrics(state.ctx);
+function updateSession(state: BridgeState, patch: Partial<WebSession> = {}): void {
 	state.session = {
 		...state.session,
 		...state.metrics,
@@ -737,13 +753,14 @@ async function connect(pi: ExtensionAPI, state: BridgeState): Promise<void> {
 				return;
 			}
 			state.reconnectAttempt = 0;
+			discardPendingCoveredByHello(state);
 			const hello: AgentHelloMessage = {
 				type: "agent.hello",
 				session: state.session,
-				// The server can read JSONL history from session.file. Sending every
-				// entry here makes large sessions exceed WebSocket frame limits and
-				// prevents the native bridge from registering after a daemon restart.
-				entries: [],
+				historyMode: "replace",
+				// Send only active, compaction-aware history and bound its encoded size.
+				// The append-only JSONL can be hundreds of MB after old context is gone.
+				entries: boundedWebHistory(state.ctx.sessionManager.buildContextEntries()),
 			};
 			socket.send(JSON.stringify(hello));
 			if (state.sourceReplacement) {
@@ -798,6 +815,7 @@ function makeSession(ctx: ExtensionContext, branch: string | undefined): WebSess
 		messageCount: entries.filter((entry) => entry.type === "message").length,
 		preview,
 		parentSession: header?.parentSession,
+		managedWorktree: managedWorktreeFromEntries(entries),
 		...sessionMetrics(ctx),
 	};
 }
@@ -834,6 +852,10 @@ export default function webSessions(pi: ExtensionAPI): void {
 
 	const forward = (event: unknown, ctx: ExtensionContext, status?: WebSession["status"], refreshMetrics = false): void => {
 		if (!bridge || bridge.closed || ctx.sessionManager.getSessionId() !== bridge.session.id) return;
+		if (refreshMetrics) {
+			const message = isRecord(event) && event.type === "message_end" ? event.message : undefined;
+			refreshIncrementalMetrics(bridge, isRecord(message) ? message.usage : undefined);
+		}
 		send(bridge, {
 			type: "agent.event",
 			sessionId: bridge.session.id,
@@ -843,10 +865,8 @@ export default function webSessions(pi: ExtensionAPI): void {
 		updateSession(bridge, {
 			status,
 			preview: latestPreview ?? bridge.session.preview,
-			messageCount: refreshMetrics
-				? ctx.sessionManager.getEntries().filter((entry) => entry.type === "message").length
-				: bridge.session.messageCount,
-		}, refreshMetrics);
+			messageCount: refreshMetrics ? bridge.session.messageCount + 1 : bridge.session.messageCount,
+		});
 	};
 
 	pi.registerCommand("web", {
@@ -1108,8 +1128,14 @@ export default function webSessions(pi: ExtensionAPI): void {
 		}, { once: true });
 	});
 	pi.on("session_compact", (event, ctx) => {
-		if (bridge) updateSession(bridge, {}, true);
 		if (bridge && ctx.sessionManager.getSessionId() === bridge.session.id) {
+			refreshIncrementalMetrics(bridge, event.compactionEntry.usage);
+			updateSession(bridge);
+			send(bridge, {
+				type: "agent.history",
+				sessionId: bridge.session.id,
+				entries: boundedWebHistory(ctx.sessionManager.buildContextEntries()),
+			} satisfies AgentHistoryMessage);
 			endBridgeCompaction(bridge, {
 				aborted: false,
 				willRetry: event.willRetry,

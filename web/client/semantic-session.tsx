@@ -106,6 +106,7 @@ function lastAssistantMessageIndex(messages: MessageView[]): number {
 type SemanticSessionProps = {
   session: WebSession | null;
   entries: SemanticEntry[];
+  historyRevision: number;
   streamingMessage: Record<string, unknown> | null;
   streamingMessageKey: string | null;
   tools: ActiveTool[];
@@ -894,7 +895,7 @@ function QueuedMessageRow({ item, overlay = false, overlayWidth, blocked = false
   );
 }
 
-export function SemanticSession({ session, entries, streamingMessage, streamingMessageKey: providedStreamingMessageKey, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
+export function SemanticSession({ session, entries, historyRevision, streamingMessage, streamingMessageKey: providedStreamingMessageKey, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
   const [sendError, setSendError] = React.useState<string | null>(null);
@@ -937,6 +938,7 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
   const lastTouchYRef = React.useRef<number | null>(null);
   const lastScrollTopRef = React.useRef(0);
   const autoScrollFrameRef = React.useRef<number | null>(null);
+  const historyRevisionRef = React.useRef(historyRevision);
   const viewportAnchorRef = React.useRef<{
     element: HTMLElement | null;
     range: Range | null;
@@ -947,6 +949,21 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
     fallbacks: Array<{ key: string; top: number }>;
     scrollTop: number;
   } | null>(null);
+
+  React.useLayoutEffect(() => {
+    if (historyRevisionRef.current === historyRevision) return;
+    historyRevisionRef.current = historyRevision;
+    lockedScrollHeightRef.current = null;
+    viewportAnchorRef.current = null;
+    initialScrollPendingRef.current = true;
+    followOutputRef.current = true;
+    scrollIntentRef.current = null;
+    if (scrollSpacerRef.current) scrollSpacerRef.current.style.height = "0px";
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    showScrollToBottomRef.current = false;
+    setShowScrollToBottom(false);
+    setExpandedItems(new Set());
+  }, [historyRevision]);
 
   const updateScrollButton = React.useCallback((visible: boolean) => {
     showScrollToBottomRef.current = visible;

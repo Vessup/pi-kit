@@ -1,11 +1,12 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { buildContextEntries, SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type {
 	AgentEventMessage,
 	AgentHelloMessage,
+	AgentHistoryMessage,
 	AgentResponseMessage,
 	AgentSessionReplacedMessage,
 	AgentSubagentsMessage,
@@ -51,6 +52,7 @@ import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js";
 import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
+import { boundedWebHistory, messagesToWebHistory, WEB_HISTORY_MAX_BYTES, WEB_HISTORY_MAX_ENTRIES, webHistoryByteLength } from "../history.js";
 import { SerializedWriter } from "./serialized-writer.js";
 import {
 	disableTailscaleServe,
@@ -112,6 +114,8 @@ type SessionRecord = {
 	compaction?: WebSession["compaction"];
 	kind: SessionKind;
 	history: unknown[];
+	historyReady?: boolean;
+	historyBytes?: number;
 	active: boolean;
 	/** Last authoritative agent lifecycle state; guards against stale bridge updates. */
 	agentRunning?: boolean;
@@ -208,7 +212,7 @@ const IMAGE_EXTENSIONS = new Map([
 const sessions = new Map<string, SessionRecord>();
 const sessionsByFile = new Map<string, SessionRecord>();
 const connectedClientSockets = new Set<Bun.ServerWebSocket<ClientSocketData>>();
-const savedSessionMetadataCache = new Map<string, { mtimeMs: number; size: number; scan: SessionFileScan }>();
+const savedSessionMetadataCache = new Map<string, { ino: number; mtimeMs: number; size: number; scan: SessionFileScan; metadataEntries: Record<string, unknown>[] }>();
 const managedSessionStarts = new Map<string, Promise<SessionRecord>>();
 const missingSessionReconciliations = new Set<SessionRecord>();
 const slashCommandCache = new Map<string, { loadedAt: number; commands: DiscoveredSlashCommand[] }>();
@@ -389,6 +393,12 @@ function extractTextContent(content: unknown): string | undefined {
 	return parts.length > 0 ? parts.join("") : undefined;
 }
 
+function compactionEntryFromEvent(event: Record<string, unknown>): unknown | undefined {
+	if (event.type === "session_compact" && isRecord(event.compactionEntry)) return event.compactionEntry;
+	if (event.type !== "compaction_end" || event.aborted === true || !isRecord(event.result)) return undefined;
+	return isRecord(event.result.compactionEntry) ? event.result.compactionEntry : undefined;
+}
+
 function extractPreviewFromHistory(entries: unknown[]): string | undefined {
 	for (let i = entries.length - 1; i >= 0; i -= 1) {
 		const entry = entries[i] as Record<string, unknown> | undefined;
@@ -473,24 +483,45 @@ function parseSessionFile(file: string): SessionFileScan | undefined {
 	}
 }
 
+function readFileSuffix(file: string, start: number, end: number): string {
+	const length = Math.max(0, end - start);
+	if (length === 0) return "";
+	const buffer = Buffer.allocUnsafe(length);
+	const fd = openSync(file, "r");
+	try {
+		let offset = 0;
+		while (offset < length) {
+			const read = readSync(fd, buffer, offset, length - offset, start + offset);
+			if (read === 0) break;
+			offset += read;
+		}
+		return buffer.subarray(0, offset).toString("utf8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
 function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 	try {
 		const stats = statSync(file);
 		const cached = savedSessionMetadataCache.get(file);
-		if (cached?.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached.scan;
-
-		const text = readFileSync(file, "utf8");
+		if (cached?.ino === stats.ino && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached.scan;
+		const incremental = cached !== undefined && cached.ino === stats.ino && stats.size > cached.size;
+		const text = incremental ? readFileSuffix(file, cached.size, stats.size) : readFileSync(file, "utf8");
 		const lines = text.split(/\n/).map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line)).filter(Boolean);
-		if (lines.length === 0) return undefined;
-		const header = JSON.parse(lines[0] ?? "null") as Record<string, unknown> | null;
-		let name: string | undefined;
-		let model: string | undefined;
-		let thinkingLevel: string | undefined;
-		let messageCount = 0;
-		let preview: string | undefined;
-		const metadataEntries: Record<string, unknown>[] = [];
+		if (!incremental && lines.length === 0) return undefined;
+		const header = incremental
+			? cached.scan.header
+			: JSON.parse(lines.shift() ?? "null") as Record<string, unknown> | null;
+		let name = incremental ? cached.scan.session.name : undefined;
+		let model = incremental ? cached.scan.session.model : undefined;
+		let thinkingLevel = incremental ? cached.scan.session.thinkingLevel : undefined;
+		let messageCount = incremental ? cached.scan.session.messageCount : 0;
+		let preview = incremental ? cached.scan.session.preview : undefined;
+		const metadataEntries = incremental ? [...cached.metadataEntries] : [];
 		const usage = zeroWebUsage();
-		for (const line of lines.slice(1)) {
+		if (incremental) addWebUsage(usage, cached.scan.session.usage);
+		for (const line of lines) {
 			let entry: Record<string, unknown> | undefined;
 			try {
 				const parsed: unknown = JSON.parse(line);
@@ -514,10 +545,8 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 			}
 			if (entry.type === "branch_summary" || entry.type === "compaction") addWebUsage(usage, entry.usage);
 		}
-		const id = typeof header?.id === "string" ? header.id : basename(file, ".jsonl");
-		const cwd = typeof header?.cwd === "string" && header.cwd ? header.cwd : dirname(file);
-		// Resolve all markers together so malformed newer entries are skipped while
-		// an explicit `{ managed: false }` still clears earlier ownership.
+		const id = incremental ? cached.scan.session.id : typeof header?.id === "string" ? header.id : basename(file, ".jsonl");
+		const cwd = incremental ? cached.scan.session.cwd : typeof header?.cwd === "string" && header.cwd ? header.cwd : dirname(file);
 		const managedWorktree = managedWorktreeFromEntries(metadataEntries);
 		const session: WebSession = {
 			id,
@@ -528,11 +557,11 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 			thinkingLevel,
 			status: "offline",
 			source: isManagedSessionFile(file) ? "web" : "saved",
-			createdAt: typeof header?.timestamp === "string" ? Date.parse(header.timestamp) || stats.birthtimeMs : stats.birthtimeMs,
+			createdAt: incremental ? cached.scan.session.createdAt : typeof header?.timestamp === "string" ? Date.parse(header.timestamp) || stats.birthtimeMs : stats.birthtimeMs,
 			updatedAt: stats.mtimeMs,
 			messageCount,
 			preview,
-			parentSession: typeof header?.parentSession === "string" ? header.parentSession : undefined,
+			parentSession: incremental ? cached.scan.session.parentSession : typeof header?.parentSession === "string" ? header.parentSession : undefined,
 			managedWorktree,
 			usage,
 		};
@@ -545,7 +574,7 @@ function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 			managedWorktreeScanned: true,
 			replacement: replacementFromEntries(metadataEntries),
 		};
-		savedSessionMetadataCache.set(file, { mtimeMs: stats.mtimeMs, size: stats.size, scan });
+		savedSessionMetadataCache.set(file, { ino: stats.ino, mtimeMs: stats.mtimeMs, size: stats.size, scan, metadataEntries });
 		return scan;
 	} catch {
 		return undefined;
@@ -580,10 +609,11 @@ function removeMissingSessionMetadata(dir: string, files: readonly string[]): vo
 	}
 }
 
-function scanSavedSessions(dir: string): SessionFileScan[] {
+function scanSavedSessions(dir: string, skippedFiles: ReadonlySet<string> = new Set()): SessionFileScan[] {
 	const files = listSavedSessionFiles(dir);
 	const scans: SessionFileScan[] = [];
 	for (const file of files) {
+		if (skippedFiles.has(normalizePath(file))) continue;
 		const scan = parseSessionMetadataFile(file);
 		if (scan) scans.push(scan);
 	}
@@ -699,10 +729,14 @@ function makeSessionRecord(
 	history: unknown[] = [],
 	managedWorktreeScanned = false,
 ): SessionRecord {
+	const displayHistory = boundedWebHistory(kind === "saved" ? buildContextEntries(history as SessionEntry[]) : history);
+	const historyManagedWorktree = managedWorktreeFromEntries(history);
 	const record = sessions.get(session.id) ?? {
 		...session,
 		kind,
-		history: [...history],
+		history: displayHistory,
+		historyReady: history.length > 0,
+		historyBytes: webHistoryByteLength(displayHistory),
 		active: kind !== "saved",
 		agentRunning: session.status === "working",
 		agentSockets: new Set<Bun.ServerWebSocket<AgentSocketData>>(),
@@ -713,10 +747,14 @@ function makeSessionRecord(
 	};
 	Object.assign(record, session);
 	record.kind = kind;
-	record.history = history.length > 0 ? [...history] : record.history;
+	if (history.length > 0) {
+		record.history = displayHistory;
+		record.historyReady = true;
+		record.historyBytes = webHistoryByteLength(record.history);
+	}
 	record.managedWorktree = managedWorktreeScanned
 		? session.managedWorktree
-		: managedWorktreeFromEntries(record.history) ?? session.managedWorktree;
+		: historyManagedWorktree ?? session.managedWorktree ?? record.managedWorktree;
 	record.active = kind !== "saved" || record.active;
 	if (kind === "saved") record.active = false;
 	return record;
@@ -730,12 +768,13 @@ function upsertSession(
 ): SessionRecord {
 	const existing = sessions.get(session.id);
 	const record = existing ?? makeSessionRecord(session, kind, history, managedWorktreeScanned);
+	const historyManagedWorktree = history.length > 0 ? managedWorktreeFromEntries(history) : undefined;
 	Object.assign(record, session);
 	record.kind = kind;
-	if (history.length > 0) record.history = [...history];
+	if (history.length > 0) replaceRecordHistory(record, kind === "saved" ? buildContextEntries(history as SessionEntry[]) : history);
 	record.managedWorktree = managedWorktreeScanned
 		? session.managedWorktree
-		: managedWorktreeFromEntries(record.history) ?? session.managedWorktree;
+		: historyManagedWorktree ?? session.managedWorktree ?? record.managedWorktree;
 	if (kind !== "saved") record.active = true;
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
@@ -790,6 +829,10 @@ function catalogSessionChanged(previous: WebSession | undefined, next: WebSessio
 		|| previous.compaction?.startedAt !== next.compaction?.startedAt;
 }
 
+function activeSessionFiles(): Set<string> {
+	return new Set([...sessions.values()].flatMap((record) => record.active && record.file ? [normalizePath(record.file)] : []));
+}
+
 function sessionSnapshot(): WebSession[] {
 	void reconcileMissingSessionFiles();
 	const merged = new Map<string, WebSession>();
@@ -798,7 +841,7 @@ function sessionSnapshot(): WebSession[] {
 		const key = record.file ? normalizePath(record.file) : record.id;
 		merged.set(key, sessionToClientPayload(record));
 	}
-	for (const scan of scanSavedSessions(sessionsDir)) {
+	for (const scan of scanSavedSessions(sessionsDir, activeSessionFiles())) {
 		const key = scan.session.file ? normalizePath(scan.session.file) : scan.session.id;
 		const live = sessionsByFile.get(key) ?? sessions.get(scan.session.id);
 		if (!live?.active || live.status === "offline") merged.set(key, sessionToClientPayload(scan.session));
@@ -806,13 +849,34 @@ function sessionSnapshot(): WebSession[] {
 	return sortSessions(Array.from(merged.values()));
 }
 
+function replaceRecordHistory(record: SessionRecord, entries: readonly unknown[]): void {
+	record.history = boundedWebHistory(entries);
+	record.historyReady = true;
+	record.historyBytes = webHistoryByteLength(record.history);
+}
+
+function appendRecordHistory(record: SessionRecord, entry: unknown): void {
+	const appended = boundedWebHistory([entry], { maxEntries: 1 });
+	if (appended.length === 0) return;
+	record.history.push(appended[0]);
+	record.historyReady = true;
+	record.historyBytes = (record.historyBytes ?? webHistoryByteLength(record.history.slice(0, -1))) + webHistoryByteLength(appended);
+	while (record.history.length > WEB_HISTORY_MAX_ENTRIES || record.historyBytes > WEB_HISTORY_MAX_BYTES) {
+		const first = record.history[0];
+		const preserveSummary = isRecord(first) && typeof first.id === "string" && first.id.startsWith("web-compaction-");
+		const removeIndex = preserveSummary && record.history.length > 1 ? 1 : 0;
+		const [removed] = record.history.splice(removeIndex, 1);
+		record.historyBytes = Math.max(2, record.historyBytes - webHistoryByteLength([removed]));
+	}
+}
+
 function sessionHistoryForRecord(record: SessionRecord): unknown[] {
-	if (record.managed && record.active) return [...record.history];
+	if (record.active || record.historyReady) return [...record.history];
 	if (record.file) {
 		const scan = parseSessionFile(record.file);
 		if (scan) {
-			record.history = scan.history;
-			return [...scan.history];
+			replaceRecordHistory(record, buildContextEntries(scan.history as SessionEntry[]));
+			return [...record.history];
 		}
 	}
 	return [...record.history];
@@ -864,8 +928,9 @@ function updateRecordFromState(record: SessionRecord, state: unknown): void {
 	if (typeof s.sessionFile === "string") {
 		record.file = s.sessionFile;
 		sessionsByFile.set(normalizePath(s.sessionFile), record);
-		const scan = parseSessionFile(s.sessionFile);
+		const scan = parseSessionMetadataFile(s.sessionFile);
 		if (scan?.session.cwd) record.cwd = scan.session.cwd;
+		if (scan?.managedWorktreeScanned) record.managedWorktree = scan.session.managedWorktree;
 	}
 	if (typeof s.sessionId === "string") record.id = s.sessionId;
 	record.name = typeof s.sessionName === "string" && s.sessionName ? s.sessionName : undefined;
@@ -1280,9 +1345,9 @@ class ManagedRpcSession {
 		const deadline = Date.now() + LONG_RUNNING_COMMAND_TIMEOUT_MS;
 		while (Date.now() < deadline) {
 			if (this.worktreeError) throw this.worktreeError;
-			const state = await this.getState() as { sessionId?: unknown };
+			const state = await this.getState() as { sessionId?: unknown; sessionFile?: unknown };
 			if (typeof state.sessionId === "string" && state.sessionId !== previousId) {
-				const replacement = replacementFromEntries((await this.getEntries()).entries);
+				const replacement = typeof state.sessionFile === "string" ? parseSessionMetadataFile(state.sessionFile)?.replacement : undefined;
 				if (
 					replacement &&
 					replacement.previousSessionId === previousId &&
@@ -1407,7 +1472,7 @@ async function runRpcSessionCommand(record: SessionRecord, command: RpcSessionCo
 		}
 	}
 	if (record.file && isWithinDir(record.file, sessionsDir)) {
-		const scan = parseSessionFile(record.file);
+		const scan = parseSessionMetadataFile(record.file);
 		if (scan) {
 			const temp = new ManagedRpcSession({
 				cwd: scan.session.cwd,
@@ -1447,7 +1512,7 @@ async function runRpcSessionCommand(record: SessionRecord, command: RpcSessionCo
 		}
 	}
 	if (command.type === "get_fork_messages") {
-		return { messages: deriveForkMessages(sessionHistoryForRecord(record)) };
+		return { messages: deriveForkMessages(record.history) };
 	}
 	throw new Error(`Session ${record.id} is not managed`);
 }
@@ -1466,7 +1531,8 @@ function sendSessionHistory(socket: Bun.ServerWebSocket<ClientSocketData>, recor
 	const payload: ServerHistoryMessage = {
 		type: "server.history",
 		sessionId: record.id,
-		entries: entries.slice(-600),
+		entries: boundedWebHistory(entries),
+		replace: true,
 	};
 	socket.send(JSON.stringify(payload));
 }
@@ -1790,9 +1856,9 @@ async function completeExternalSessionReplacement(
 	if (replacement.previousSessionId === replacement.replacementSessionId) throw new Error("Replacement session must differ from its source");
 	const next = sessions.get(replacement.replacementSessionId);
 	if (!next || !next.agentSockets.has(socket)) throw new Error("Replacement session is not bound to this agent socket");
-	const durableReplacement = replacementFromEntries(
-		next.file ? parseSessionFile(next.file)?.entries ?? [] : next.history,
-	);
+	const durableReplacement = next.file
+		? parseSessionMetadataFile(next.file)?.replacement
+		: replacementFromEntries(next.history);
 	if (
 		!durableReplacement ||
 		durableReplacement.previousSessionId !== replacement.previousSessionId ||
@@ -1945,7 +2011,7 @@ async function refreshManagedSession(
 				const pendingDeletion = record.pendingWorktreeSourceDeletion;
 				let verifiedPendingDeletion = false;
 				if (pendingDeletion && pendingDeletion.sessionId === oldId && oldFile && newFile && newId !== oldId && sessionFileKey(pendingDeletion.sessionFile) === sessionFileKey(oldFile)) {
-					const marker = replacementFromEntries((await managed.getEntries()).entries);
+					const marker = parseSessionMetadataFile(newFile)?.replacement;
 					verifiedPendingDeletion = Boolean(
 						marker &&
 						marker.previousSessionId === oldId &&
@@ -2020,11 +2086,9 @@ async function refreshManagedSession(
 
 			updateRecordFromState(record, nextState);
 			try {
-				record.history = (await managed.getEntries()).entries;
-				record.managedWorktree = managedWorktreeFromEntries(record.history);
-				record.usage = usageFromEntries(record.history);
+				replaceRecordHistory(record, messagesToWebHistory((await managed.getMessages()).messages));
 			} catch {
-				// Keep the last complete history snapshot.
+				// Keep the last complete bounded history snapshot.
 			}
 			try {
 				updateRecordFromStats(record, await managed.getSessionStats());
@@ -2166,7 +2230,7 @@ function refreshTerminalMetadata(record: SessionRecord): void {
 }
 
 async function createManagedSessionUnlocked(cwd: string, name?: string, sessionFile?: string): Promise<SessionRecord> {
-	const resumed = sessionFile ? parseSessionFile(sessionFile) : undefined;
+	const resumed = sessionFile ? parseSessionMetadataFile(sessionFile) : undefined;
 	const existingRecord = resumed
 		? sessions.get(resumed.session.id) ?? sessionsByFile.get(normalizePath(resumed.file))
 		: undefined;
@@ -2214,7 +2278,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		// A newly started RPC runtime has no surviving subagents. An explicit empty
 		// snapshot clears stale browser telemetry retained across daemon reconnects.
 		subagents: [],
-		managedWorktree: managedWorktreeFromEntries(resumed?.entries ?? []),
+		managedWorktree: resumed?.session.managedWorktree,
 		catalogReady: false,
 	};
 	sessions.set(record.id, record);
@@ -2273,7 +2337,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					record.usage ??= zeroWebUsage();
 					addWebUsage(record.usage, event.message.usage);
 				}
-				record.history.push({
+				appendRecordHistory(record, {
 					type: "message",
 					id: randomUUID(),
 					parentId: null,
@@ -2281,6 +2345,19 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					message: event.message,
 				});
 				record.messageCount += 1;
+			}
+			const compactionEntry = compactionEntryFromEvent(event);
+			if (compactionEntry) {
+				replaceRecordHistory(record, [compactionEntry]);
+				broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
+				const runtime = record.managed;
+				if (runtime) {
+					void runtime.getMessages().then(({ messages }) => {
+						if (record.managed !== runtime || sessions.get(record.id) !== record) return;
+						replaceRecordHistory(record, messagesToWebHistory(messages));
+						broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
+					}).catch((error) => console.error(`Could not refresh compacted history for ${record.id}: ${error instanceof Error ? error.message : String(error)}`));
+				}
 			}
 			broadcast(record.id, {
 				type: "server.event",
@@ -2316,11 +2393,9 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			sessions.set(record.id, record);
 		}
 		try {
-			record.history = (await managed.getEntries()).entries;
-			record.managedWorktree = managedWorktreeFromEntries(record.history);
-			record.usage = usageFromEntries(record.history);
+			replaceRecordHistory(record, messagesToWebHistory((await managed.getMessages()).messages));
 		} catch {
-			// Keep the parsed resume history until the RPC runtime reports entries.
+			// Keep the bounded resume history until the RPC runtime reports context.
 		}
 		try {
 			updateRecordFromStats(record, await managed.getSessionStats());
@@ -2384,7 +2459,7 @@ async function restoreManagedSessions(): Promise<void> {
 		const existing = sessionsByFile.get(normalizePath(file));
 		if (existing?.active && existing.status !== "offline") continue;
 		if (!isManagedSessionFile(file)) continue;
-		const scan = parseSessionFile(file);
+		const scan = parseSessionMetadataFile(file);
 		if (!scan) {
 			try { deleteManagedSessionFile(file); } catch (error) {
 				console.error(`Could not remove invalid managed session ${file}:`, error);
@@ -2909,9 +2984,7 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 		if (command.type === "reload") slashCommandCache.delete(normalizePath(record.cwd));
 		return data;
 	}
-	if (command.type === "get_fork_messages") {
-		return { messages: deriveForkMessages(sessionHistoryForRecord(record)) };
-	}
+	if (command.type === "get_fork_messages") return await runRpcSessionCommand(record, command);
 	if (command.type === "clone" || command.type === "fork" || command.type === "set_session_name" || command.type === "compact") {
 		if (!record.file) throw new Error(`Session ${record.id} is not active`);
 		return await runRpcSessionCommand(record, command as RpcSessionCommand);
@@ -2928,14 +3001,13 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			: hello.session.source === "web"
 				? "managed"
 				: "external";
-		const helloHistory = hello.entries?.length ? hello.entries : undefined;
-		const record = upsertSession(hello.session, kind, helloHistory ?? []);
-		if (!helloHistory?.length && record.file) {
-			const scan = parseSessionFile(record.file);
-			if (scan) record.history = scan.history;
-		}
+		const helloManagedWorktree = hello.session.managedWorktree ?? managedWorktreeFromEntries(hello.entries ?? []);
+		const helloHistory = boundedWebHistory(hello.entries ?? []);
+		const authoritativeHistory = hello.historyMode === "replace" || helloHistory.length > 0;
+		const record = upsertSession(hello.session, kind, authoritativeHistory ? helloHistory : []);
+		if (authoritativeHistory) replaceRecordHistory(record, helloHistory);
 		record.preview = extractPreviewFromHistory(record.history) ?? record.preview;
-		record.managedWorktree = managedWorktreeFromEntries(record.history);
+		record.managedWorktree = helloManagedWorktree ?? record.managedWorktree;
 		record.agentSockets.add(socket);
 		record.active = true;
 		record.status = hello.session.status;
@@ -2955,11 +3027,19 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		void hydrateGitMetadata(record);
 		// Native sessions use the same bounded semantic history as managed sessions;
 		// no browser connection asks Pi to paint an additional TUI viewport.
-		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history.slice(-600) } satisfies ServerHistoryMessage);
+		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
 		void flushWebQueue(record);
 		return;
 	}
 	if (!socket.data.authed) throw new Error("Agent must send agent.hello first");
+	if (message.type === "agent.history") {
+		const update = message as AgentHistoryMessage;
+		const record = sessions.get(update.sessionId);
+		if (!record || !record.agentSockets.has(socket)) return;
+		replaceRecordHistory(record, update.entries);
+		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
+		return;
+	}
 	if (message.type === "agent.session_replaced") {
 		await completeExternalSessionReplacement(socket, message as AgentSessionReplacedMessage);
 		return;
@@ -3020,14 +3100,13 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				sessionMetadataChanged = true;
 			}
 			if (event.event.type === "message_end" && isRecord(event.event.message)) {
-				record.history.push({
+				appendRecordHistory(record, {
 					type: "message",
 					id: randomUUID(),
 					parentId: null,
 					timestamp: new Date().toISOString(),
 					message: event.event.message,
 				});
-				record.history = record.history.slice(-600);
 				record.messageCount += 1;
 				if (event.event.message.role === "assistant" || event.event.message.role === "toolResult") {
 					record.usage ??= zeroWebUsage();
@@ -3384,7 +3463,7 @@ async function handleApi(request: Request): Promise<Response> {
 	}
 	if (request.method === "GET" && url.pathname === "/api/sessions") {
 		await reconcileMissingSessionFiles();
-		const scans = scanSavedSessions(sessionsDir);
+		const scans = scanSavedSessions(sessionsDir, activeSessionFiles());
 		for (const scan of scans) {
 			const existing = sessions.get(scan.session.id) ?? sessionsByFile.get(normalizePath(scan.file));
 			if (!existing || !existing.active || existing.status === "offline") {
@@ -3485,7 +3564,7 @@ async function handleApi(request: Request): Promise<Response> {
 		} catch (error) {
 			return badRequest(error instanceof Error ? error.message : "Session file does not exist");
 		}
-		const scan = parseSessionFile(file);
+		const scan = parseSessionMetadataFile(file);
 		if (!scan) return badRequest("Invalid session file");
 		const existing = sessionsByFile.get(normalizePath(file));
 		if (existing?.active && existing.status !== "offline") {

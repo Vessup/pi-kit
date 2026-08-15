@@ -838,6 +838,7 @@ export function App() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const [entries, setEntries] = React.useState<SemanticEntry[]>([]);
+  const [historyRevision, setHistoryRevision] = React.useState(0);
   const [streamingMessage, setStreamingMessage] = React.useState<Record<string, unknown> | null>(null);
   const [streamingMessageKey, setStreamingMessageKey] = React.useState<string | null>(null);
   const streamingMessageKeyRef = React.useRef<string | null>(null);
@@ -965,9 +966,16 @@ export function App() {
         return;
       }
       if (type === "server.history") {
-        const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[] };
+        const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[]; replace?: boolean };
         if (payload.sessionId === selectedIdRef.current) {
-          if (payload.entries) setEntries((previous) => switchingSessions ? payload.entries! : mergeSemanticHistory(previous, payload.entries!));
+          if (payload.entries) setEntries((previous) => (payload.replace || switchingSessions) ? payload.entries! : mergeSemanticHistory(previous, payload.entries!));
+          if (payload.replace) {
+            setHistoryRevision((revision) => revision + 1);
+            setStreamingMessage(null);
+            setStreamingMessageKey(null);
+            streamingMessageKeyRef.current = null;
+            setActiveTools([]);
+          }
           setTranscriptLoading(false);
         }
         return;
@@ -1606,6 +1614,7 @@ export function App() {
             key={selectedSession?.id ?? "no-session"}
             session={selectedSession}
             entries={entries}
+            historyRevision={historyRevision}
             streamingMessage={streamingMessage}
             streamingMessageKey={streamingMessageKey}
             tools={activeTools}

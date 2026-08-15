@@ -358,7 +358,7 @@ test("Bun web server keeps tokenless clients inside localhost and same-origin tr
 	});
 	await Bun.sleep(25);
 	const history = await semanticHistory(`ws://127.0.0.1:${port}/ws/client`, sessionId);
-	expect(history).toHaveLength(2);
+	expect(history).toHaveLength(1);
 	const updated = await nativeUpdatePayload(`ws://127.0.0.1:${port}/ws/client`, sessionId, agent, {
 		...nativeSession,
 		updatedAt: Date.now() + 1,
@@ -679,31 +679,52 @@ async function promptAcknowledgementLossBecomesUncertain(url: string, sessionId:
 	});
 }
 
-async function compactionLifecycle(url: string, sessionId: string, agent: WebSocket): Promise<Array<{ reason?: string; status: string }>> {
+async function compactionLifecycle(url: string, sessionId: string, agent: WebSocket): Promise<{ states: Array<{ reason?: string; status: string }>; historyReset: boolean }> {
 	return await new Promise((resolve, reject) => {
 		const states: Array<{ reason?: string; status: string }> = [];
+		let historyReset = false;
 		const socket = browserSocket(url);
 		let started = false;
 		let ended = false;
 		const timeout = setTimeout(() => { socket.close(); reject(new Error("compaction lifecycle timed out")); }, 10_000);
 		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
 		socket.onmessage = ({ data }) => {
-			const message = JSON.parse(String(data)) as { type?: string; sessionId?: string; session?: { id?: string; status?: string; compaction?: { reason?: string } } };
+			const message = JSON.parse(String(data)) as {
+				type?: string;
+				sessionId?: string;
+				replace?: boolean;
+				entries?: Array<{ id?: string; message?: { content?: unknown } }>;
+				session?: { id?: string; status?: string; compaction?: { reason?: string } };
+			};
 			if (message.type === "server.snapshot") socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
 			if (message.type === "server.history" && message.sessionId === sessionId && !started) {
 				started = true;
 				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "compaction_start", reason: "overflow", startedAt: Date.now(), willRetry: true } }));
 			}
+			if (message.type === "server.history" && message.sessionId === sessionId && message.replace && message.entries?.some((entry) => entry.id === "web-compaction-compact-1")) {
+				const serialized = JSON.stringify(message.entries);
+				historyReset = serialized.includes("compacted summary") && serialized.includes("after compaction") && !serialized.includes("before compaction");
+				return;
+			}
 			if (message.type !== "server.session" || message.session?.id !== sessionId || typeof message.session.status !== "string") return;
 			if (message.session.compaction?.reason === "overflow" && !ended) {
 				states.push({ reason: message.session.compaction.reason, status: message.session.status });
 				ended = true;
+				agent.send(JSON.stringify({
+					type: "agent.history",
+					sessionId,
+					entries: [
+						{ type: "message", id: "old-1", message: { role: "assistant", content: "before compaction" } },
+						{ type: "compaction", id: "compact-1", timestamp: new Date().toISOString(), summary: "compacted summary" },
+						{ type: "message", id: "new-1", message: { role: "user", content: "after compaction" } },
+					],
+				}));
 				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "compaction_end", reason: "overflow", aborted: false, willRetry: false } }));
 			} else if (ended && !message.session.compaction) {
 				states.push({ status: message.session.status });
 				clearTimeout(timeout);
 				socket.close();
-				resolve(states);
+				resolve({ states, historyReset });
 			}
 		};
 		socket.onerror = () => { clearTimeout(timeout); reject(new Error("compaction lifecycle websocket failed")); };
@@ -1180,6 +1201,7 @@ for await (const line of lines) {
   let data;
   if (request.type === "get_state") data = { sessionId, sessionFile, sessionName, messageCount: entries.length, isStreaming: false };
   else if (request.type === "get_entries") data = { entries, leafId: "managed-entry" };
+  else if (request.type === "get_messages") data = { messages: entries.map((entry) => entry.message) };
   else if (request.type === "get_session_stats") data = {};
   else if (request.type === "get_commands") data = { commands: [{ name: "web-reload", description: "generation-" + reloadGeneration, source: "extension", sourceInfo: { path: "web-sessions.ts", scope: "temporary" } }] };
   else if (request.type === "set_session_name") sessionName = request.name || null;
@@ -1231,9 +1253,9 @@ for await (const line of lines) {
 	});
 	const responseBody = await response.text();
 	if (response.status !== 201) throw new Error(`Resume failed with ${response.status}: ${responseBody}`);
-	expect(await resumedHistory).toEqual([
-		{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } },
-	]);
+	const managedHistory = await resumedHistory;
+	expect(managedHistory).toHaveLength(1);
+	expect(managedHistory[0]).toMatchObject({ type: "message", message: { role: "assistant", content: "managed history" } });
 	const initialCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((result) => result.json()) as { sessions: Array<{ id: string; name?: string }> };
 	expect(initialCatalog.sessions.find((session) => session.id === sessionId)?.name).toBe("named session");
 	await sessionCommand(`ws://127.0.0.1:${port}/ws/client`, sessionId, { type: "set_session_name", name: "" });
@@ -1474,11 +1496,15 @@ test("saved-session metadata refresh clears hydrated ownership and skips malform
 	expect(initialCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toEqual(managedWorktree);
 	expect(initialCatalog.sessions.find((session) => session.id === malformedSessionId)?.managedWorktree).toEqual(managedWorktree);
 
-	await appendFile(clearedSessionFile,
-		`${JSON.stringify({ type: "custom", id: "cleared", parentId: "owned", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { ...managedWorktree, managed: false } })}\n`,
-	);
-	const refreshedCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown }> };
-	expect(refreshedCatalog.sessions.find((session) => session.id === clearedSessionId)?.managedWorktree).toBeUndefined();
+	await appendFile(clearedSessionFile, [
+		JSON.stringify({ type: "message", id: "latest", parentId: "owned", timestamp: new Date().toISOString(), message: { role: "user", content: "incremental metadata" } }),
+		JSON.stringify({ type: "custom", id: "cleared", parentId: "latest", timestamp: new Date().toISOString(), customType: WORKTREE_SESSION_ENTRY, data: { ...managedWorktree, managed: false } }),
+	].join("\n") + "\n");
+	const refreshedCatalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string; managedWorktree?: unknown; messageCount?: number; preview?: string }> };
+	const refreshed = refreshedCatalog.sessions.find((session) => session.id === clearedSessionId);
+	expect(refreshed?.managedWorktree).toBeUndefined();
+	expect(refreshed?.messageCount).toBe(1);
+	expect(refreshed?.preview).toBe("incremental metadata");
 }, 10_000);
 
 test("failed durable queue deletion leaves the session file and record retryable", async () => {
@@ -2080,10 +2106,17 @@ test("native sessions expose queued-delivery ordering and context compaction lif
 	expect(await rejectedPromptPreservesLegacyQueueFallback(socketUrl, sessionId, agent)).toBe("followUp");
 	expect(await lateSettlementDoesNotBurstQueue(socketUrl, sessionId, agent)).toEqual([1, 2]);
 	expect(await promptAdmissionStatus(socketUrl, sessionId, agent)).toEqual(["idle", "working"]);
-	expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual([
-		{ reason: "overflow", status: "working" },
-		{ status: "idle" },
-	]);
+	expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual({
+		states: [
+			{ reason: "overflow", status: "working" },
+			{ status: "idle" },
+		],
+		historyReset: true,
+	});
+	const compactedHistory = JSON.stringify(await waitForSemanticHistory(socketUrl, sessionId));
+	expect(compactedHistory).toContain("compacted summary");
+	expect(compactedHistory).toContain("after compaction");
+	expect(compactedHistory).not.toContain("before compaction");
 	agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_start" } }));
 	await Bun.sleep(25);
 	expect(await promptAcknowledgementLossBecomesUncertain(socketUrl, sessionId, agent)).toBe(true);
