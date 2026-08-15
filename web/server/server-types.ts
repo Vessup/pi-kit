@@ -73,6 +73,7 @@ export type SessionRecord = {
 	managedRefreshTail?: Promise<void>;
 	managedIdentityOperation?: ClientCommandMessage["command"]["type"];
 	managedWorktree?: ManagedWorktree;
+	managedWorktreeScanned?: boolean;
 	pendingWorktreeSourceDeletion?: { sessionId: string; sessionFile: string };
 	catalogReady?: boolean;
 	gitMetadataGeneration?: number;

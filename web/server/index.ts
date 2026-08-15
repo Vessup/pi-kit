@@ -46,6 +46,7 @@ import {
 	hasOtherSessionInWorktree,
 	managedWorktreeFromEntries,
 	removeManagedWorktree,
+	removeManagedWorktreeAsync,
 	WORKTREE_SESSION_ENTRY,
 } from "./worktrees.js";
 import { CoalescedQueueStoreWriter, readQueueStore } from "./queue-store.js";
@@ -175,7 +176,7 @@ const {
 	normalizePath, sessionFileKey, isManagedSessionFile, replaceManagedSessionFile, deleteManagedSessionFile,
 	isWithinDir, canonicalSessionFile, isRecord, persistInitialSession, toNumber, zeroWebUsage, addWebUsage,
 	extractTextContent, compactionEntryFromEvent, extractPreviewFromHistory,
-	parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
+	readManagedWorktreePrefix, parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
 	scanSavedSessions, deriveForkMessages,
 } = createSessionFileCatalog({ sessionsDir, managedSessionStore });
 
@@ -247,6 +248,7 @@ function makeSessionRecord(
 		historyBytes: webHistoryByteLength(displayHistory),
 		active: kind !== "saved",
 		agentRunning: session.status === "working",
+		managedWorktreeScanned,
 		agentSockets: new Set<Bun.ServerWebSocket<AgentSocketData>>(),
 		clientSockets: new Set<Bun.ServerWebSocket<ClientSocketData>>(),
 		externalRequestTargets: new Map<string, Bun.ServerWebSocket<AgentSocketData>>(),
@@ -263,6 +265,7 @@ function makeSessionRecord(
 	record.managedWorktree = managedWorktreeScanned
 		? session.managedWorktree
 		: historyManagedWorktree ?? session.managedWorktree ?? record.managedWorktree;
+	if (managedWorktreeScanned) record.managedWorktreeScanned = true;
 	record.active = kind !== "saved" || record.active;
 	if (kind === "saved") record.active = false;
 	return record;
@@ -283,6 +286,7 @@ function upsertSession(
 	record.managedWorktree = managedWorktreeScanned
 		? session.managedWorktree
 		: historyManagedWorktree ?? session.managedWorktree ?? record.managedWorktree;
+	if (managedWorktreeScanned) record.managedWorktreeScanned = true;
 	if (kind !== "saved") record.active = true;
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
@@ -2005,6 +2009,22 @@ async function reconcileMissingSessionFiles(): Promise<void> {
 	}));
 }
 
+function scheduleManagedWorktreeCleanup(sessionId: string, sessionFile: string, managedWorktree: NonNullable<SessionRecord["managedWorktree"]>): void {
+	const timer = setTimeout(() => {
+		void (async () => {
+			// A new session may claim this checkout after durable deletion yields.
+			if (hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)) return;
+			try {
+				const result = await removeManagedWorktreeAsync(managedWorktree);
+				if (result.branchWarning) console.warn(`Removed worktree ${managedWorktree.path}, but could not delete branch ${managedWorktree.branch}: ${result.branchWarning}`);
+			} catch (error) {
+				console.warn(`Session ${sessionId} was deleted, but managed worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		})();
+	}, 0);
+	timer.unref?.();
+}
+
 async function deleteSession(sessionId: string): Promise<void> {
 	let record = sessions.get(sessionId) ?? sessionsByFile.get(normalizePath(sessionId)) ?? (() => {
 		const scan = scanSavedSessions(sessionsDir).find((item) => item.session.id === sessionId || normalizePath(item.file) === normalizePath(sessionId));
@@ -2020,7 +2040,10 @@ async function deleteSession(sessionId: string): Promise<void> {
 	}
 	const sessionFile = record.file;
 	let managedWorktree = record.managedWorktree;
-	if (!managedWorktree && sessionFile) managedWorktree = managedWorktreeFromEntries(parseSessionFile(sessionFile)?.entries ?? []);
+	if (!managedWorktree && sessionFile && !record.managedWorktreeScanned) {
+		managedWorktree = readManagedWorktreePrefix(sessionFile);
+		record.managedWorktreeScanned = true;
+	}
 	if (managedWorktree && sessionFile && hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)) {
 		managedWorktree = undefined;
 	}
@@ -2057,15 +2080,9 @@ async function deleteSession(sessionId: string): Promise<void> {
 		managedWorktree = undefined;
 	}
 	// Durable deletion and client notification are complete before best-effort
-	// worktree cleanup, so cleanup failure cannot turn deletion into an error.
-	if (managedWorktree) {
-		try {
-			const result = removeManagedWorktree(managedWorktree);
-			if (result.branchWarning) console.warn(`Removed worktree ${managedWorktree.path}, but could not delete branch ${managedWorktree.branch}: ${result.branchWarning}`);
-		} catch (error) {
-			console.warn(`Session ${sessionId} was deleted, but managed worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
+	// worktree cleanup. Run slow checkout removal outside the HTTP request so a
+	// reverse proxy cannot report a false failure after the session is gone.
+	if (managedWorktree && sessionFile) scheduleManagedWorktreeCleanup(sessionId, sessionFile, managedWorktree);
 }
 
 async function handleApi(request: Request): Promise<Response> {

@@ -9,6 +9,7 @@ const RPC_REQUEST_TIMEOUT_MS = Number.isFinite(configuredRpcTimeout) && configur
 	? Math.floor(configuredRpcTimeout)
 	: 30_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const SHUTDOWN_DELIVERY_TIMEOUT_MS = Math.min(RPC_REQUEST_TIMEOUT_MS, 1_000);
 
 type RpcResponse<T = unknown> =
 	| { id?: string; type: "response"; command: string; success: true; data?: T }
@@ -452,11 +453,15 @@ export class ManagedRpcSession {
 	async shutdown(): Promise<void> {
 		if (!this.process || this.stopped) return;
 		try {
-			await this.send({ type: "abort" }, RPC_REQUEST_TIMEOUT_MS, true);
+			// Shutdown only needs confirmed stdin delivery, not an RPC response. A
+			// wedged child may never acknowledge abort and must not hold deletion or
+			// daemon teardown behind the full request timeout.
+			await this.deliver({ type: "abort" }, true, SHUTDOWN_DELIVERY_TIMEOUT_MS);
 		} catch {
-			// ignore
+			// Process termination remains the authoritative shutdown fallback.
 		}
 		this.stopped = true;
+		this.failAllPending(new Error("RPC session stopped"));
 		try {
 			(this.process as unknown as { kill?: (signal?: string) => void }).kill?.("SIGTERM");
 		} catch {

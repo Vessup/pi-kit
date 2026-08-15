@@ -172,6 +172,31 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 		return { name, model, thinkingLevel, parentSession, messageCount };
 	}
 
+	function readManagedWorktreePrefix(file: string): ReturnType<typeof managedWorktreeFromEntries> {
+		try {
+			// Worktree ownership is written with the initial session entries. Deletion
+			// must never deserialize a potentially hundreds-of-megabytes transcript
+			// merely to discover that no ownership marker exists.
+			const bytes = Math.min(statSync(file).size, 256 * 1024);
+			const text = readFileSuffix(file, 0, bytes);
+			const completeEnd = text.lastIndexOf("\n");
+			if (completeEnd < 0) return undefined;
+			const entries: unknown[] = [];
+			for (const line of text.slice(0, completeEnd + 1).split(/\n/).slice(1)) {
+				if (!line) continue;
+				try {
+					const entry: unknown = JSON.parse(line.endsWith("\r") ? line.slice(0, -1) : line);
+					if (isRecord(entry) && entry.type === "custom" && entry.customType === WORKTREE_SESSION_ENTRY) entries.push(entry);
+				} catch {
+					// Ignore malformed or partial metadata lines.
+				}
+			}
+			return managedWorktreeFromEntries(entries);
+		} catch {
+			return undefined;
+		}
+	}
+
 	function parseSessionFile(file: string): SessionFileScan | undefined {
 		try {
 			const text = readFileSync(file, "utf8");
@@ -407,7 +432,7 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 		normalizePath, sessionFileKey, isManagedSessionFile, replaceManagedSessionFile, deleteManagedSessionFile,
 		isWithinDir, canonicalSessionFile, isRecord, persistInitialSession, toNumber, zeroWebUsage, addWebUsage,
 		usageFromEntries, extractTextContent, compactionEntryFromEvent, extractPreviewFromHistory,
-		extractSessionMetadataFromEntries, parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
+		extractSessionMetadataFromEntries, readManagedWorktreePrefix, parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
 		removeMissingSessionMetadata, scanSavedSessions, deriveForkMessages,
 	};
 }

@@ -59,6 +59,41 @@ function gitOutput(cwd: string, args: string[]): string {
 	return result.stdout?.trim() ?? "";
 }
 
+function gitOutputAsync(cwd: string, args: string[]): Promise<string> {
+	const fullArgs = ["-C", cwd, ...args];
+	const timeout = gitCommandTimeoutMs(fullArgs);
+	return new Promise((resolvePromise, rejectPromise) => {
+		const child = spawn("git", fullArgs, { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		let timedOut = false;
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+		child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+		const timer = setTimeout(() => {
+			timedOut = true;
+			child.kill("SIGKILL");
+		}, timeout);
+		child.once("error", (error) => {
+			clearTimeout(timer);
+			rejectPromise(error);
+		});
+		child.once("close", (code, signal) => {
+			clearTimeout(timer);
+			if (timedOut || signal) {
+				rejectPromise(new Error(`git ${fullArgs.join(" ")} did not finish within ${timeout}ms`));
+				return;
+			}
+			if (code !== 0) {
+				rejectPromise(new Error(stderr.trim() || `git ${args.join(" ")} failed`));
+				return;
+			}
+			resolvePromise(stdout.trim());
+		});
+	});
+}
+
 /** Require the Git features used for absolute paths and NUL-delimited worktree records. */
 export function validateGitVersion(versionOutput: string): void {
 	const match = versionOutput.trim().match(/^git version (\d+)\.(\d+)\.(\d+)(?:\D|$)/);
@@ -392,6 +427,19 @@ export function removeManagedWorktree(worktree: ManagedWorktree): { branchWarnin
 	if (!verified.branchCreated) return {};
 	try {
 		gitOutput(verified.repoRoot, ["branch", "-D", verified.branch]);
+		return {};
+	} catch (error) {
+		return { branchWarning: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/** Remove a managed checkout without blocking the web server event loop. */
+export async function removeManagedWorktreeAsync(worktree: ManagedWorktree): Promise<{ branchWarning?: string }> {
+	const verified = verifiedManagedWorktree(worktree);
+	await gitOutputAsync(verified.repoRoot, ["worktree", "remove", "--force", verified.path]);
+	if (!verified.branchCreated) return {};
+	try {
+		await gitOutputAsync(verified.repoRoot, ["branch", "-D", verified.branch]);
 		return {};
 	} catch (error) {
 		return { branchWarning: error instanceof Error ? error.message : String(error) };

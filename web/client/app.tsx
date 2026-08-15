@@ -874,6 +874,9 @@ export function App() {
   React.useEffect(() => { savePreference(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects)); }, [collapsedProjects]);
   React.useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   React.useEffect(() => { entriesRef.current = entries; }, [entries]);
+  React.useEffect(() => {
+    if (deleteCandidate && !sessions.some((session) => session.id === deleteCandidate.id)) setDeleteCandidate(null);
+  }, [deleteCandidate, sessions]);
 
   const loadAllSessions = React.useCallback(async () => {
     try {
@@ -1447,7 +1450,20 @@ export function App() {
   }, []);
 
   const handleDelete = React.useCallback(async (session: WebSession) => {
-    await deleteSession(session.id);
+    try {
+      await deleteSession(session.id);
+    } catch (cause) {
+      // A proxy can time out after the daemon has already durably deleted the
+      // session. Reconcile before reporting a false failure or leaving the modal.
+      let latest: WebSession[] | undefined;
+      try {
+        latest = await listSessions();
+      } catch {
+        throw cause;
+      }
+      if (latest.some((item) => item.id === session.id)) throw cause;
+      setSessions(sortSessions(latest));
+    }
     setSessions((prev) => prev.filter((s) => s.id !== session.id));
     setSessionOrder((previous) => previous.filter((id) => id !== session.id));
     if (selectedIdRef.current === session.id) setSelectedId(null);

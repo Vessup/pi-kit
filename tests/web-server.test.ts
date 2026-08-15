@@ -1233,7 +1233,6 @@ const abortDeliveryFile = ${JSON.stringify(abortDeliveryFile)};
 const entries = [{ id: "managed-entry", type: "message", message: { role: "assistant", content: "managed history" } }];
 let reloadGeneration = 0;
 let sessionName = "named session";
-let aborts = 0;
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {
   const request = JSON.parse(line);
@@ -1246,9 +1245,8 @@ for await (const line of lines) {
   else if (request.type === "set_session_name") sessionName = request.name || null;
   else if (request.type === "prompt" && request.message === "/web-reload") reloadGeneration += 1;
   else if (request.type === "abort") {
-    aborts += 1;
     await Bun.write(abortDeliveryFile, "delivered");
-    if (aborts === 1) continue;
+    continue;
   }
   process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
   if (request.type === "set_session_name") process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
@@ -1368,6 +1366,16 @@ for await (const line of lines) {
 		await Bun.sleep(10);
 	}
 	expect(await readFile(abortDeliveryFile, "utf8")).toBe("delivered");
+
+	const deleteStarted = performance.now();
+	const origin = `http://127.0.0.1:${port}`;
+	const deleted = await fetch(`${origin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+		method: "DELETE",
+		headers: { Origin: origin },
+	});
+	expect(deleted.status).toBe(200);
+	expect(performance.now() - deleteStarted).toBeLessThan(2_000);
+	await expect(readFile(sessionFile, "utf8")).rejects.toThrow();
 }, 10_000);
 
 test("managed RPC requests fail within the configured bound when Pi wedges", async () => {
@@ -1629,8 +1637,15 @@ test("deleting a saved managed-worktree session removes its checkout and branch"
 	});
 	expect(response.status).toBe(200);
 	await expect(readFile(sessionFile, "utf8")).rejects.toThrow();
+	const cleanupDeadline = Date.now() + 3_000;
+	let cleanupBranch = "delete-with-session";
+	while (Date.now() < cleanupDeadline) {
+		cleanupBranch = (await Bun.$`git -C ${repository} branch --list delete-with-session`.text()).trim();
+		if (!await Bun.file(join(worktree.path, "README.md")).exists() && !cleanupBranch) break;
+		await Bun.sleep(25);
+	}
 	await expect(readFile(join(worktree.path, "README.md"), "utf8")).rejects.toThrow();
-	expect((await Bun.$`git -C ${repository} branch --list delete-with-session`.text()).trim()).toBe("");
+	expect(cleanupBranch).toBe("");
 }, 10_000);
 
 test("worktree cleanup failure does not turn a completed session deletion into an error", async () => {
