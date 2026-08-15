@@ -44,44 +44,15 @@ import { SemanticSession, updateStreamingMessage, type ActiveTool, type Semantic
 import { preserveSessionTelemetry, preserveSessionsTelemetry } from "./session-telemetry";
 import { cn } from "./lib/utils";
 import { recentRepositories, type RecentRepository } from "./recent-repositories";
+import { includeWebCompactCommand, parseWebCompactCommand } from "../compact-command";
 import { includeWebReloadCommand, isWebReloadCommand } from "../reload-command";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { displaySessionStatus } from "./session-status";
+import { agentEndTerminalNotice } from "../assistant-message";
+import { localCommandEntryId, preserveLocalCommandEntries } from "./local-command";
+import { mergeSemanticHistory, preserveSemanticEntryKeys, semanticHistoriesEqual } from "./semantic-history";
 
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
-
-function semanticEntryIdentity(entry: SemanticEntry): string | undefined {
-  const message = entry.message;
-  if (typeof message?.id === "string") return `id:${message.id}`;
-  const role = typeof message?.role === "string" ? message.role : "";
-  const timestamp = typeof message?.timestamp === "number" || typeof message?.timestamp === "string" ? String(message.timestamp) : "";
-  if (timestamp) return `${role}:${timestamp}`;
-  if (entry.id && !entry.id.startsWith("optimistic-")) return `entry:${entry.id}`;
-  return undefined;
-}
-
-function preserveSemanticEntryKeys(previous: SemanticEntry[], incoming: SemanticEntry[]): SemanticEntry[] {
-  const previousIds = new Map<string, string>();
-  for (const entry of previous) {
-    const identity = semanticEntryIdentity(entry);
-    if (identity && entry.id && !entry.id.startsWith("optimistic-")) previousIds.set(identity, entry.id);
-  }
-  return incoming.map((entry) => {
-    const identity = semanticEntryIdentity(entry);
-    const id = identity ? previousIds.get(identity) : undefined;
-    return id ? { ...entry, id } : entry;
-  });
-}
-
-function mergeSemanticHistory(previous: SemanticEntry[], incoming: SemanticEntry[]): SemanticEntry[] {
-  const reconciled = preserveSemanticEntryKeys(previous, incoming);
-  const incomingIdentities = new Set(reconciled.map(semanticEntryIdentity).filter((identity): identity is string => Boolean(identity)));
-  const retained = previous.filter((entry) => {
-    const identity = semanticEntryIdentity(entry);
-    return identity ? !incomingIdentities.has(identity) : false;
-  });
-  return [...reconciled, ...retained];
-}
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
 
@@ -313,7 +284,7 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New session</DialogTitle>
-          <DialogDescription>Choose a repository or directory. Add a worktree name to create a linked checkout first.</DialogDescription>
+          <DialogDescription>Choose a repository or directory. Add a worktree name to create or reuse a linked checkout.</DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
           <div className="space-y-2">
@@ -336,7 +307,7 @@ function NewSessionDialog({ open, baseSession, repositories, onOpenChange, onCre
           <div className="space-y-2">
             <label className="text-xs uppercase tracking-wider text-zinc-500" htmlFor={`${repositoryListId}-worktree`}>worktree name</label>
             <Input id={`${repositoryListId}-worktree`} value={worktreeName} onChange={(event) => { setWorktreeName(event.target.value); setCreateError(null); }} placeholder="Optional managed directory name" />
-            <p className="text-xs text-zinc-500">Creates <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The branch can have a different, namespaced name.</p>
+            <p className="text-xs text-zinc-500">Creates or reuses <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The branch can have a different, namespaced name.</p>
           </div>
           {worktreeName.trim() && <>
             <div className="space-y-2">
@@ -838,6 +809,8 @@ export function App() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const [entries, setEntries] = React.useState<SemanticEntry[]>([]);
+  const entriesRef = React.useRef<SemanticEntry[]>([]);
+  const [historyRevision, setHistoryRevision] = React.useState(0);
   const [streamingMessage, setStreamingMessage] = React.useState<Record<string, unknown> | null>(null);
   const [streamingMessageKey, setStreamingMessageKey] = React.useState<string | null>(null);
   const streamingMessageKeyRef = React.useRef<string | null>(null);
@@ -859,6 +832,9 @@ export function App() {
   React.useEffect(() => { savePreference(SESSION_SORT_KEY, sessionSort); }, [sessionSort]);
   React.useEffect(() => { savePreference(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects)); }, [collapsedProjects]);
   React.useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  React.useEffect(() => {
+    if (deleteCandidate && !sessions.some((session) => session.id === deleteCandidate.id)) setDeleteCandidate(null);
+  }, [deleteCandidate, sessions]);
 
   const loadAllSessions = React.useCallback(async () => {
     try {
@@ -907,7 +883,11 @@ export function App() {
       optimisticIds.add(pending.optimisticId);
       pending.reject(error);
     }
-    if (optimisticIds.size > 0) setEntries((previous) => previous.filter((entry) => !entry.id || !optimisticIds.has(entry.id)));
+    if (optimisticIds.size > 0) {
+      const next = entriesRef.current.filter((entry) => !entry.id || !optimisticIds.has(entry.id));
+      entriesRef.current = next;
+      setEntries(next);
+    }
   }, []);
 
   const connect = React.useCallback(async (sessionId: string) => {
@@ -928,6 +908,7 @@ export function App() {
     setConnected(false);
     setTranscriptLoading(true);
     if (switchingSessions) {
+      entriesRef.current = [];
       setEntries([]);
       setStreamingMessage(null);
       setStreamingMessageKey(null);
@@ -965,9 +946,32 @@ export function App() {
         return;
       }
       if (type === "server.history") {
-        const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[] };
+        const payload = message as unknown as { sessionId: string; entries?: SemanticEntry[]; replace?: boolean };
         if (payload.sessionId === selectedIdRef.current) {
-          if (payload.entries) setEntries((previous) => switchingSessions ? payload.entries! : mergeSemanticHistory(previous, payload.entries!));
+          const incoming = payload.entries;
+          const replacement = incoming && (payload.replace || switchingSessions)
+            ? preserveSemanticEntryKeys(entriesRef.current, preserveLocalCommandEntries(entriesRef.current, incoming))
+            : incoming;
+          const transcriptChanged = Boolean(payload.replace && replacement && (switchingSessions || !semanticHistoriesEqual(entriesRef.current, replacement)));
+          if (replacement) {
+            if (payload.replace || switchingSessions) {
+              entriesRef.current = replacement;
+              setEntries(replacement);
+            } else {
+              const next = mergeSemanticHistory(entriesRef.current, replacement);
+              entriesRef.current = next;
+              setEntries(next);
+            }
+          }
+          if (payload.replace) {
+            // A reconnect snapshot still clears transient stream/tool state, but an
+            // identical transcript must not eject a reader from their scroll anchor.
+            setStreamingMessage(null);
+            setStreamingMessageKey(null);
+            streamingMessageKeyRef.current = null;
+            setActiveTools([]);
+          }
+          if (transcriptChanged) setHistoryRevision((revision) => revision + 1);
           setTranscriptLoading(false);
         }
         return;
@@ -980,7 +984,9 @@ export function App() {
         pendingRequestsRef.current.delete(payload.requestId);
         if (payload.success) pending.resolve(payload.data);
         else {
-          setEntries((previous) => previous.filter((entry) => entry.id !== pending.optimisticId));
+          const next = entriesRef.current.filter((entry) => entry.id !== pending.optimisticId);
+          entriesRef.current = next;
+          setEntries(next);
           pending.reject(new Error(payload.error ?? "Request failed"));
         }
         return;
@@ -991,13 +997,16 @@ export function App() {
       const event = payload.event;
       const eventType = String(event.type ?? "");
       if (eventType === "agent_start" || eventType === "turn_start" || eventType === "agent_end" || eventType === "agent_settled") {
+        const terminalNotice = eventType === "agent_end" ? agentEndTerminalNotice(event) : undefined;
         const applyLifecycle = (session: WebSession): WebSession => {
           if (eventType === "agent_start" || eventType === "turn_start") return { ...session, status: "working" };
           if (eventType === "agent_end" && session.compaction) return session;
+          if (terminalNotice?.kind === "error" || (eventType === "agent_settled" && session.status === "error")) return { ...session, status: "error" };
           return { ...session, status: "idle" };
         };
         setCurrentSession((current) => current?.id === payload.sessionId ? applyLifecycle(current) : current);
         setSessions((previous) => previous.map((session) => session.id === payload.sessionId ? applyLifecycle(session) : session));
+        if (eventType === "agent_end" || eventType === "agent_settled") setActiveTools([]);
       }
       if (eventType === "subagents_update") {
         const updates = Array.isArray(event.agents) ? event.agents as WebSubagentUpdate[] : [];
@@ -1018,26 +1027,34 @@ export function App() {
       } else if (eventType === "web_queue_delivery" && event.item && typeof event.item === "object") {
         const item = event.item as WebQueuedMessage;
         if (typeof item.id !== "string" || typeof item.message !== "string") return;
-        const optimisticId = `optimistic-queued-${item.id}`;
+        const optimisticId = parseWebCompactCommand(item.message) !== undefined
+          ? localCommandEntryId(item.id)
+          : `optimistic-queued-${item.id}`;
         if (event.phase === "started") {
           // Atomically move the follow-up out of the editable queue and into the
           // normal transcript before the server asks Pi to begin its turn.
           setQueuedMessages((previous) => previous.filter((queued) => queued.id !== item.id));
-          setEntries((previous) => previous.some((entry) => entry.id === optimisticId) ? previous : [...previous, {
-            id: optimisticId,
-            type: "message",
-            timestamp: new Date().toISOString(),
-            message: {
-              role: "user",
-              timestamp: Date.now(),
-              content: [
-                ...(item.message ? [{ type: "text", text: item.message }] : []),
-                ...(item.images ?? []).map((image) => ({ ...image })),
-              ],
-            },
-          }]);
+          if (!entriesRef.current.some((entry) => entry.id === optimisticId)) {
+            const next = [...entriesRef.current, {
+              id: optimisticId,
+              type: "message" as const,
+              timestamp: new Date().toISOString(),
+              message: {
+                role: "user",
+                timestamp: Date.now(),
+                content: [
+                  ...(item.message ? [{ type: "text", text: item.message }] : []),
+                  ...(item.images ?? []).map((image) => ({ ...image })),
+                ],
+              },
+            }];
+            entriesRef.current = next;
+            setEntries(next);
+          }
         } else if (event.phase === "failed") {
-          setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+          const next = entriesRef.current.filter((entry) => entry.id !== optimisticId);
+          entriesRef.current = next;
+          setEntries(next);
         }
       } else if (eventType === "message_start" && event.message && typeof event.message === "object" && (event.message as Record<string, unknown>).role === "assistant") {
         const assistant = event.message as Record<string, unknown>;
@@ -1063,28 +1080,31 @@ export function App() {
       } else if (eventType === "message_end" && event.message && typeof event.message === "object") {
         const finalized = event.message as Record<string, unknown>;
         const finalizedStreamingKey = streamingMessageKeyRef.current;
-        setEntries((previous) => {
-          const stableAssistantId = finalized.role === "assistant"
-            ? finalizedStreamingKey ?? String(finalized.id ?? finalized.timestamp ?? crypto.randomUUID())
-            : crypto.randomUUID();
-          const entry = { id: stableAssistantId, type: "message", timestamp: new Date().toISOString(), message: finalized };
-          if (finalized.role === "user") {
-            const confirmedText = messageText(finalized);
-            let optimisticIndex = previous.findIndex((item) =>
-              item.id?.startsWith("optimistic-") && item.message && messageText(item.message) === confirmedText
-            );
-            if (optimisticIndex < 0) optimisticIndex = previous.findIndex((item) => item.id?.startsWith("optimistic-"));
-            if (optimisticIndex >= 0) {
-              const next = [...previous];
-              next[optimisticIndex] = {
-                ...entry,
-                message: preserveOptimisticAttachments(finalized, previous[optimisticIndex]!),
-              };
-              return next;
-            }
+        const stableAssistantId = finalized.role === "assistant"
+          ? finalizedStreamingKey ?? String(finalized.id ?? finalized.timestamp ?? crypto.randomUUID())
+          : crypto.randomUUID();
+        const entry: SemanticEntry = { id: stableAssistantId, type: "message", timestamp: new Date().toISOString(), message: finalized };
+        let next: SemanticEntry[];
+        if (finalized.role === "user") {
+          const confirmedText = messageText(finalized);
+          let optimisticIndex = entriesRef.current.findIndex((item) =>
+            item.id?.startsWith("optimistic-") && item.message && messageText(item.message) === confirmedText
+          );
+          if (optimisticIndex < 0) optimisticIndex = entriesRef.current.findIndex((item) => item.id?.startsWith("optimistic-"));
+          if (optimisticIndex >= 0) {
+            next = [...entriesRef.current];
+            next[optimisticIndex] = {
+              ...entry,
+              message: preserveOptimisticAttachments(finalized, entriesRef.current[optimisticIndex]!),
+            };
+          } else {
+            next = [...entriesRef.current, entry];
           }
-          return [...previous, entry];
-        });
+        } else {
+          next = [...entriesRef.current, entry];
+        }
+        entriesRef.current = next;
+        setEntries(next);
         if (finalized.role === "assistant") {
           setStreamingMessage(null);
           setStreamingMessageKey(null);
@@ -1205,7 +1225,7 @@ export function App() {
       setSessionOptions((current) => ({
         models: Array.isArray(options.models) ? options.models : [],
         thinkingLevels: Array.isArray(options.thinkingLevels) ? options.thinkingLevels : [],
-        commands: includeWebReloadCommand(Array.isArray(options.commands) ? options.commands : current.commands),
+        commands: includeWebCompactCommand(includeWebReloadCommand(Array.isArray(options.commands) ? options.commands : current.commands)),
       }));
     } catch {
       if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) setSessionOptions((current) => ({ ...current, models: [], thinkingLevels: [] }));
@@ -1216,10 +1236,10 @@ export function App() {
     try {
       const response = await sendSessionCommand(sessionId, { type: "get_commands" }) as { commands?: WebSlashCommand[] } | undefined;
       if (selectedIdRef.current !== sessionId || optionsGenerationRef.current !== generation) return;
-      setSessionOptions((current) => ({ ...current, commands: includeWebReloadCommand(Array.isArray(response?.commands) ? response.commands : []) }));
+      setSessionOptions((current) => ({ ...current, commands: includeWebCompactCommand(includeWebReloadCommand(Array.isArray(response?.commands) ? response.commands : [])) }));
     } catch {
       if (selectedIdRef.current === sessionId && optionsGenerationRef.current === generation) {
-        setSessionOptions((current) => ({ ...current, commands: includeWebReloadCommand(current.commands) }));
+        setSessionOptions((current) => ({ ...current, commands: includeWebCompactCommand(includeWebReloadCommand(current.commands)) }));
       }
     }
   }, []);
@@ -1271,14 +1291,17 @@ export function App() {
     assertClientPromptPayloadFits(promptFrame);
     const queuedFollowUp = streamingBehavior === "followUp" && selectedSession?.status === "working";
     const worktreeCommand = /^\/worktree(?:\s|$)/.test(message.trim());
-    const controlCommand = isWebReloadCommand(message) || worktreeCommand;
+    const compactCommand = parseWebCompactCommand(message);
+    const controlCommand = isWebReloadCommand(message) || compactCommand !== undefined || worktreeCommand;
     const optimisticallyWorking = !queuedFollowUp && !controlCommand && selectedSession?.status !== "working";
     const previousStatus = selectedSession?.status;
     if (optimisticallyWorking) {
       setCurrentSession((current) => current?.id === sessionId ? { ...current, status: "working" } : current);
       setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, status: "working" } : session));
     }
-    const optimisticId = `optimistic-${requestId}`;
+    const optimisticId = compactCommand !== undefined && !queuedFollowUp
+      ? localCommandEntryId(requestId)
+      : `optimistic-${requestId}`;
     const optimistic: SemanticEntry = {
       id: optimisticId,
       type: "message",
@@ -1293,7 +1316,9 @@ export function App() {
       },
     };
     if (!queuedFollowUp) {
-      setEntries((previous) => [...previous, optimistic]);
+      const next = [...entriesRef.current, optimistic];
+      entriesRef.current = next;
+      setEntries(next);
       // Let React commit and the browser paint the local user bubble before the
       // native bridge receives the prompt and renders it in the TUI.
       if (!controlCommand) await waitForVisibleBrowserPaint();
@@ -1308,7 +1333,11 @@ export function App() {
           promptFrameSent = true;
         } catch (cause) {
           pendingRequestsRef.current.delete(requestId);
-          if (!queuedFollowUp) setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+          if (!queuedFollowUp) {
+            const next = entriesRef.current.filter((entry) => entry.id !== optimisticId);
+            entriesRef.current = next;
+            setEntries(next);
+          }
           reject(cause instanceof Error ? cause : new Error(String(cause)));
         }
       });
@@ -1320,7 +1349,9 @@ export function App() {
       throw cause;
     }
     if (isWebReloadCommand(message)) {
-      setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+      const next = entriesRef.current.filter((entry) => entry.id !== optimisticId);
+      entriesRef.current = next;
+      setEntries(next);
       const generation = ++optionsGenerationRef.current;
       await Promise.all([
         loadSessionOptions(sessionId, generation),
@@ -1379,7 +1410,20 @@ export function App() {
   }, []);
 
   const handleDelete = React.useCallback(async (session: WebSession) => {
-    await deleteSession(session.id);
+    try {
+      await deleteSession(session.id);
+    } catch (cause) {
+      // A proxy can time out after the daemon has already durably deleted the
+      // session. Reconcile before reporting a false failure or leaving the modal.
+      let latest: WebSession[] | undefined;
+      try {
+        latest = await listSessions();
+      } catch {
+        throw cause;
+      }
+      if (latest.some((item) => item.id === session.id)) throw cause;
+      setSessions(sortSessions(latest));
+    }
     setSessions((prev) => prev.filter((s) => s.id !== session.id));
     setSessionOrder((previous) => previous.filter((id) => id !== session.id));
     if (selectedIdRef.current === session.id) setSelectedId(null);
@@ -1606,6 +1650,7 @@ export function App() {
             key={selectedSession?.id ?? "no-session"}
             session={selectedSession}
             entries={entries}
+            historyRevision={historyRevision}
             streamingMessage={streamingMessage}
             streamingMessageKey={streamingMessageKey}
             tools={activeTools}

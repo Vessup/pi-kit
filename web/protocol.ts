@@ -194,6 +194,7 @@ export type AgentHelloMessage = {
 	type: "agent.hello";
 	session: WebSession;
 	entries: unknown[];
+	historyMode?: "replace";
 };
 
 export type AgentSessionReplacedMessage = {
@@ -207,6 +208,12 @@ export type AgentEventMessage = {
 	type: "agent.event";
 	sessionId: string;
 	event: Record<string, unknown>;
+};
+
+export type AgentHistoryMessage = {
+	type: "agent.history";
+	sessionId: string;
+	entries: unknown[];
 };
 
 export type AgentUpdateMessage = {
@@ -229,7 +236,7 @@ export type AgentResponseMessage = {
 	data?: unknown;
 };
 
-export type AgentToServerMessage = AgentHelloMessage | AgentSessionReplacedMessage | AgentEventMessage | AgentUpdateMessage | AgentSubagentsMessage | AgentResponseMessage;
+export type AgentToServerMessage = AgentHelloMessage | AgentSessionReplacedMessage | AgentEventMessage | AgentHistoryMessage | AgentUpdateMessage | AgentSubagentsMessage | AgentResponseMessage;
 
 export type SemanticImage = { type: "image"; data: string; mimeType: string; name?: string };
 export type WebModelOption = { provider: string; id: string; name: string; reasoning: boolean; thinkingLevels?: string[] };
@@ -340,7 +347,7 @@ export type RpcSessionCommand =
 		cancelled?: boolean;
 	};
 
-export type ServerHistoryMessage = { type: "server.history"; sessionId: string; entries: unknown[] };
+export type ServerHistoryMessage = { type: "server.history"; sessionId: string; entries: unknown[]; replace?: boolean };
 export type ServerEventMessage = { type: "server.event"; sessionId: string; event: Record<string, unknown> };
 export type ServerResponseMessage = { type: "server.response"; requestId: string; success: boolean; data?: unknown; error?: string };
 

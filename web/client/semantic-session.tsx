@@ -75,6 +75,8 @@ import { totalSubagentUsage } from "./usage";
 import { toolHasArgumentDetails } from "./tool-expansion";
 import { cn } from "./lib/utils";
 import { moveWebQueuedMessage, type SemanticImage, type WebQueuedMessage, type WebQueueReplacement, type WebSession, type WebSessionOptions, type WebSlashCommand, type WebSubagent, type WebUsage } from "../protocol";
+import { assistantTerminalNotice } from "../assistant-message";
+import { renderTerminalOutput } from "../../terminal-output";
 import { assertClientPromptPayloadFits } from "./image-payload";
 
 export type SemanticEntry = {
@@ -106,6 +108,7 @@ function lastAssistantMessageIndex(messages: MessageView[]): number {
 type SemanticSessionProps = {
   session: WebSession | null;
   entries: SemanticEntry[];
+  historyRevision: number;
   streamingMessage: Record<string, unknown> | null;
   streamingMessageKey: string | null;
   tools: ActiveTool[];
@@ -125,6 +128,8 @@ type SemanticSessionProps = {
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SESSION_DRAFT_PREFIX = "pi-web-session-draft-v1:";
+const SUBAGENTS_MINIMIZED_PREFIX = "pi-web-subagents-minimized-v1:";
+const subagentsMinimizedBySession = new Map<string, boolean>();
 
 function draftStorageKey(sessionId: string): string {
   return `${SESSION_DRAFT_PREFIX}${encodeURIComponent(sessionId)}`;
@@ -167,6 +172,30 @@ function saveSessionDraft(sessionId: string, draft: string): void {
     else localStorage.removeItem(draftStorageKey(sessionId));
   } catch {
     // Draft persistence is best-effort when storage is unavailable or full.
+  }
+}
+
+function subagentsMinimizedStorageKey(sessionId: string): string {
+  return `${SUBAGENTS_MINIMIZED_PREFIX}${encodeURIComponent(sessionId)}`;
+}
+
+function loadSubagentsMinimized(sessionId: string | undefined): boolean {
+  if (!sessionId) return false;
+  const retained = subagentsMinimizedBySession.get(sessionId);
+  if (retained !== undefined) return retained;
+  let minimized = false;
+  try { minimized = localStorage.getItem(subagentsMinimizedStorageKey(sessionId)) === "1"; } catch { /* use the in-memory default */ }
+  subagentsMinimizedBySession.set(sessionId, minimized);
+  return minimized;
+}
+
+function saveSubagentsMinimized(sessionId: string, minimized: boolean): void {
+  subagentsMinimizedBySession.set(sessionId, minimized);
+  try {
+    if (minimized) localStorage.setItem(subagentsMinimizedStorageKey(sessionId), "1");
+    else localStorage.removeItem(subagentsMinimizedStorageKey(sessionId));
+  } catch {
+    // The in-memory preference still survives session navigation.
   }
 }
 
@@ -327,6 +356,7 @@ function HighlightedCode({ text, language }: { text: string; language?: string }
 }
 
 function FormattedOutput({ text, toolName, args }: { text: string; toolName: string; args?: Record<string, unknown> }) {
+  if (toolName === "bash") text = renderTerminalOutput(text);
   if (toolName === "read") return text ? <HighlightedCode text={text} language={syntaxLanguage(String(args?.path ?? ""))} /> : null;
   if (toolName.startsWith("subagent_")) return text ? <Markdown preserveSoftBreaks>{text}</Markdown> : null;
   const documents = parseJsonDocuments(text);
@@ -794,6 +824,7 @@ const MessageCard = React.memo(function MessageCard({
 }) {
   const role = typeof message.role === "string" ? message.role : "assistant";
   const parts = displayContentParts(message);
+  const terminalNotice = assistantTerminalNotice(message);
   const messageTime = formatMessageTime(message.timestamp);
   const fullTimestamp = formatFullTimestamp(message.timestamp);
   if (role === "toolResult") return null;
@@ -826,6 +857,12 @@ const MessageCard = React.memo(function MessageCard({
           }
           return null;
         })}
+        {terminalNotice && (
+          <div className={cn("semantic-terminal-notice", `is-${terminalNotice.kind}`)} role="alert">
+            <strong>{terminalNotice.title}</strong>
+            <span>{terminalNotice.detail}</span>
+          </div>
+        )}
         </div>
       </div>
     </article>
@@ -894,7 +931,7 @@ function QueuedMessageRow({ item, overlay = false, overlayWidth, blocked = false
   );
 }
 
-export function SemanticSession({ session, entries, streamingMessage, streamingMessageKey: providedStreamingMessageKey, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
+export function SemanticSession({ session, entries, historyRevision, streamingMessage, streamingMessageKey: providedStreamingMessageKey, tools, error, connected, transcriptLoading, queuedMessages, sessionOptions, onSelectModel, onSelectThinkingLevel, onSend, onReplaceQueue, onSteerQueuedMessage, onReconcileQueue, onAbort }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
   const [sendError, setSendError] = React.useState<string | null>(null);
@@ -913,7 +950,7 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
   const [sendMenuOpen, setSendMenuOpen] = React.useState(false);
   const [selectedSubagentId, setSelectedSubagentId] = React.useState<string | null>(null);
-  const [subagentsMinimized, setSubagentsMinimized] = React.useState(false);
+  const [subagentsMinimized, setSubagentsMinimized] = React.useState(() => loadSubagentsMinimized(session?.id));
   const [slashMenuDismissed, setSlashMenuDismissed] = React.useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = React.useState(0);
   const [showScrollToBottom, setShowScrollToBottom] = React.useState(false);
@@ -937,6 +974,9 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
   const lastTouchYRef = React.useRef<number | null>(null);
   const lastScrollTopRef = React.useRef(0);
   const autoScrollFrameRef = React.useRef<number | null>(null);
+  const historyRevisionRef = React.useRef(historyRevision);
+  const manuallyExpandedRef = React.useRef(new Set<string>());
+  const autoExpandedRef = React.useRef<string | null>(null);
   const viewportAnchorRef = React.useRef<{
     element: HTMLElement | null;
     range: Range | null;
@@ -947,6 +987,22 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
     fallbacks: Array<{ key: string; top: number }>;
     scrollTop: number;
   } | null>(null);
+
+  React.useLayoutEffect(() => {
+    if (historyRevisionRef.current === historyRevision) return;
+    historyRevisionRef.current = historyRevision;
+    lockedScrollHeightRef.current = null;
+    viewportAnchorRef.current = null;
+    followOutputRef.current = true;
+    scrollIntentRef.current = null;
+    if (scrollSpacerRef.current) scrollSpacerRef.current.style.height = "0px";
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    showScrollToBottomRef.current = false;
+    setShowScrollToBottom(false);
+    setExpandedItems(new Set());
+    manuallyExpandedRef.current.clear();
+    autoExpandedRef.current = null;
+  }, [historyRevision]);
 
   const updateScrollButton = React.useCallback((visible: boolean) => {
     showScrollToBottomRef.current = visible;
@@ -1102,9 +1158,6 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
     viewportAnchorRef.current = null;
     lockedScrollHeightRef.current = null;
   }
-
-  const manuallyExpandedRef = React.useRef(new Set<string>());
-  const autoExpandedRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     setExpandedItems(new Set());
@@ -1489,9 +1542,18 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
             lastScrollTopRef.current = target.scrollTop;
           }
         }
-        await onSend(message, images, behavior);
+        const submittedImages = images;
+        // Delivery can remain pending for long-running control commands such as
+        // /compact. Clear immediately so a delivered command never looks unsent.
         setDraft("");
         setImages([]);
+        try {
+          await onSend(message, submittedImages, behavior);
+        } catch (cause) {
+          setDraft((current) => current || message);
+          setImages((current) => current.length > 0 ? current : submittedImages);
+          throw cause;
+        }
       }
       setSendError(null);
     } catch (cause) {
@@ -1614,7 +1676,11 @@ export function SemanticSession({ session, entries, streamingMessage, streamingM
                   title={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
                   aria-label={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
                   aria-expanded={!subagentsMinimized}
-                  onClick={() => setSubagentsMinimized((minimized) => !minimized)}
+                  onClick={() => {
+                    const next = !subagentsMinimized;
+                    setSubagentsMinimized(next);
+                    if (session?.id) saveSubagentsMinimized(session.id, next);
+                  }}
                 >
                   {subagentsMinimized ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </button>

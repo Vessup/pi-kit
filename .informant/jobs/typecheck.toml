@@ -1,0 +1,7 @@
+name = "typecheck"
+command = """
+set -eu
+bun run check
+"""
+timeout_minutes = 15
+container = { cpu = 2, memory_mb = 4096 }

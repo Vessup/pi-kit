@@ -21,6 +21,7 @@
 		"extensions": [
 			"./extensions/session-footer.ts",
 			"./extensions/pr-footer.ts",
+			"./extensions/terminal-output.ts",
 			"./extensions/subagents.ts",
 			"./extensions/worktree.ts",
 			"./extensions/web-sessions.ts",

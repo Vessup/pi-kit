@@ -12,6 +12,7 @@ import { SessionSocket } from "./ws";
 const JSON_HEADERS = { "Content-Type": "application/json" } as const;
 const SOCKET_PATHS = ["/ws/client"] as const;
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
+const ABORT_COMMAND_TIMEOUT_MS = 35_000;
 const FORK_COMMAND_TIMEOUT_MS = 35_000;
 const WORKTREE_COMMAND_TIMEOUT_MS = 11 * 60_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 11 * 60_000;
@@ -49,6 +50,7 @@ async function supportsCommandHello(): Promise<boolean> {
 
 export function sessionCommandTimeout(command: AgentCommand | RpcSessionCommand): number {
   if (command.type === "create_worktree" || command.type === "create_worktree_v2" || command.type === "reload") return WORKTREE_COMMAND_TIMEOUT_MS;
+  if (command.type === "abort") return ABORT_COMMAND_TIMEOUT_MS;
   if (command.type === "clone" || command.type === "fork") return FORK_COMMAND_TIMEOUT_MS;
   return command.type === "compact" || command.type === "bash"
     ? LONG_RUNNING_COMMAND_TIMEOUT_MS

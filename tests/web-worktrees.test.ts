@@ -7,9 +7,11 @@ import {
 	currentWorktreeRef,
 	gitCommandTimeoutMs,
 	hasOtherSessionInWorktree,
+	inheritManagedBranchOwnership,
 	inspectExistingWorktree,
 	managedWorktreeFromEntries,
 	removeManagedWorktree,
+	removeManagedWorktreeAsync,
 	rollbackWebWorktree,
 	runWorktreeSetup,
 	validateGitVersion,
@@ -40,9 +42,16 @@ test("web worktrees are created under the primary repository .pi directory", asy
 
 	const result = await createWebWorktree(repository, "feature-one");
 	expect(await realpath(result.path)).toBe(await realpath(join(repository, ".pi", "worktrees", "feature-one")));
-	await expect(createWebWorktree(repository, "feature-one")).rejects.toThrow(`Worktree path already exists: ${result.path}`);
+	const reused = await createWebWorktree(repository, "feature-one");
+	expect(reused).toMatchObject({ path: result.path, name: "feature-one", branch: "feature-one", branchCreated: false, setupRan: false });
+	await expect(createWebWorktree(repository, "feature-one", { startPoint: "HEAD" })).rejects.toThrow("omit the start point");
+	await expect(createWebWorktree(repository, "feature-one", { startPoint: "not-a-ref" })).rejects.toThrow("omit the start point");
+	await expect(createWebWorktree(repository, "feature-one", { branch: "different-branch" })).rejects.toThrow("not requested branch different-branch");
 	expect(result).toMatchObject({ name: "feature-one", branch: "feature-one", branchCreated: true });
 	expect((await Bun.$`git -C ${result.path} branch --show-current`.text()).trim()).toBe("feature-one");
+	const stalePath = join(repository, ".pi", "worktrees", "stale");
+	await mkdir(stalePath, { recursive: true });
+	await expect(createWebWorktree(repository, "stale")).rejects.toThrow("already exists but cannot be reused");
 
 	await writeFile(join(repository, "README.md"), "second\n");
 	await Bun.$`git -C ${repository} commit -am second -q`;
@@ -298,6 +307,31 @@ test("worktree setup force-kills descendants after a timed-out leader exits", as
 	expect(alive).toBe(false);
 });
 
+test("async managed cleanup yields before spawning Git verification", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-async-cleanup-"));
+	const fakeBin = join(directory, "bin");
+	const fakeGit = join(fakeBin, "git");
+	await mkdir(fakeBin, { recursive: true });
+	await writeFile(fakeGit, "#!/bin/sh\nsleep 1\nif [ \"$1\" = \"--version\" ]; then echo 'git version 2.36.0'; exit 0; fi\nexit 1\n");
+	await chmod(fakeGit, 0o755);
+	const moduleUrl = new URL("../web/server/worktrees.ts", import.meta.url).href;
+	const probe = Bun.spawn({
+		cmd: [process.execPath, "-e", `
+			import { removeManagedWorktreeAsync } from ${JSON.stringify(moduleUrl)};
+			const started = Date.now();
+			const cleanup = removeManagedWorktreeAsync({ path: "/missing/topic", repoRoot: "/missing", name: "topic", branch: "topic", branchCreated: true });
+			console.log(Date.now() - started);
+			await cleanup.catch(() => undefined);
+		`],
+		env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const elapsed = Number((await new Response(probe.stdout).text()).trim());
+	expect(await probe.exited).toBe(0);
+	expect(elapsed).toBeLessThan(500);
+}, 5_000);
+
 test("managed worktree metadata is parsed and cleanup removes its checkout and branch", async () => {
 	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-cleanup-"));
 	const repository = join(directory, "repo");
@@ -327,6 +361,42 @@ test("managed worktree metadata is parsed and cleanup removes its checkout and b
 	removeManagedWorktree(marker!);
 	await expect(stat(created.path)).rejects.toThrow();
 	expect((await Bun.$`git -C ${repository} branch --list cleanup-me`.text()).trim()).toBe("");
+});
+
+test("reused sessions inherit branch ownership when the original owner is deleted first", async () => {
+	directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-owner-transfer-"));
+	const repository = join(directory, "repo");
+	const sessions = join(directory, "sessions");
+	await Bun.$`git init -q ${repository}`;
+	await Bun.$`git -C ${repository} config user.name test`;
+	await Bun.$`git -C ${repository} config user.email test@example.com`;
+	await writeFile(join(repository, "README.md"), "test\n");
+	await Bun.$`git -C ${repository} add README.md`;
+	await Bun.$`git -C ${repository} commit -qm initial`;
+
+	const owner = await createWebWorktree(repository, "shared-owned");
+	const rawReuse = await createWebWorktree(repository, "shared-owned");
+	const normalizedOwner = {
+		...owner,
+		path: join(owner.path, "..", owner.name),
+		repoRoot: join(owner.repoRoot, "."),
+	};
+	const reuser = inheritManagedBranchOwnership(rawReuse, [normalizedOwner]);
+	expect(inheritManagedBranchOwnership(rawReuse, [{ ...owner, branchCreated: false }])).toBe(rawReuse);
+	const ownerFile = join(sessions, "owner.jsonl");
+	const reuserFile = join(sessions, "reuser.jsonl");
+	await mkdir(sessions, { recursive: true });
+	await writeFile(ownerFile, `${JSON.stringify({ type: "session", cwd: owner.path })}\n`);
+	await writeFile(reuserFile, `${JSON.stringify({ type: "session", cwd: reuser.path })}\n`);
+
+	expect(rawReuse.branchCreated).toBe(false);
+	expect(reuser.branchCreated).toBe(true);
+	expect(hasOtherSessionInWorktree(sessions, ownerFile, owner.path)).toBe(true);
+	await rm(ownerFile);
+	expect(hasOtherSessionInWorktree(sessions, reuserFile, reuser.path)).toBe(false);
+	await removeManagedWorktreeAsync(reuser);
+	await expect(stat(owner.path)).rejects.toThrow();
+	expect((await Bun.$`git -C ${repository} branch --list shared-owned`.text()).trim()).toBe("");
 });
 
 test("worktree cleanup waits until the final saved session is deleted", async () => {

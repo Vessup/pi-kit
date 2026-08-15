@@ -1,18 +1,18 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { buildContextEntries, SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type {
 	AgentEventMessage,
 	AgentHelloMessage,
+	AgentHistoryMessage,
 	AgentResponseMessage,
 	AgentSessionReplacedMessage,
 	AgentSubagentsMessage,
 	AgentToServerMessage,
 	AgentUpdateMessage,
 	ClientCommandMessage,
-	ClientSubscribeMessage,
 	ClientToServerMessage,
 	CreateSessionRequest,
 	ResumeSessionRequest,
@@ -25,32 +25,41 @@ import type {
 	ServerSnapshotMessage,
 	ServerStateFile,
 	ServerToClientMessage,
-	WebQueuedMessage,
 	WebSession,
 } from "../protocol.js";
 import { compareWebSessions, DEFAULT_WEB_PORT, hasActiveWebSubagents, mergeWebSubagentUpdates, WEB_STATE_VERSION } from "../protocol.js";
-import { expandSlashCommand, type ExpandableSlashCommand } from "../slash-commands.js";
+import { expandSlashCommand } from "../slash-commands.js";
+import { parseWebCompactCommand } from "../compact-command.js";
 import { isWebReloadCommand } from "../reload-command.js";
 import { formatWorktreeCreateCommandArgs, parseWorktreeInvocation, WORKTREE_USAGE } from "../worktree-command.js";
 import { replacementFromEntries } from "../worktree-replacement.js";
 import { resolveSessionProject } from "./projects.js";
+import { badRequest, internalError, isTrustedBrowserOrigin, jsonResponse, notFound, textResponse } from "./http-utils.js";
+import { createSessionFileCatalog } from "./session-file-catalog.js";
+import { createSessionQueueCoordinator } from "./session-queue-coordinator.js";
+import type { AgentSocketData, ClientSocketData, ExternalPendingRequest, SessionKind, SessionRecord, SocketData } from "./server-types.js";
+import { SlashCommandService } from "./slash-command-service.js";
+import { createStaticAssetResponder } from "./static-assets.js";
 import { resolveWebCwd } from "./paths.js";
 import {
 	createWebWorktree,
 	hasOtherSessionInWorktree,
+	inheritManagedBranchOwnership,
 	managedWorktreeFromEntries,
 	removeManagedWorktree,
+	removeManagedWorktreeAsync,
 	WORKTREE_SESSION_ENTRY,
-	type ManagedWorktree,
 } from "./worktrees.js";
 import { CoalescedQueueStoreWriter, readQueueStore } from "./queue-store.js";
 import { ManagedSessionStore } from "./managed-session-store.js";
-import { persistPreDeliveryTransition, queueDeliveryFailureDisposition } from "./queue-delivery.js";
-import { preserveRetryAroundQuiescence, quiesceQueueMutations, serializeQueueMutation, transactionalQueueMutation } from "./queue-mutation.js";
-import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
+import { preserveRetryAroundQuiescence, quiesceQueueMutations } from "./queue-mutation.js";
 import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js";
-import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
+import { shouldContinueManagedShutdownWait, shouldRejectDuringShutdown, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
+import { normalizeLegacySessionUpdate } from "./session-lifecycle.js";
+import { boundedWebHistory, messagesToWebHistory, WEB_HISTORY_MAX_BYTES, WEB_HISTORY_MAX_ENTRIES, webHistoryByteLength } from "../history.js";
+import { agentEndTerminalNotice, assistantTerminalNotice } from "../assistant-message.js";
+import { CommandDeliveryUncertainError, CommandRejectedError, isUncertainRpcDeliveryCommand, ManagedRpcSession, type ManagedRpcSessionOptions } from "./managed-rpc-session.js";
 import {
 	disableTailscaleServe,
 	ensureTailscaleServe,
@@ -60,111 +69,10 @@ import {
 	type TailscaleWebSettings,
 } from "../tailscale.js";
 
-type WebSocketKind = "client" | "agent";
-type SessionSource = WebSession["source"];
-type SessionStatus = WebSession["status"];
-type SessionKind = "managed" | "external" | "saved";
-
-type ClientSocketData = {
-	kind: "client";
-	id: string;
-	authed: boolean;
-	sessionId?: string;
-};
-type AgentSocketData = { kind: "agent"; id: string; authed: boolean };
-type SocketData = ClientSocketData | AgentSocketData;
-
-type RpcResponse<T = unknown> =
-	| { id?: string; type: "response"; success: true; command: string; data?: T }
-	| { id?: string; type: "response"; success: false; command: string; error: string };
-
-type RpcEvent = Record<string, unknown> & { type?: string; id?: string };
-
-type ExternalPendingRequest = {
-	resolve: (value: unknown) => void;
-	reject: (error: Error) => void;
-	surviveDisconnect?: boolean;
-	commandType?: ClientCommandMessage["command"]["type"];
-	owner?: SessionRecord;
-};
-
-type SessionRecord = {
-	id: string;
-	file?: string;
-	cwd: string;
-	name?: string;
-	branch?: string;
-	model?: string;
-	thinkingLevel?: string;
-	status: SessionStatus;
-	source: SessionSource;
-	createdAt: number;
-	updatedAt: number;
-	messageCount: number;
-	preview?: string;
-	parentSession?: string;
-	pullRequest?: WebSession["pullRequest"];
-	subagents?: WebSession["subagents"];
-	subagentUsage?: WebSession["subagentUsage"];
-	usage?: WebSession["usage"];
-	contextUsage?: WebSession["contextUsage"];
-	compaction?: WebSession["compaction"];
-	kind: SessionKind;
-	history: unknown[];
-	active: boolean;
-	/** Last authoritative agent lifecycle state; guards against stale bridge updates. */
-	agentRunning?: boolean;
-	agentStartGeneration?: number;
-	/** RPC runtime used only for saved-session management operations. */
-	managed?: ManagedRpcSession;
-	agentSockets: Set<Bun.ServerWebSocket<AgentSocketData>>;
-	clientSockets: Set<Bun.ServerWebSocket<ClientSocketData>>;
-	externalRequestTargets: Map<string, Bun.ServerWebSocket<AgentSocketData>>;
-	externalPending: Map<string, ExternalPendingRequest>;
-	queue: WebQueuedMessage[];
-	queueMutationTail?: Promise<void>;
-	queueMutationsQuiesced?: boolean;
-	queueDeliveryActive?: string;
-	queueDeliveryAttempts?: { itemId: string; count: number };
-	queueTransitionAttempts?: { itemId: string; count: number };
-	queueRetryTimer?: ReturnType<typeof setTimeout>;
-	queueSettleFallbackTimer?: ReturnType<typeof setTimeout>;
-	queueDirtyWorker?: DirtySnapshotRetryWorker;
-	managedRefreshTail?: Promise<void>;
-	managedIdentityOperation?: ClientCommandMessage["command"]["type"];
-	managedWorktree?: ManagedWorktree;
-	pendingWorktreeSourceDeletion?: { sessionId: string; sessionFile: string };
-};
-
-type SessionFileScan = {
-	session: WebSession;
-	file: string;
-	history: unknown[];
-	entries: unknown[];
-	header?: Record<string, unknown>;
-	managedWorktreeScanned?: boolean;
-	replacement?: ReturnType<typeof replacementFromEntries>;
-};
-
-type ManagedRpcSessionOptions = {
-	cwd: string;
-	name?: string;
-	sessionFile?: string;
-	noSession?: boolean;
-	onEvent: (event: RpcEvent) => void;
-	onExit: (exitCode: number | null, signal: string | null) => void;
-};
-
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-type DiscoveredSlashCommand = ExpandableSlashCommand & {
-	description?: string;
-	sourceInfo: ExpandableSlashCommand["sourceInfo"] & { scope?: "user" | "project" | "temporary" };
-};
-
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const rootDir = resolve(process.env.PI_WEB_ROOT ? (isAbsolute(process.env.PI_WEB_ROOT) ? process.env.PI_WEB_ROOT : join(process.cwd(), process.env.PI_WEB_ROOT)) : process.cwd());
 const distDir = join(rootDir, "web", "dist");
+const staticAssetResponse = createStaticAssetResponder(distDir);
 const stateFilePath = resolve(
 	process.env.PI_WEB_STATE_FILE
 		? isAbsolute(process.env.PI_WEB_STATE_FILE)
@@ -183,34 +91,21 @@ const managedSessionStore = new ManagedSessionStore(managedSessionStorePath);
 const configuredPort = Number(process.env.PI_WEB_PORT ?? `${DEFAULT_WEB_PORT}`);
 let port = Number.isInteger(configuredPort) && configuredPort >= 0 && configuredPort <= 65_535 ? configuredPort : DEFAULT_WEB_PORT;
 const host = "127.0.0.1";
-const configuredRpcTimeout = Number(process.env.PI_WEB_RPC_TIMEOUT_MS ?? "30000");
-const RPC_REQUEST_TIMEOUT_MS = Number.isFinite(configuredRpcTimeout) && configuredRpcTimeout > 0
-	? Math.floor(configuredRpcTimeout)
-	: 30_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const MISSING_SESSION_RECONCILE_INTERVAL_MS = 1_000;
 // Accept one legacy agent.hello containing a large session until running Pi
 // processes reload the bridge that sends metadata-only hello frames.
 const MAX_WEBSOCKET_PAYLOAD_BYTES = 32 * 1024 * 1024;
 // Preserve at least one complete addon-sized image in reconnect snapshots.
-const IMAGE_EXTENSIONS = new Map([
-	["image/png", "png"],
-	["image/jpeg", "jpg"],
-	["image/gif", "gif"],
-	["image/webp", "webp"],
-	["image/bmp", "bmp"],
-]);
 
 const sessions = new Map<string, SessionRecord>();
 const sessionsByFile = new Map<string, SessionRecord>();
-const savedSessionMetadataCache = new Map<string, { mtimeMs: number; size: number; scan: SessionFileScan }>();
+const connectedClientSockets = new Set<Bun.ServerWebSocket<ClientSocketData>>();
 const managedSessionStarts = new Map<string, Promise<SessionRecord>>();
 const missingSessionReconciliations = new Set<SessionRecord>();
-const slashCommandCache = new Map<string, { loadedAt: number; commands: DiscoveredSlashCommand[] }>();
 let server: Bun.Server<any> | undefined;
 let missingSessionReconcileTimer: ReturnType<typeof setInterval> | undefined;
 let shutdownStarted = false;
-let forceShutdownRequested = false;
 let webState: ServerStateFile;
 let tailscaleStatus: TailscaleStatus = {
 	installed: false,
@@ -279,327 +174,28 @@ function getOrCreateWebState(): ServerStateFile {
 	};
 }
 
-function normalizePath(path: string): string {
-	const resolved = normalize(resolve(path));
-	try { return realpathSync(resolved); } catch { return resolved; }
+const {
+	normalizePath, sessionFileKey, isManagedSessionFile, replaceManagedSessionFile, deleteManagedSessionFile,
+	isWithinDir, canonicalSessionFile, isRecord, persistInitialSession, toNumber, zeroWebUsage, addWebUsage,
+	extractTextContent, compactionEntryFromEvent, extractPreviewFromHistory,
+	readManagedWorktreePrefix, parseSessionFile, parseSessionMetadataFile, parseSessionHistoryFile, listSavedSessionFiles,
+	scanSavedSessions, deriveForkMessages,
+} = createSessionFileCatalog({ sessionsDir, managedSessionStore });
+
+function createRpcSession(options: Omit<ManagedRpcSessionOptions, "runtimeDirectory" | "replacementForSessionFile">): ManagedRpcSession {
+	return new ManagedRpcSession({
+		...options,
+		runtimeDirectory: dirname(stateFilePath),
+		replacementForSessionFile: (file) => parseSessionMetadataFile(file)?.replacement,
+	});
 }
 
-function sessionFileKey(path: string): string {
-	return normalizePath(path);
-}
-
-function isManagedSessionFile(file: string): boolean {
-	return managedSessionStore.has(sessionFileKey(file));
-}
-
-function replaceManagedSessionFile(previousFile: string | undefined, nextFile: string): void {
-	managedSessionStore.replace(previousFile && sessionFileKey(previousFile), sessionFileKey(nextFile));
-	if (previousFile) {
-		savedSessionMetadataCache.delete(previousFile);
-		savedSessionMetadataCache.delete(sessionFileKey(previousFile));
-	}
-	savedSessionMetadataCache.delete(nextFile);
-	savedSessionMetadataCache.delete(sessionFileKey(nextFile));
-}
-
-function deleteManagedSessionFile(file: string): void {
-	managedSessionStore.delete(sessionFileKey(file));
-	savedSessionMetadataCache.delete(file);
-	savedSessionMetadataCache.delete(sessionFileKey(file));
-}
-
-function isWithinDir(child: string, parent: string): boolean {
-	const normalizedChild = normalizePath(child);
-	const normalizedParent = normalizePath(parent);
-	if (normalizedChild === normalizedParent) return true;
-	return normalizedChild.startsWith(`${normalizedParent}${sep}`);
-}
-
-function canonicalSessionFile(path: string): string {
-	const canonicalRoot = realpathSync(sessionsDir);
-	const canonicalFile = realpathSync(path);
-	if (!isWithinDir(canonicalFile, canonicalRoot)) throw new Error("Session file must be under ~/.pi/agent/sessions");
-	if (!lstatSync(canonicalFile).isFile()) throw new Error("Session path must be a regular file");
-	return canonicalFile;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-function persistInitialSession(manager: SessionManager): string {
-	const file = manager.getSessionFile();
-	if (!file) throw new Error("Pi did not allocate a session file");
-	const header = manager.getHeader();
-	if (!header) throw new Error("Pi did not initialize a session header");
-	const entries = [header, ...manager.getEntries()];
-	writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, { flag: "wx", mode: 0o600 });
-	return file;
-}
-
-function toNumber(value: unknown, fallback = 0): number {
-	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function zeroWebUsage(): NonNullable<WebSession["usage"]> {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-}
-
-function addWebUsage(target: NonNullable<WebSession["usage"]>, value: unknown): void {
-	if (!isRecord(value)) return;
-	for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) target[key] += toNumber(value[key]);
-	if (!isRecord(value.cost)) return;
-	for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) target.cost[key] += toNumber(value.cost[key]);
-}
-
-function usageFromEntries(entries: readonly unknown[]): NonNullable<WebSession["usage"]> {
-	const usage = zeroWebUsage();
-	for (const raw of entries) {
-		if (!isRecord(raw)) continue;
-		if (raw.type === "message" && isRecord(raw.message) && (raw.message.role === "assistant" || raw.message.role === "toolResult")) {
-			addWebUsage(usage, raw.message.usage);
-		} else if (raw.type === "branch_summary" || raw.type === "compaction") {
-			addWebUsage(usage, raw.usage);
-		}
-	}
-	return usage;
-}
-
-function extractTextContent(content: unknown): string | undefined {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return undefined;
-	const parts: string[] = [];
-	for (const item of content) {
-		if (item && typeof item === "object" && "type" in item && (item as { type?: string }).type === "text" && typeof (item as { text?: string }).text === "string") {
-			parts.push((item as { text: string }).text);
-		}
-	}
-	return parts.length > 0 ? parts.join("") : undefined;
-}
-
-function extractPreviewFromHistory(entries: unknown[]): string | undefined {
-	for (let i = entries.length - 1; i >= 0; i -= 1) {
-		const entry = entries[i] as Record<string, unknown> | undefined;
-		if (!entry) continue;
-		if (entry.type === "message") {
-			const message = entry.message as Record<string, unknown> | undefined;
-			if (!message) continue;
-			const role = typeof message.role === "string" ? message.role : undefined;
-			if (role !== "user" && role !== "assistant") continue;
-			const preview = extractTextContent(message.content);
-			if (preview) return preview.slice(0, 180);
-		}
-	}
-	return undefined;
-}
-
-function extractSessionMetadataFromEntries(entries: unknown[]): Partial<WebSession> {
-	let name: string | undefined;
-	let model: string | undefined;
-	let thinkingLevel: string | undefined;
-	let parentSession: string | undefined;
-	let messageCount = 0;
-	for (const raw of entries) {
-		const entry = raw as Record<string, unknown> | undefined;
-		if (!entry || typeof entry.type !== "string") continue;
-		if (entry.type === "message") messageCount += 1;
-		if (entry.type === "session_info" && typeof entry.name === "string") name = entry.name;
-		if (entry.type === "model_change" && typeof entry.modelId === "string") model = entry.modelId;
-		if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") thinkingLevel = entry.thinkingLevel;
-		if (entry.type === "session" && typeof entry.parentSession === "string") parentSession = entry.parentSession;
-	}
-	return { name, model, thinkingLevel, parentSession, messageCount };
-}
-
-function parseSessionFile(file: string): SessionFileScan | undefined {
-	try {
-		const text = readFileSync(file, "utf8");
-		const lines = text.split(/\n/).map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line)).filter((line) => line.length > 0);
-		if (lines.length === 0) return undefined;
-		const header = JSON.parse(lines[0] ?? "null") as Record<string, unknown> | null;
-		const rawEntries: unknown[] = [];
-		for (const line of lines.slice(1)) {
-			try {
-				rawEntries.push(JSON.parse(line));
-			} catch {
-				// ignore malformed trailing lines
-			}
-		}
-		const meta = extractSessionMetadataFromEntries(rawEntries);
-		const stats = statSync(file);
-		const id = typeof header?.id === "string" ? header.id : basename(file, ".jsonl");
-		const cwd = typeof header?.cwd === "string" && header.cwd ? header.cwd : dirname(file);
-		const session: WebSession = {
-			id,
-			file,
-			cwd,
-			name: meta.name,
-			branch: meta.branch,
-			model: meta.model,
-			thinkingLevel: meta.thinkingLevel,
-			status: "offline",
-			source: isManagedSessionFile(file) ? "web" : "saved",
-			createdAt: typeof header?.timestamp === "string" ? Date.parse(header.timestamp) || stats.birthtimeMs : stats.birthtimeMs,
-			updatedAt: stats.mtimeMs,
-			messageCount: meta.messageCount ?? 0,
-			preview: extractPreviewFromHistory(rawEntries),
-			parentSession: typeof header?.parentSession === "string" ? header.parentSession : undefined,
-			managedWorktree: managedWorktreeFromEntries(rawEntries),
-			usage: usageFromEntries(rawEntries),
-		};
-		return {
-			session,
-			file,
-			history: rawEntries,
-			entries: rawEntries,
-			header: header ?? undefined,
-			managedWorktreeScanned: true,
-			replacement: replacementFromEntries(rawEntries),
-		};
-	} catch {
-		return undefined;
-	}
-}
-
-function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
-	try {
-		const stats = statSync(file);
-		const cached = savedSessionMetadataCache.get(file);
-		if (cached?.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached.scan;
-
-		const text = readFileSync(file, "utf8");
-		const lines = text.split(/\n/).map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line)).filter(Boolean);
-		if (lines.length === 0) return undefined;
-		const header = JSON.parse(lines[0] ?? "null") as Record<string, unknown> | null;
-		let name: string | undefined;
-		let model: string | undefined;
-		let thinkingLevel: string | undefined;
-		let messageCount = 0;
-		let preview: string | undefined;
-		const metadataEntries: Record<string, unknown>[] = [];
-		const usage = zeroWebUsage();
-		for (const line of lines.slice(1)) {
-			let entry: Record<string, unknown> | undefined;
-			try {
-				const parsed: unknown = JSON.parse(line);
-				entry = isRecord(parsed) ? parsed : undefined;
-			} catch {
-				continue;
-			}
-			if (!entry || typeof entry.type !== "string") continue;
-			if (entry.type === "session_info" && typeof entry.name === "string") name = entry.name;
-			if (entry.type === "model_change" && typeof entry.modelId === "string") model = entry.modelId;
-			if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") thinkingLevel = entry.thinkingLevel;
-			if (entry.type === "custom") metadataEntries.push(entry);
-			if (entry.type === "message") {
-				messageCount += 1;
-				const message = isRecord(entry.message) ? entry.message : undefined;
-				if (message && (message.role === "assistant" || message.role === "toolResult")) addWebUsage(usage, message.usage);
-				if (message && (message.role === "user" || message.role === "assistant")) {
-					const textPreview = extractTextContent(message.content);
-					if (textPreview) preview = textPreview.slice(0, 180);
-				}
-			}
-			if (entry.type === "branch_summary" || entry.type === "compaction") addWebUsage(usage, entry.usage);
-		}
-		const id = typeof header?.id === "string" ? header.id : basename(file, ".jsonl");
-		const cwd = typeof header?.cwd === "string" && header.cwd ? header.cwd : dirname(file);
-		// Resolve all markers together so malformed newer entries are skipped while
-		// an explicit `{ managed: false }` still clears earlier ownership.
-		const managedWorktree = managedWorktreeFromEntries(metadataEntries);
-		const session: WebSession = {
-			id,
-			file,
-			cwd,
-			name,
-			model,
-			thinkingLevel,
-			status: "offline",
-			source: isManagedSessionFile(file) ? "web" : "saved",
-			createdAt: typeof header?.timestamp === "string" ? Date.parse(header.timestamp) || stats.birthtimeMs : stats.birthtimeMs,
-			updatedAt: stats.mtimeMs,
-			messageCount,
-			preview,
-			parentSession: typeof header?.parentSession === "string" ? header.parentSession : undefined,
-			managedWorktree,
-			usage,
-		};
-		const scan: SessionFileScan = {
-			session,
-			file,
-			history: [],
-			entries: [],
-			header: header ?? undefined,
-			managedWorktreeScanned: true,
-			replacement: replacementFromEntries(metadataEntries),
-		};
-		savedSessionMetadataCache.set(file, { mtimeMs: stats.mtimeMs, size: stats.size, scan });
-		return scan;
-	} catch {
-		return undefined;
-	}
-}
-
-function listSavedSessionFiles(dir: string): string[] {
-	const files: string[] = [];
-	const stack = [dir];
-	while (stack.length > 0) {
-		const current = stack.pop();
-		if (!current) continue;
-		let entries: Array<{ isDirectory(): boolean; isFile(): boolean; name: string }>;
-		try {
-			entries = readdirSync(current, { withFileTypes: true }) as Array<{ isDirectory(): boolean; isFile(): boolean; name: string }>;
-		} catch {
-			continue;
-		}
-		for (const entry of entries) {
-			const fullPath = join(current, entry.name);
-			if (entry.isDirectory()) stack.push(fullPath);
-			else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(fullPath);
-		}
-	}
-	return files;
-}
-
-function removeMissingSessionMetadata(dir: string, files: readonly string[]): void {
-	const discovered = new Set(files);
-	for (const file of savedSessionMetadataCache.keys()) {
-		if (isWithinDir(file, dir) && !discovered.has(file)) savedSessionMetadataCache.delete(file);
-	}
-}
-
-function scanSavedSessions(dir: string): SessionFileScan[] {
-	const files = listSavedSessionFiles(dir);
-	const scans: SessionFileScan[] = [];
-	for (const file of files) {
-		const scan = parseSessionMetadataFile(file);
-		if (scan) scans.push(scan);
-	}
-	removeMissingSessionMetadata(dir, files);
-	return scans;
-}
-
-
-function deriveForkMessages(entries: unknown[]): Array<{ entryId: string; text: string }> {
-	const result: Array<{ entryId: string; text: string }> = [];
-	for (const raw of entries) {
-		const entry = raw as Record<string, unknown> | undefined;
-		if (!entry || entry.type !== "message") continue;
-		const id = typeof entry.id === "string" ? entry.id : undefined;
-		const message = entry.message as Record<string, unknown> | undefined;
-		if (!id || !message || message.role !== "user") continue;
-		const text = extractTextContent(message.content);
-		if (text) result.push({ entryId: id, text });
-	}
-	return result;
-}
+const slashCommands = new SlashCommandService(normalizePath, (cwd) => createRpcSession({
+	cwd,
+	noSession: true,
+	onEvent: () => undefined,
+	onExit: () => undefined,
+}));
 
 function sessionToClientPayload(session: WebSession, includeSubagentTranscripts = false): WebSession {
 	const project = resolveSessionProject(session.cwd);
@@ -638,68 +234,23 @@ function sortSessions(list: WebSession[]): WebSession[] {
 	return list.sort(compareWebSessions);
 }
 
-function jsonResponse(value: unknown, init?: ResponseInit): Response {
-	return new Response(JSON.stringify(value), {
-		status: init?.status ?? 200,
-		headers: {
-			"content-type": "application/json; charset=utf-8",
-			...(init?.headers ?? {}),
-		},
-	});
-}
-
-function textResponse(value: string, init?: ResponseInit): Response {
-	return new Response(value, {
-		status: init?.status ?? 200,
-		headers: init?.headers,
-	});
-}
-
-function notFound(): Response {
-	return textResponse("Not found", { status: 404 });
-}
-
-function badRequest(message: string): Response {
-	return jsonResponse({ error: message }, { status: 400 });
-}
-
-function internalError(message: string): Response {
-	return jsonResponse({ error: message }, { status: 500 });
-}
-
-function isTrustedBrowserOrigin(request: Request): boolean {
-	const rawOrigin = request.headers.get("origin");
-	if (!rawOrigin) return false;
-	try {
-		const origin = new URL(rawOrigin);
-		if (origin.protocol !== "http:" && origin.protocol !== "https:") return false;
-		const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim().toLowerCase();
-		if (forwardedHost) {
-			if (!tailscaleStatus.published || !tailscaleStatus.url) return false;
-			const published = new URL(tailscaleStatus.url);
-			return origin.origin === published.origin && forwardedHost === published.host.toLowerCase();
-		}
-		const hostname = origin.hostname.toLowerCase();
-		if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "[::1]") return false;
-		const requestHost = (request.headers.get("host") || new URL(request.url).host).toLowerCase();
-		return origin.host.toLowerCase() === requestHost;
-	} catch {
-		return false;
-	}
-}
-
 function makeSessionRecord(
 	session: WebSession,
 	kind: SessionKind,
 	history: unknown[] = [],
 	managedWorktreeScanned = false,
 ): SessionRecord {
+	const displayHistory = boundedWebHistory(kind === "saved" ? buildContextEntries(history as SessionEntry[]) : history);
+	const historyManagedWorktree = managedWorktreeFromEntries(history);
 	const record = sessions.get(session.id) ?? {
 		...session,
 		kind,
-		history: [...history],
+		history: displayHistory,
+		historyReady: history.length > 0,
+		historyBytes: webHistoryByteLength(displayHistory),
 		active: kind !== "saved",
 		agentRunning: session.status === "working",
+		managedWorktreeScanned,
 		agentSockets: new Set<Bun.ServerWebSocket<AgentSocketData>>(),
 		clientSockets: new Set<Bun.ServerWebSocket<ClientSocketData>>(),
 		externalRequestTargets: new Map<string, Bun.ServerWebSocket<AgentSocketData>>(),
@@ -708,10 +259,15 @@ function makeSessionRecord(
 	};
 	Object.assign(record, session);
 	record.kind = kind;
-	record.history = history.length > 0 ? [...history] : record.history;
+	if (history.length > 0) {
+		record.history = displayHistory;
+		record.historyReady = true;
+		record.historyBytes = webHistoryByteLength(record.history);
+	}
 	record.managedWorktree = managedWorktreeScanned
 		? session.managedWorktree
-		: managedWorktreeFromEntries(record.history) ?? session.managedWorktree;
+		: historyManagedWorktree ?? session.managedWorktree ?? record.managedWorktree;
+	if (managedWorktreeScanned) record.managedWorktreeScanned = true;
 	record.active = kind !== "saved" || record.active;
 	if (kind === "saved") record.active = false;
 	return record;
@@ -725,12 +281,14 @@ function upsertSession(
 ): SessionRecord {
 	const existing = sessions.get(session.id);
 	const record = existing ?? makeSessionRecord(session, kind, history, managedWorktreeScanned);
+	const historyManagedWorktree = history.length > 0 ? managedWorktreeFromEntries(history) : undefined;
 	Object.assign(record, session);
 	record.kind = kind;
-	if (history.length > 0) record.history = [...history];
+	if (history.length > 0) replaceRecordHistory(record, kind === "saved" ? buildContextEntries(history as SessionEntry[]) : history);
 	record.managedWorktree = managedWorktreeScanned
 		? session.managedWorktree
-		: managedWorktreeFromEntries(record.history) ?? session.managedWorktree;
+		: historyManagedWorktree ?? session.managedWorktree ?? record.managedWorktree;
+	if (managedWorktreeScanned) record.managedWorktreeScanned = true;
 	if (kind !== "saved") record.active = true;
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
@@ -752,26 +310,52 @@ function broadcast(sessionId: string, message: ServerToClientMessage): void {
 
 function broadcastToAll(message: ServerToClientMessage): void {
 	const payload = JSON.stringify(message);
-	for (const record of sessions.values()) {
-		for (const socket of record.clientSockets) {
-			try {
-				socket.send(payload);
-			} catch {
-				// ignore
-			}
+	for (const socket of connectedClientSockets) {
+		try {
+			socket.send(payload);
+		} catch {
+			// ignore
 		}
 	}
+}
+
+function broadcastSessionToAll(record: SessionRecord): void {
+	if (record.catalogReady === false || sessions.get(record.id) !== record) return;
+	broadcastToAll({ type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+}
+
+function catalogSessionChanged(previous: WebSession | undefined, next: WebSession): boolean {
+	if (!previous) return true;
+	return previous.file !== next.file
+		|| previous.cwd !== next.cwd
+		|| previous.name !== next.name
+		|| previous.branch !== next.branch
+		|| previous.model !== next.model
+		|| previous.thinkingLevel !== next.thinkingLevel
+		|| previous.status !== next.status
+		|| previous.source !== next.source
+		|| previous.messageCount !== next.messageCount
+		|| previous.preview !== next.preview
+		|| previous.parentSession !== next.parentSession
+		|| previous.pullRequest?.number !== next.pullRequest?.number
+		|| previous.pullRequest?.url !== next.pullRequest?.url
+		|| previous.compaction?.reason !== next.compaction?.reason
+		|| previous.compaction?.startedAt !== next.compaction?.startedAt;
+}
+
+function activeSessionFiles(): Set<string> {
+	return new Set([...sessions.values()].flatMap((record) => record.active && record.file ? [normalizePath(record.file)] : []));
 }
 
 function sessionSnapshot(): WebSession[] {
 	void reconcileMissingSessionFiles();
 	const merged = new Map<string, WebSession>();
 	for (const record of sessions.values()) {
-		if (isMissingInactiveSession(record)) continue;
+		if (record.catalogReady === false || isMissingInactiveSession(record)) continue;
 		const key = record.file ? normalizePath(record.file) : record.id;
 		merged.set(key, sessionToClientPayload(record));
 	}
-	for (const scan of scanSavedSessions(sessionsDir)) {
+	for (const scan of scanSavedSessions(sessionsDir, activeSessionFiles())) {
 		const key = scan.session.file ? normalizePath(scan.session.file) : scan.session.id;
 		const live = sessionsByFile.get(key) ?? sessions.get(scan.session.id);
 		if (!live?.active || live.status === "offline") merged.set(key, sessionToClientPayload(scan.session));
@@ -779,13 +363,34 @@ function sessionSnapshot(): WebSession[] {
 	return sortSessions(Array.from(merged.values()));
 }
 
+function replaceRecordHistory(record: SessionRecord, entries: readonly unknown[]): void {
+	record.history = boundedWebHistory(entries);
+	record.historyReady = true;
+	record.historyBytes = webHistoryByteLength(record.history);
+}
+
+function appendRecordHistory(record: SessionRecord, entry: unknown): void {
+	const appended = boundedWebHistory([entry], { maxEntries: 1 });
+	if (appended.length === 0) return;
+	record.history.push(appended[0]);
+	record.historyReady = true;
+	record.historyBytes = (record.historyBytes ?? webHistoryByteLength(record.history.slice(0, -1))) + webHistoryByteLength(appended);
+	while (record.history.length > WEB_HISTORY_MAX_ENTRIES || record.historyBytes > WEB_HISTORY_MAX_BYTES) {
+		const first = record.history[0];
+		const preserveSummary = isRecord(first) && typeof first.id === "string" && first.id.startsWith("web-compaction-");
+		const removeIndex = preserveSummary && record.history.length > 1 ? 1 : 0;
+		const [removed] = record.history.splice(removeIndex, 1);
+		record.historyBytes = Math.max(2, record.historyBytes - webHistoryByteLength([removed]));
+	}
+}
+
 function sessionHistoryForRecord(record: SessionRecord): unknown[] {
-	if (record.managed && record.active) return [...record.history];
+	if (record.active || record.historyReady) return [...record.history];
 	if (record.file) {
 		const scan = parseSessionFile(record.file);
 		if (scan) {
-			record.history = scan.history;
-			return [...scan.history];
+			replaceRecordHistory(record, buildContextEntries(scan.history as SessionEntry[]));
+			return [...record.history];
 		}
 	}
 	return [...record.history];
@@ -837,8 +442,9 @@ function updateRecordFromState(record: SessionRecord, state: unknown): void {
 	if (typeof s.sessionFile === "string") {
 		record.file = s.sessionFile;
 		sessionsByFile.set(normalizePath(s.sessionFile), record);
-		const scan = parseSessionFile(s.sessionFile);
+		const scan = parseSessionMetadataFile(s.sessionFile);
 		if (scan?.session.cwd) record.cwd = scan.session.cwd;
+		if (scan?.managedWorktreeScanned) record.managedWorktree = scan.session.managedWorktree;
 	}
 	if (typeof s.sessionId === "string") record.id = s.sessionId;
 	record.name = typeof s.sessionName === "string" && s.sessionName ? s.sessionName : undefined;
@@ -848,7 +454,7 @@ function updateRecordFromState(record: SessionRecord, state: unknown): void {
 		record.status = "working";
 	} else if (s.isCompacting === false) {
 		record.compaction = undefined;
-		if (s.isStreaming === false) record.status = "idle";
+		if (s.isStreaming === false && record.status !== "error") record.status = "idle";
 	}
 	record.updatedAt = Date.now();
 }
@@ -875,467 +481,31 @@ async function commandOutput(command: string[], cwd: string, timeoutMs = 10_000)
 }
 
 async function hydrateGitMetadata(record: SessionRecord): Promise<void> {
-	const branch = await commandOutput(["git", "branch", "--show-current"], record.cwd);
-	if (branch) record.branch = branch;
-	const raw = await commandOutput(["gh", "pr", "view", "--json", "number,url"], record.cwd);
+	const generation = (record.gitMetadataGeneration ?? 0) + 1;
+	record.gitMetadataGeneration = generation;
+	const cwd = record.cwd;
+	const branch = await commandOutput(["git", "branch", "--show-current"], cwd);
+	const raw = await commandOutput(["gh", "pr", "view", "--json", "number,url"], cwd);
+	let pullRequest: WebSession["pullRequest"];
 	if (raw) {
 		try {
 			const value: unknown = JSON.parse(raw);
 			if (isRecord(value) && Number.isInteger(value.number) && typeof value.url === "string") {
 				const url = new URL(value.url);
 				if (url.protocol === "https:" || url.protocol === "http:") {
-					record.pullRequest = { number: value.number as number, url: url.toString() };
+					pullRequest = { number: value.number as number, url: url.toString() };
 				}
 			}
 		} catch {
 			// A branch without an open PR is expected.
 		}
 	}
-	broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
-}
-
-class CommandRejectedError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "CommandRejectedError";
-	}
-}
-
-class CommandDeliveryUncertainError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "CommandDeliveryUncertainError";
-	}
-}
-
-class ManagedRpcSession {
-	private readonly options: ManagedRpcSessionOptions;
-	private process: Bun.Subprocess | undefined;
-	private stdoutBuffer = "";
-	private readonly pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; command: string }>();
-	private stopped = false;
-	private readonly requestPrefix = `web-${randomUUID()}`;
-	private pendingStart: Promise<void> | undefined;
-	private worktreeError: Error | undefined;
-	private reloadError: Error | undefined;
-	private reloadInFlight: Promise<void> | undefined;
-
-	constructor(options: ManagedRpcSessionOptions) {
-		this.options = options;
-	}
-
-	async start(): Promise<void> {
-		if (this.process) return;
-		ensureDir(dirname(stateFilePath));
-		const env = {
-			...process.env,
-			PI_WEB_MANAGED: "1",
-		};
-		const args = ["--mode", "rpc"];
-		if (this.options.noSession) args.push("--no-session");
-		if (this.options.name) args.push("--name", this.options.name);
-		if (this.options.sessionFile) {
-			// Start in the target cwd and switch to the existing session file immediately.
-			// This keeps the spawned process managed while preserving the existing branch history.
-		}
-		const proc = Bun.spawn({
-			cmd: ["pi", ...args],
-			cwd: this.options.cwd,
-			env,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		this.process = proc;
-		this.pendingStart = this.pumpStdout(proc).catch((error) => {
-			this.failAllPending(error instanceof Error ? error : new Error(String(error)));
-		});
-		this.pumpStderr(proc).catch(() => undefined);
-		proc.exited.then((code: number) => {
-			this.stopped = true;
-			this.options.onExit(code, null);
-			this.failAllPending(new Error(`RPC process exited with code ${code}`));
-		}).catch((error: unknown) => {
-			this.stopped = true;
-			this.options.onExit(null, error instanceof Error ? error.message : String(error));
-			this.failAllPending(error instanceof Error ? error : new Error(String(error)));
-		});
-		await this.send({ type: "get_state" });
-		if (this.options.sessionFile) {
-			await this.send({ type: "switch_session", sessionPath: this.options.sessionFile });
-		}
-	}
-
-	private async pumpStdout(proc: Bun.Subprocess): Promise<void> {
-		const stream = (proc as unknown as { stdout?: ReadableStream<Uint8Array> }).stdout;
-		if (!stream) return;
-		const streamDecoder = new TextDecoder();
-		const reader = stream.getReader();
-		try {
-			while (true) {
-				const { value, done } = await reader.read();
-				if (done) break;
-				this.stdoutBuffer += streamDecoder.decode(value, { stream: true });
-				let newlineIndex = this.stdoutBuffer.indexOf("\n");
-				while (newlineIndex >= 0) {
-					let line = this.stdoutBuffer.slice(0, newlineIndex);
-					this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
-					if (line.endsWith("\r")) line = line.slice(0, -1);
-					if (line.length > 0) this.handleLine(line);
-					newlineIndex = this.stdoutBuffer.indexOf("\n");
-				}
-			}
-			const tail = `${this.stdoutBuffer}${streamDecoder.decode()}`;
-			this.stdoutBuffer = "";
-			if (tail.trim().length > 0) {
-				const line = tail.endsWith("\r") ? tail.slice(0, -1) : tail;
-				this.handleLine(line);
-			}
-		} finally {
-			reader.releaseLock();
-		}
-	}
-
-	private async pumpStderr(proc: Bun.Subprocess): Promise<void> {
-		const stream = (proc as unknown as { stderr?: ReadableStream<Uint8Array> }).stderr;
-		if (!stream) return;
-		const reader = stream.getReader();
-		try {
-			// Keep the pipe drained so the child cannot block, but do not retain its
-			// unbounded diagnostics for the lifetime of the managed session.
-			while (!(await reader.read()).done) {
-				// discarded
-			}
-		} finally {
-			reader.releaseLock();
-		}
-	}
-
-	private handleLine(line: string): void {
-		let parsed: RpcEvent;
-		try {
-			parsed = JSON.parse(line) as RpcEvent;
-		} catch (error) {
-			this.failAllPending(new Error(`Invalid JSONL from RPC child: ${error instanceof Error ? error.message : String(error)}`));
-			return;
-		}
-		if (!parsed || typeof parsed !== "object" || typeof parsed.type !== "string") return;
-		if (parsed.type === "extension_error" && typeof parsed.error === "string") {
-			if (parsed.extensionPath === "command:worktree") this.worktreeError = new Error(parsed.error);
-			if (parsed.extensionPath === "command:web-reload") this.reloadError = new Error(parsed.error);
-		}
-		if (parsed.type === "response") {
-			const response = parsed as RpcResponse;
-			const responseId = typeof response.id === "string" ? response.id : undefined;
-			if (responseId && this.pending.has(responseId)) {
-				const pending = this.pending.get(responseId)!;
-				this.pending.delete(responseId);
-				if (response.success) pending.resolve((response as RpcResponse & { data?: unknown }).data);
-				else pending.reject(new CommandRejectedError(response.error));
-			}
-			return;
-		}
-		this.options.onEvent(parsed);
-	}
-
-	private async writeLine(line: string): Promise<void> {
-		if (!this.process) throw new Error("RPC process is not running");
-		const stdin = (this.process as unknown as { stdin?: { getWriter?: () => WritableStreamDefaultWriter<Uint8Array>; write?: (value: string | Uint8Array) => unknown } }).stdin;
-		if (!stdin) throw new Error("RPC stdin unavailable");
-		const payload = encoder.encode(line);
-		if (typeof stdin.getWriter === "function") {
-			const writer = stdin.getWriter();
-			try {
-				await writer.write(payload);
-			} finally {
-				writer.releaseLock();
-			}
-			return;
-		}
-		if (typeof stdin.write === "function") {
-			await stdin.write(payload);
-			return;
-		}
-		throw new Error("Unsupported RPC stdin sink");
-	}
-
-	private failAllPending(error: Error): void {
-		for (const [id, pending] of this.pending.entries()) {
-			this.pending.delete(id);
-			try {
-				pending.reject(pending.command === "prompt"
-					? new CommandDeliveryUncertainError(error.message)
-					: error);
-			} catch {
-				// ignore
-			}
-		}
-	}
-
-	private async waitForPendingRequests(): Promise<void> {
-		const deadline = Date.now() + RPC_REQUEST_TIMEOUT_MS;
-		while (this.pending.size > 0) {
-			if (Date.now() >= deadline) {
-				const commands = [...this.pending.values()].map((pending) => pending.command).join(", ");
-				throw new Error(`Could not reload while RPC commands are still pending: ${commands}`);
-			}
-			await Bun.sleep(10);
-		}
-	}
-
-	async send<T = unknown>(
-		command: Record<string, unknown>,
-		timeoutMs: number | null = RPC_REQUEST_TIMEOUT_MS,
-		bypassReloadBarrier = false,
-	): Promise<T> {
-		if (!bypassReloadBarrier && this.reloadInFlight) await this.reloadInFlight;
-		if (this.stopped) throw new Error("RPC session stopped");
-		if (!this.process) await this.start();
-		const id = `${this.requestPrefix}-${randomUUID()}`;
-		const payload = { id, ...command };
-		const commandName = typeof command.type === "string" ? command.type : "unknown";
-		return await new Promise<T>((resolve, reject) => {
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-			const clearRequestTimeout = () => {
-				if (timeout) clearTimeout(timeout);
-			};
-			this.pending.set(id, {
-				resolve: (value) => {
-					clearRequestTimeout();
-					resolve(value as T);
-				},
-				reject: (error) => {
-					clearRequestTimeout();
-					reject(error);
-				},
-				command: commandName,
-			});
-			if (timeoutMs !== null) {
-				timeout = setTimeout(() => {
-					const pending = this.pending.get(id);
-					if (!pending) return;
-					this.pending.delete(id);
-					const message = `RPC command ${pending.command} timed out after ${timeoutMs}ms`;
-					pending.reject(pending.command === "prompt" ? new CommandDeliveryUncertainError(message) : new Error(message));
-				}, timeoutMs);
-			}
-			void this.writeLine(`${JSON.stringify(payload)}\n`).catch((error: unknown) => {
-				const pending = this.pending.get(id);
-				if (!pending) return;
-				this.pending.delete(id);
-				const cause = error instanceof Error ? error : new Error(String(error));
-				pending.reject(commandName === "prompt" ? new CommandDeliveryUncertainError(cause.message) : cause);
-			});
-		});
-	}
-
-	async getState(): Promise<unknown> {
-		return await this.send({ type: "get_state" });
-	}
-
-	async getAvailableModels(): Promise<{ models: Array<Record<string, unknown>> }> {
-		return await this.send({ type: "get_available_models" });
-	}
-
-	async getAvailableThinkingLevels(): Promise<{ levels: string[] }> {
-		return await this.send({ type: "get_available_thinking_levels" });
-	}
-
-	async getCommands(): Promise<{ commands: Array<Record<string, unknown>> }> {
-		return await this.send({ type: "get_commands" });
-	}
-
-	async setModel(provider: string, modelId: string): Promise<void> {
-		await this.send({ type: "set_model", provider, modelId });
-	}
-
-	async setThinkingLevel(level: string): Promise<void> {
-		await this.send({ type: "set_thinking_level", level });
-	}
-
-	async getEntries(since?: string): Promise<{ entries: unknown[]; leafId: string | null }> {
-		return await this.send({ type: "get_entries", since });
-	}
-
-	async getMessages(): Promise<{ messages: unknown[] }> {
-		return await this.send({ type: "get_messages" });
-	}
-
-	async getSessionStats(): Promise<Record<string, unknown>> {
-		return await this.send({ type: "get_session_stats" });
-	}
-
-	async getForkMessages(): Promise<{ messages: Array<{ entryId: string; text: string }> }> {
-		return await this.send({ type: "get_fork_messages" });
-	}
-
-	async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
-		return await this.send({ type: "fork", entryId });
-	}
-
-	async clone(): Promise<{ cancelled: boolean }> {
-		return await this.send({ type: "clone" });
-	}
-
-	async compact(customInstructions?: string): Promise<unknown> {
-		return await this.send({ type: "compact", customInstructions }, LONG_RUNNING_COMMAND_TIMEOUT_MS);
-	}
-
-	async setSessionName(name: string): Promise<void> {
-		await this.send({ type: "set_session_name", name });
-	}
-
-	async reload(): Promise<void> {
-		if (this.reloadInFlight) return await this.reloadInFlight;
-		const operation = (async () => {
-			// Resource reload invalidates the current extension runner. Quiesce ordinary
-			// RPC traffic first so model/command discovery cannot race that invalidation.
-			await this.waitForPendingRequests();
-			const commands = await this.send<{ commands: Array<Record<string, unknown>> }>({ type: "get_commands" }, RPC_REQUEST_TIMEOUT_MS, true);
-			const generation = commands.commands.find((command) => command.name === "web-reload")?.description;
-			if (typeof generation !== "string") throw new Error("The managed Pi runtime does not expose web reload support");
-			this.reloadError = undefined;
-			await this.send({ type: "prompt", message: "/web-reload" }, LONG_RUNNING_COMMAND_TIMEOUT_MS, true);
-			const deadline = Date.now() + LONG_RUNNING_COMMAND_TIMEOUT_MS;
-			while (Date.now() < deadline) {
-				if (this.reloadError) throw this.reloadError;
-				const nextCommands = await this.send<{ commands: Array<Record<string, unknown>> }>({ type: "get_commands" }, RPC_REQUEST_TIMEOUT_MS, true);
-				const next = nextCommands.commands.find((command) => command.name === "web-reload")?.description;
-				if (typeof next === "string" && next !== generation) return;
-				await Bun.sleep(25);
-			}
-			throw new Error("Pi reload timed out");
-		})();
-		this.reloadInFlight = operation;
-		try {
-			await operation;
-		} finally {
-			if (this.reloadInFlight === operation) this.reloadInFlight = undefined;
-		}
-	}
-
-	async prompt(
-		message: string,
-		streamingBehavior?: "steer" | "followUp",
-		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-	): Promise<void> {
-		await this.send({ type: "prompt", message, images, streamingBehavior });
-	}
-
-	async worktree(message: string): Promise<void> {
-		const before = await this.getState() as { sessionId?: unknown };
-		const previousId = typeof before.sessionId === "string" ? before.sessionId : undefined;
-		this.worktreeError = undefined;
-		// RPC acknowledges prompt preflight before an extension command's async
-		// handler finishes, so wait for its replacement ID or extension error.
-		await this.send({ type: "prompt", message }, LONG_RUNNING_COMMAND_TIMEOUT_MS);
-		const deadline = Date.now() + LONG_RUNNING_COMMAND_TIMEOUT_MS;
-		while (Date.now() < deadline) {
-			if (this.worktreeError) throw this.worktreeError;
-			const state = await this.getState() as { sessionId?: unknown };
-			if (typeof state.sessionId === "string" && state.sessionId !== previousId) {
-				const replacement = replacementFromEntries((await this.getEntries()).entries);
-				if (
-					replacement &&
-					replacement.previousSessionId === previousId &&
-					replacement.replacementSessionId === state.sessionId
-				) return;
-			}
-			await Bun.sleep(25);
-		}
-		throw new Error("Pi worktree switch timed out");
-	}
-
-	async abort(): Promise<void> {
-		await this.send({ type: "abort" });
-	}
-
-	async bash(command: string): Promise<unknown> {
-		return await this.send({ type: "bash", command }, LONG_RUNNING_COMMAND_TIMEOUT_MS);
-	}
-
-	async abortBash(): Promise<void> {
-		await this.send({ type: "abort_bash" });
-	}
-
-	async respondToExtensionUi(command: Extract<RpcSessionCommand, { type: "extension_ui_response" }>): Promise<void> {
-		if (this.stopped) throw new Error("RPC session stopped");
-		if (!this.process) await this.start();
-		await this.writeLine(`${JSON.stringify(command)}\n`);
-	}
-
-	async switchSession(sessionPath: string): Promise<void> {
-		await this.send({ type: "switch_session", sessionPath });
-	}
-
-	async shutdown(): Promise<void> {
-		if (!this.process || this.stopped) return;
-		try {
-			await this.send({ type: "abort" }, RPC_REQUEST_TIMEOUT_MS, true);
-		} catch {
-			// ignore
-		}
-		this.stopped = true;
-		try {
-			(this.process as unknown as { kill?: (signal?: string) => void }).kill?.("SIGTERM");
-		} catch {
-			// ignore
-		}
-	}
-}
-
-function parseDiscoveredSlashCommands(values: Array<Record<string, unknown>>): DiscoveredSlashCommand[] {
-	return values.flatMap((value) => {
-		if (typeof value.name !== "string" || (value.source !== "extension" && value.source !== "prompt" && value.source !== "skill")) return [];
-		const sourceInfo = isRecord(value.sourceInfo) ? value.sourceInfo : undefined;
-		if (!sourceInfo || typeof sourceInfo.path !== "string") return [];
-		return [{
-			name: value.name,
-			description: typeof value.description === "string" ? value.description : undefined,
-			source: value.source,
-			sourceInfo: {
-				path: sourceInfo.path,
-				baseDir: typeof sourceInfo.baseDir === "string" ? sourceInfo.baseDir : undefined,
-				scope: sourceInfo.scope === "user" || sourceInfo.scope === "project" || sourceInfo.scope === "temporary" ? sourceInfo.scope : undefined,
-			},
-		}];
-	});
-}
-
-async function discoverSlashCommands(cwd: string): Promise<DiscoveredSlashCommand[]> {
-	const key = normalizePath(cwd);
-	const cached = slashCommandCache.get(key);
-	if (cached && Date.now() - cached.loadedAt < 30_000) return cached.commands;
-	const runtime = new ManagedRpcSession({
-		cwd,
-		noSession: true,
-		onEvent: () => undefined,
-		onExit: () => undefined,
-	});
-	try {
-		await runtime.start();
-		const { commands } = await runtime.getCommands();
-		const parsed = parseDiscoveredSlashCommands(commands);
-		slashCommandCache.set(key, { loadedAt: Date.now(), commands: parsed });
-		return parsed;
-	} finally {
-		await runtime.shutdown();
-	}
-}
-
-function webSlashCommands(commands: readonly DiscoveredSlashCommand[], includeExtensions = false): Array<Record<string, unknown>> {
-	const visible = commands
-		.filter((command) => command.name !== "web-reload" && (includeExtensions || command.source === "prompt" || command.source === "skill" || command.name === "worktree"))
-		.map((command) => ({
-			name: command.name,
-			description: command.description,
-			source: command.source,
-			location: command.sourceInfo.scope,
-		}));
-	if (!visible.some((command) => command.name === "reload")) {
-		visible.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
-	}
-	return visible;
+	if (record.gitMetadataGeneration !== generation || record.cwd !== cwd || sessions.get(record.id) !== record) return;
+	if (branch) record.branch = branch;
+	// A failed/no-match `gh pr view` is authoritative for the current branch and
+	// must clear a PR cached before the TUI changed branches.
+	record.pullRequest = pullRequest;
+	broadcastSessionToAll(record);
 }
 
 async function runRpcSessionCommand(record: SessionRecord, command: RpcSessionCommand): Promise<unknown> {
@@ -1359,9 +529,9 @@ async function runRpcSessionCommand(record: SessionRecord, command: RpcSessionCo
 		}
 	}
 	if (record.file && isWithinDir(record.file, sessionsDir)) {
-		const scan = parseSessionFile(record.file);
+		const scan = parseSessionMetadataFile(record.file);
 		if (scan) {
-			const temp = new ManagedRpcSession({
+			const temp = createRpcSession({
 				cwd: scan.session.cwd,
 				name: scan.session.name,
 				sessionFile: record.file,
@@ -1399,7 +569,7 @@ async function runRpcSessionCommand(record: SessionRecord, command: RpcSessionCo
 		}
 	}
 	if (command.type === "get_fork_messages") {
-		return { messages: deriveForkMessages(sessionHistoryForRecord(record)) };
+		return { messages: deriveForkMessages(record.history) };
 	}
 	throw new Error(`Session ${record.id} is not managed`);
 }
@@ -1418,303 +588,26 @@ function sendSessionHistory(socket: Bun.ServerWebSocket<ClientSocketData>, recor
 	const payload: ServerHistoryMessage = {
 		type: "server.history",
 		sessionId: record.id,
-		entries: entries.slice(-600),
+		entries: boundedWebHistory(entries),
+		replace: true,
 	};
 	socket.send(JSON.stringify(payload));
 }
 
-function webQueueEvent(record: SessionRecord): ServerEventMessage {
-	return { type: "server.event", sessionId: record.id, event: { type: "web_queue_update", queue: record.queue } };
-}
-
-function cloneWebQueue(queue: WebQueuedMessage[]): WebQueuedMessage[] {
-	return queue.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) }));
-}
-
-function setWebQueueState(record: SessionRecord, queue: WebQueuedMessage[]): void {
-	record.queue = queue;
-}
-
-function persistWebQueue(record: SessionRecord): Promise<void> {
-	const sessionId = record.id;
-	const queue = cloneWebQueue(record.queue);
-	return queueStoreWriter.mutate(persistedQueues, (queues) => {
-		if (queue.length > 0) queues.set(sessionId, queue);
-		else queues.delete(sessionId);
-	});
-}
-
-async function enqueueWebFollowUp(record: SessionRecord, item: WebQueuedMessage): Promise<void> {
-	await serializeQueueMutation(record, async () => {
-		await transactionalQueueMutation({
-			get: () => record.queue,
-			set: (queue) => setWebQueueState(record, queue),
-			clone: cloneWebQueue,
-			mutate: (queue) => { queue.push(item); },
-			persist: () => persistWebQueue(record),
-		});
-		broadcast(record.id, webQueueEvent(record));
-		if (record.status === "idle" && record.agentRunning !== true) scheduleQueueSettleFallback(record);
-	});
-}
-
-async function migratePersistedQueue(record: SessionRecord, oldId: string, newId: string): Promise<void> {
-	await quiesceQueueMutations(record);
-	if (record.queueDirtyWorker) {
-		await record.queueDirtyWorker.cancelAndDrain();
-		record.queueDirtyWorker = undefined;
-	}
-	const queue = cloneWebQueue(record.queue);
-	await queueStoreWriter.mutate(persistedQueues, (queues) => {
-		queues.delete(oldId);
-		if (queue.length > 0) queues.set(newId, queue);
-		else queues.delete(newId);
-	});
-}
-
-function scheduleWebQueueRetry(record: SessionRecord): void {
-	if (record.queueRetryTimer || record.queue.length === 0) return;
-	// Re-enter through the normal serialized flush only after intake has reopened.
-	record.queueRetryTimer = setTimeout(() => {
-		record.queueRetryTimer = undefined;
-		if (sessions.get(record.id) === record) void flushWebQueue(record);
-	}, 0);
-	record.queueRetryTimer.unref?.();
-}
-
-function markWebQueueSnapshotDirty(record: SessionRecord): void {
-	record.queueDirtyWorker ??= new DirtySnapshotRetryWorker({
-		persist: () => persistWebQueue(record),
-		onError: (error) => console.error(`Could not persist queue snapshot for ${record.id}:`, error),
-	});
-	record.queueDirtyWorker.markDirty();
-}
-
-function cancelQueueSettleFallback(record: SessionRecord): void {
-	if (record.queueSettleFallbackTimer) clearTimeout(record.queueSettleFallbackTimer);
-	record.queueSettleFallbackTimer = undefined;
-}
-
-function scheduleQueueSettleFallback(record: SessionRecord): void {
-	if (record.queueSettleFallbackTimer || record.queue.length === 0) return;
-	// Older native bridges did not forward agent_settled. Give Pi's extension
-	// hooks time to finish, then advance the queue when no newer run has started.
-	record.queueSettleFallbackTimer = setTimeout(() => {
-		record.queueSettleFallbackTimer = undefined;
-		if (sessions.get(record.id) !== record || record.agentRunning !== false) return;
-		void flushWebQueue(record);
-	}, 100);
-	record.queueSettleFallbackTimer.unref?.();
-}
-
-function cancelWebQueueWork(record: SessionRecord): void {
-	if (record.queueRetryTimer) clearTimeout(record.queueRetryTimer);
-	record.queueRetryTimer = undefined;
-	cancelQueueSettleFallback(record);
-	record.queueDirtyWorker?.cancel();
-	record.queueDirtyWorker = undefined;
-}
-
-async function broadcastWebQueue(record: SessionRecord): Promise<void> {
-	await persistWebQueue(record);
-	broadcast(record.id, webQueueEvent(record));
-}
-
-function broadcastQueueDelivery(record: SessionRecord, item: WebQueuedMessage, phase: "started" | "failed" | "uncertain", error?: string): void {
-	broadcast(record.id, {
-		type: "server.event",
-		sessionId: record.id,
-		event: { type: "web_queue_delivery", phase, item, error },
-	} satisfies ServerEventMessage);
-}
-
-function broadcastReloadComplete(record: SessionRecord): void {
-	broadcast(record.id, {
-		type: "server.event",
-		sessionId: record.id,
-		event: {
-			type: "message_end",
-			message: {
-				role: "assistant",
-				timestamp: Date.now(),
-				content: [{ type: "text", text: "Reload complete." }],
-			},
-		},
-	} satisfies ServerEventMessage);
-}
-
-function sendSessionState(socket: Bun.ServerWebSocket<ClientSocketData>, record: SessionRecord): void {
-	// A newly subscribed client receives one bounded full transcript snapshot;
-	// subsequent subagent updates arrive as deltas.
-	const payload: ServerSessionMessage = { type: "server.session", session: sessionToClientPayload(record, true) };
-	socket.send(JSON.stringify(payload));
-	socket.send(JSON.stringify(webQueueEvent(record)));
-	const uncertain = record.queue.find((item) => item.deliveryState === "delivering");
-	if (uncertain) socket.send(JSON.stringify({ type: "server.event", sessionId: record.id, event: { type: "web_queue_delivery", phase: "uncertain", item: uncertain, error: "Delivery may already have been accepted; explicitly discard or confirm resubmission." } } satisfies ServerEventMessage));
-}
-
-async function flushWebQueue(record: SessionRecord): Promise<void> {
-	if (shutdownStarted) return;
-	return serializeQueueMutation(record, () => flushWebQueueLocked(record));
-}
-
-async function flushWebQueueLocked(record: SessionRecord): Promise<void> {
-	if (record.queue.length === 0 || record.queueDeliveryActive || record.status !== "idle" || hasActiveWebSubagents(record.subagents)) return;
-	let item = record.queue[0];
-	if (!item || item.deliveryState === "delivering") return;
-	// Persist the in-flight state before handing the prompt to Pi. A transient
-	// storage failure is published and retried with a bounded policy; Pi is not
-	// called until this transition is durable.
-	const transitioned = await persistPreDeliveryTransition({
-		persist: () => transactionalQueueMutation({
-			get: () => record.queue, set: (queue) => setWebQueueState(record, queue), clone: cloneWebQueue,
-			mutate: (queue) => { queue[0]!.deliveryState = "delivering"; },
-			persist: () => persistWebQueue(record),
-		}),
-		previousAttempts: record.queueTransitionAttempts?.itemId === item.id ? record.queueTransitionAttempts.count : 0,
-		publishError: (error, attempts, exhausted) => {
-			record.queueTransitionAttempts = { itemId: item!.id, count: attempts };
-			const message = error instanceof Error ? error.message : String(error);
-			if (exhausted) {
-				// Keep the cap terminal across every later flush trigger. This server-owned
-				// uncertain state blocks delivery until explicit discard/resubmit, while the
-				// coalesced worker keeps trying to make that disposition durable.
-				// transactionalQueueMutation replaces the live queue when it rolls back;
-				// mark that restored head, not the stale object captured before the write.
-				const liveItem = record.queue.find((queued) => queued.id === item!.id);
-				if (!liveItem) return;
-				liveItem.deliveryState = "delivering";
-				setWebQueueState(record, record.queue);
-				item = liveItem;
-				broadcastQueueDelivery(record, liveItem, "uncertain", `Could not persist delivery transition after ${attempts} attempts: ${message}; explicitly discard or confirm resubmission.`);
-				broadcast(record.id, webQueueEvent(record));
-				markWebQueueSnapshotDirty(record);
-			} else {
-				broadcastQueueDelivery(record, item!, "failed", `Could not persist delivery transition: ${message} (attempt ${attempts}; retrying)`);
-			}
-		},
-		scheduleRetry: (delayMs) => {
-			if (record.queueRetryTimer) return;
-			record.queueRetryTimer = setTimeout(() => {
-				record.queueRetryTimer = undefined;
-				if (sessions.get(record.id) === record && record.queue[0]?.id === item!.id) void flushWebQueue(record);
-			}, delayMs);
-			record.queueRetryTimer.unref?.();
-		},
-	});
-	if (!transitioned) return;
-	record.queueTransitionAttempts = undefined;
-	item = record.queue[0]!;
-	record.queueDeliveryActive = item.id;
-	let retryDelayMs: number | undefined;
-	let persistenceError: unknown;
-	let accepted = false;
-	// Promote the follow-up into the transcript before asking Pi to start the
-	// turn. The browser renders this as an optimistic user message and later
-	// reconciles it with Pi's authoritative message_end event.
-	broadcastQueueDelivery(record, item, "started");
-	try {
-		if (isWebReloadCommand(item.message)) {
-			if (item.images?.length) throw new Error("/reload does not accept image attachments");
-			// Queued control commands execute through their dedicated route only after
-			// the current run reaches idle; never turn /reload into an ordinary prompt.
-			await routeCommand(record, { type: "reload" });
-			broadcastReloadComplete(record);
-		} else {
-			await routeCommand(record, {
-				type: "prompt",
-				message: item.message,
-				images: item.images,
-				// If an older bridge reports agent_end before Pi fully settles, keep this
-				// as a safe Pi follow-up rather than accidentally steering the completed run.
-				streamingBehavior: "followUp",
-			});
-		}
-		accepted = true;
-	} catch (error) {
-		if (error instanceof CommandDeliveryUncertainError) {
-			const message = error.message;
-			broadcastQueueDelivery(record, item, "uncertain", `${message}; delivery may already have been accepted, so explicitly discard or confirm resubmission.`);
-			broadcast(record.id, webQueueEvent(record));
-			return;
-		}
-		// A normal rejection proves Pi did not accept the command, so this item may
-		// return to the retryable queued state. Process death between send/response
-		// is represented by the durable delivering state across daemon restart.
-		const uncertainSnapshot = cloneWebQueue(record.queue);
-		delete item.deliveryState;
-		const message = error instanceof Error ? error.message : String(error);
-		const previousAttempts = record.queueDeliveryAttempts?.itemId === item.id
-			? record.queueDeliveryAttempts.count
-			: 0;
-		const disposition = queueDeliveryFailureDisposition(previousAttempts);
-		const attempts = disposition.attempts;
-		record.queueDeliveryAttempts = { itemId: item.id, count: attempts };
-		const exhausted = disposition.discard;
-		broadcastQueueDelivery(
-			record,
-			item,
-			"failed",
-			exhausted ? `${message} (discarded after ${attempts} attempts)` : `${message} (attempt ${attempts}; retrying)`,
-		);
-		if (exhausted) {
-			// Do not retain a poisoned queue head that can be submitted much later by
-			// an unrelated settled/reconnect event. The failed delivery event is the
-			// explicit disposition presented to subscribed clients.
-			record.queue = record.queue.filter((queued) => queued.id !== item.id);
-			record.queueDeliveryAttempts = undefined;
-		} else if (!record.queueRetryTimer) {
-			retryDelayMs = disposition.retryDelayMs!;
-		}
-		try {
-			await broadcastWebQueue(record);
-		} catch (error) {
-			// The failed discard/retry-state write has unknown durability. Restore the
-			// pre-mutation delivering snapshot so neither memory nor a later write can
-			// silently authorize redelivery.
-			setWebQueueState(record, uncertainSnapshot);
-			persistenceError = error;
-		}
-		console.error(`Could not deliver queued message for ${record.id}:`, error);
-	} finally {
-		record.queueDeliveryActive = undefined;
-	}
-	if (persistenceError) {
-		// Durable state may still say "delivering". Surface that uncertainty rather
-		// than silently losing cleanup or retrying a prompt after a storage failure.
-		const message = persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
-		const uncertain = record.queue.find((queued) => queued.id === item.id);
-		if (uncertain) {
-			uncertain.deliveryState = "delivering";
-			broadcastQueueDelivery(record, uncertain, "uncertain", `Could not persist delivery failure: ${message}; explicitly discard or confirm resubmission.`);
-			broadcast(record.id, webQueueEvent(record));
-		}
-		return;
-	}
-	if (accepted) {
-		// routeCommand accepted the prompt. From this point onward it must never be
-		// retried, even when durable removal fails: retry only the persistence write.
-		record.queue = record.queue.filter((queued) => queued.id !== item.id);
-		record.queueDeliveryAttempts = undefined;
-		broadcast(record.id, webQueueEvent(record));
-		// One cancellable worker coalesces accepted removals and every later queue
-		// mutation into current snapshots; accepted prompts are never redelivered.
-		markWebQueueSnapshotDirty(record);
-		return;
-	}
-	// Arm the retry only after durable persistence and active-delivery cleanup.
-	// Otherwise a slow write can let the timer fire against the active guard and
-	// consume the sole retry without another trigger.
-	if (retryDelayMs !== undefined && !record.queueRetryTimer) {
-		record.queueRetryTimer = setTimeout(() => {
-			record.queueRetryTimer = undefined;
-			if (sessions.get(record.id) === record && record.queue[0]?.id === item.id) {
-				void flushWebQueue(record);
-			}
-		}, retryDelayMs);
-		record.queueRetryTimer.unref?.();
-	}
-}
+const {
+	webQueueEvent, cloneWebQueue, persistWebQueue, enqueueWebFollowUp, migratePersistedQueue,
+	scheduleWebQueueRetry, markWebQueueSnapshotDirty, markAgentActivity, markAgentSettling,
+	isCurrentAgentSettlement, cancelQueueSettleFallback, scheduleQueueSettleFallback, cancelWebQueueWork,
+	broadcastQueueDelivery, broadcastReloadComplete, sendSessionState, flushWebQueue, routeQueueCommand,
+} = createSessionQueueCoordinator({
+	persistedQueues,
+	queueStoreWriter,
+	currentRecord: (id) => sessions.get(id),
+	isShutdownStarted: () => shutdownStarted,
+	broadcast,
+	deliverCommand: (record, command) => routeCommand(record, command),
+	projectSession: sessionToClientPayload,
+});
 
 function sendSessionRemoved(
 	sessionId: string,
@@ -1724,12 +617,9 @@ function sendSessionRemoved(
 	const payload: ServerSessionRemovedMessage = { type: "server.session_removed", sessionId, replacementSessionId };
 	const message = JSON.stringify(payload);
 	const notified = new Set<Bun.ServerWebSocket<ClientSocketData>>();
-	for (const record of sessions.values()) {
-		for (const socket of record.clientSockets) {
-			if (notified.has(socket)) continue;
-			notified.add(socket);
-			try { socket.send(message); } catch { /* ignore */ }
-		}
+	for (const socket of connectedClientSockets) {
+		notified.add(socket);
+		try { socket.send(message); } catch { /* ignore */ }
 	}
 	for (const socket of additionalSockets) {
 		if (notified.has(socket)) continue;
@@ -1745,9 +635,9 @@ async function completeExternalSessionReplacement(
 	if (replacement.previousSessionId === replacement.replacementSessionId) throw new Error("Replacement session must differ from its source");
 	const next = sessions.get(replacement.replacementSessionId);
 	if (!next || !next.agentSockets.has(socket)) throw new Error("Replacement session is not bound to this agent socket");
-	const durableReplacement = replacementFromEntries(
-		next.file ? parseSessionFile(next.file)?.entries ?? [] : next.history,
-	);
+	const durableReplacement = next.file
+		? parseSessionMetadataFile(next.file)?.replacement
+		: replacementFromEntries(next.history);
 	if (
 		!durableReplacement ||
 		durableReplacement.previousSessionId !== replacement.previousSessionId ||
@@ -1900,7 +790,7 @@ async function refreshManagedSession(
 				const pendingDeletion = record.pendingWorktreeSourceDeletion;
 				let verifiedPendingDeletion = false;
 				if (pendingDeletion && pendingDeletion.sessionId === oldId && oldFile && newFile && newId !== oldId && sessionFileKey(pendingDeletion.sessionFile) === sessionFileKey(oldFile)) {
-					const marker = replacementFromEntries((await managed.getEntries()).entries);
+					const marker = parseSessionMetadataFile(newFile)?.replacement;
 					verifiedPendingDeletion = Boolean(
 						marker &&
 						marker.previousSessionId === oldId &&
@@ -1975,11 +865,9 @@ async function refreshManagedSession(
 
 			updateRecordFromState(record, nextState);
 			try {
-				record.history = (await managed.getEntries()).entries;
-				record.managedWorktree = managedWorktreeFromEntries(record.history);
-				record.usage = usageFromEntries(record.history);
+				replaceRecordHistory(record, messagesToWebHistory((await managed.getMessages()).messages));
 			} catch {
-				// Keep the last complete history snapshot.
+				// Keep the last complete bounded history snapshot.
 			}
 			try {
 				updateRecordFromStats(record, await managed.getSessionStats());
@@ -2002,11 +890,7 @@ async function refreshManagedSession(
 				record.pendingWorktreeSourceDeletion = undefined;
 			}
 			identityTransition = undefined;
-			const message = JSON.stringify({
-				type: "server.session",
-				session: sessionToClientPayload(record),
-			} satisfies ServerSessionMessage);
-			for (const socket of record.clientSockets) socket.send(message);
+			broadcastSessionToAll(record);
 		} catch (error) {
 			finishQueueMigration?.();
 			if (identityTransition) {
@@ -2100,32 +984,8 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
 	}
 }
 
-function refreshTerminalMetadata(record: SessionRecord): void {
-	let scan = record.file ? parseSessionFile(record.file) : undefined;
-	if (!scan) {
-		scan = scanSavedSessions(sessionsDir)
-			.filter((candidate) => candidate.session.cwd === record.cwd && candidate.session.updatedAt >= record.createdAt - 2_000)
-			.sort((a, b) => b.session.updatedAt - a.session.updatedAt)[0];
-	}
-	if (!scan) return;
-	const oldFile = record.file;
-	record.file = scan.file;
-	record.name = scan.session.name ?? record.name;
-	record.model = scan.session.model ?? record.model;
-	record.thinkingLevel = scan.session.thinkingLevel ?? record.thinkingLevel;
-	record.messageCount = scan.session.messageCount;
-	record.preview = scan.session.preview;
-	record.parentSession = scan.session.parentSession;
-	record.usage = scan.session.usage ?? record.usage;
-	record.contextUsage = scan.session.contextUsage ?? record.contextUsage;
-	// Metadata polling deliberately does not load transcript history. History is
-	// parsed only when a client subscribes or an operation explicitly needs it.
-	if (oldFile && oldFile !== record.file) sessionsByFile.delete(normalizePath(oldFile));
-	sessionsByFile.set(normalizePath(scan.file), record);
-}
-
 async function createManagedSessionUnlocked(cwd: string, name?: string, sessionFile?: string): Promise<SessionRecord> {
-	const resumed = sessionFile ? parseSessionFile(sessionFile) : undefined;
+	const resumed = sessionFile ? parseSessionMetadataFile(sessionFile) : undefined;
 	const existingRecord = resumed
 		? sessions.get(resumed.session.id) ?? sessionsByFile.get(normalizePath(resumed.file))
 		: undefined;
@@ -2163,7 +1023,8 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		usage: resumed?.session.usage,
 		contextUsage: resumed?.session.contextUsage,
 		kind: "managed",
-		history: resumed?.history ?? [],
+		history: existingRecord?.history ?? resumed?.history ?? [],
+		historyReady: existingRecord?.historyReady ?? false,
 		active: true,
 		agentSockets: new Set(),
 		clientSockets: existingRecord?.clientSockets ?? new Set(),
@@ -2173,13 +1034,13 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 		// A newly started RPC runtime has no surviving subagents. An explicit empty
 		// snapshot clears stale browser telemetry retained across daemon reconnects.
 		subagents: [],
-		managedWorktree: managedWorktreeFromEntries(resumed?.entries ?? []),
+		managedWorktree: resumed?.session.managedWorktree,
+		catalogReady: false,
 	};
 	sessions.set(record.id, record);
 	if (record.file) sessionsByFile.set(normalizePath(record.file), record);
-	void hydrateGitMetadata(record);
 
-	const managed = new ManagedRpcSession({
+	const managed = createRpcSession({
 		cwd,
 		name,
 		sessionFile,
@@ -2188,6 +1049,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			updateSubagentsFromToolEvent(record, event);
 			if (event.type === "agent_start" || event.type === "turn_start") {
 				record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
+				markAgentActivity(record);
 			}
 			if (event.type === "agent_start" || event.type === "turn_start") {
 				cancelQueueSettleFallback(record);
@@ -2195,11 +1057,13 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 				record.agentRunning = true;
 			}
 			if (event.type === "agent_end" && !record.compaction) {
-				record.status = "idle";
+				markAgentSettling(record);
+				record.status = agentEndTerminalNotice(event)?.kind === "error" ? "error" : "idle";
 				record.agentRunning = false;
 				scheduleQueueSettleFallback(record);
 			}
 			if (event.type === "compaction_start") {
+				markAgentSettling(record);
 				record.status = "working";
 				record.agentRunning = true;
 				record.compaction = {
@@ -2215,16 +1079,16 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					scheduleQueueSettleFallback(record);
 				}
 			}
-			if (event.type === "agent_settled") {
+			if (event.type === "agent_settled" && isCurrentAgentSettlement(record)) {
 				cancelQueueSettleFallback(record);
-				// A prompt may have been accepted during an agent_end compatibility
-				// fallback. In that case this settlement belongs to the previous run.
-				if (record.agentRunning !== true) {
-					record.status = "idle";
-					record.agentRunning = false;
-					void refreshManagedSession(record, true);
-					void flushWebQueue(record);
-				}
+				record.settlingGeneration = undefined;
+				// Pi emits agent_settled only when no retry, compaction, or internal
+				// follow-up remains. It is authoritative even when an interrupted
+				// overflow compaction last advertised willRetry=true.
+				if (record.status !== "error") record.status = "idle";
+				record.agentRunning = false;
+				void refreshManagedSession(record, true);
+				void flushWebQueue(record);
 			}
 
 			if (event.type === "message_end" && isRecord(event.message)) {
@@ -2232,7 +1096,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					record.usage ??= zeroWebUsage();
 					addWebUsage(record.usage, event.message.usage);
 				}
-				record.history.push({
+				appendRecordHistory(record, {
 					type: "message",
 					id: randomUUID(),
 					parentId: null,
@@ -2240,19 +1104,44 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					message: event.message,
 				});
 				record.messageCount += 1;
+				const terminalNotice = assistantTerminalNotice(event.message);
+				if (terminalNotice && !extractTextContent(event.message.content)) {
+					record.preview = `${terminalNotice.title}: ${terminalNotice.detail}`.slice(0, 180);
+				}
+			}
+			const compactionEntry = compactionEntryFromEvent(event);
+			if (compactionEntry) {
+				replaceRecordHistory(record, [compactionEntry]);
+				broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
+				const runtime = record.managed;
+				if (runtime) {
+					void runtime.getMessages().then(({ messages }) => {
+						if (record.managed !== runtime || sessions.get(record.id) !== record) return;
+						replaceRecordHistory(record, messagesToWebHistory(messages));
+						broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
+					}).catch((error) => console.error(`Could not refresh compacted history for ${record.id}: ${error instanceof Error ? error.message : String(error)}`));
+				}
 			}
 			broadcast(record.id, {
 				type: "server.event",
 				sessionId: record.id,
 				event,
 			} satisfies ServerEventMessage);
-			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			const catalogChanged = event.type === "agent_start"
+				|| event.type === "turn_start"
+				|| event.type === "agent_end"
+				|| event.type === "agent_settled"
+				|| event.type === "compaction_start"
+				|| event.type === "compaction_end"
+				|| event.type === "message_end";
+			if (catalogChanged) broadcastSessionToAll(record);
+			else broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 		},
 		onExit: () => {
 			record.status = "offline";
 			record.active = false;
 			record.managed = undefined;
-			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			broadcastSessionToAll(record);
 		},
 	});
 	record.managed = managed;
@@ -2267,11 +1156,11 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			sessions.set(record.id, record);
 		}
 		try {
-			record.history = (await managed.getEntries()).entries;
-			record.managedWorktree = managedWorktreeFromEntries(record.history);
-			record.usage = usageFromEntries(record.history);
+			replaceRecordHistory(record, messagesToWebHistory((await managed.getMessages()).messages));
 		} catch {
-			// Keep the parsed resume history until the RPC runtime reports entries.
+			// A failed context request must not publish a blank active resume. Read only
+			// a bounded suffix instead of hydrating the append-only session archive.
+			if (!record.historyReady && record.file) replaceRecordHistory(record, parseSessionHistoryFile(record.file));
 		}
 		try {
 			updateRecordFromStats(record, await managed.getSessionStats());
@@ -2279,6 +1168,9 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			// Keep history-derived usage when stats are unavailable.
 		}
 		record.status = "idle";
+		record.catalogReady = true;
+		broadcastSessionToAll(record);
+		void hydrateGitMetadata(record);
 		for (const socket of record.clientSockets) {
 			socket.data.sessionId = record.id;
 			sendSessionState(socket, record);
@@ -2297,6 +1189,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			sessions.set(existingRecord.id, existingRecord);
 			if (existingRecord.file) sessionsByFile.set(normalizePath(existingRecord.file), existingRecord);
 			restoreExistingQueueIntake?.();
+			broadcastSessionToAll(existingRecord);
 		}
 		throw error;
 	}
@@ -2331,7 +1224,7 @@ async function restoreManagedSessions(): Promise<void> {
 		const existing = sessionsByFile.get(normalizePath(file));
 		if (existing?.active && existing.status !== "offline") continue;
 		if (!isManagedSessionFile(file)) continue;
-		const scan = parseSessionFile(file);
+		const scan = parseSessionMetadataFile(file);
 		if (!scan) {
 			try { deleteManagedSessionFile(file); } catch (error) {
 				console.error(`Could not remove invalid managed session ${file}:`, error);
@@ -2366,11 +1259,14 @@ function parseSocketMessage<T>(data: string | Uint8Array): T | undefined {
 async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>, message: ClientToServerMessage): Promise<void> {
 	if (message.type === "client.hello" || message.type === "client.command_hello") {
 		socket.data.authed = true;
-		if (message.type === "client.hello") sendSessionSnapshot(socket);
+		if (message.type === "client.hello") {
+			connectedClientSockets.add(socket);
+			sendSessionSnapshot(socket);
+		}
 		return;
 	}
 	if (!socket.data.authed) throw new Error("Client must send a hello message first");
-	if (shutdownStarted && (message.type === "client.prompt" || message.type === "client.command")) {
+	if (shutdownStarted && shouldRejectDuringShutdown(message)) {
 		throw new Error("Pi Web is waiting for active sessions to finish before restarting");
 	}
 	if (message.type === "client.subscribe") {
@@ -2403,6 +1299,7 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 			if (!record) throw new Error(`Unknown session: ${message.sessionId}`);
 			const normalizedPrompt = message.message.trim();
 			const reload = isWebReloadCommand(normalizedPrompt);
+			const compact = parseWebCompactCommand(normalizedPrompt);
 			const worktree = parseWorktreeInvocation(message.message);
 			let responseData: unknown;
 			if (reload) {
@@ -2413,6 +1310,14 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 					if (message.streamingBehavior === "steer") throw new Error("/reload must be queued or run while Pi is idle");
 					responseData = await routeCommand(record, { type: "reload" });
 					broadcastReloadComplete(record);
+				}
+			} else if (compact) {
+				if (message.images?.length) throw new Error("/compact does not accept image attachments");
+				if (message.streamingBehavior === "followUp" && (record.status === "working" || hasActiveWebSubagents(record.subagents))) {
+					await enqueueWebFollowUp(record, { id: message.requestId, message: message.message });
+				} else {
+					if (message.streamingBehavior === "steer") throw new Error("/compact must be queued or run while Pi is idle");
+					responseData = await routeCommand(record, { type: "compact", customInstructions: compact.customInstructions });
 				}
 			} else if (worktree) {
 				if (message.images?.length) throw new Error("/worktree does not accept image attachments");
@@ -2464,7 +1369,7 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 		try {
 			const previousSessionId = record.id;
 			const data = await routeCommand(record, message.command);
-			await refreshManagedSession(record);
+			if (message.command.type !== "abort") await refreshManagedSession(record);
 			const responseData = record.id !== previousSessionId && (message.command.type === "clone" || message.command.type === "fork" || message.command.type === "create_worktree" || message.command.type === "create_worktree_v2")
 				? { ...(isRecord(data) ? data : {}), cancelled: isRecord(data) && data.cancelled === true, sessionId: record.id }
 				: data;
@@ -2493,8 +1398,10 @@ async function routeCommand(record: SessionRecord, command: ClientCommandMessage
 	const shouldMarkWorking = record.status !== "working" || record.agentRunning !== true;
 	const previousStatus = record.status;
 	const previousAgentRunning = record.agentRunning;
+	const previousActivityGeneration = record.activityGeneration;
 	const agentStartGeneration = record.agentStartGeneration ?? 0;
 	if (shouldMarkWorking) {
+		markAgentActivity(record);
 		cancelQueueSettleFallback(record);
 		record.status = "working";
 		record.agentRunning = true;
@@ -2507,6 +1414,7 @@ async function routeCommand(record: SessionRecord, command: ClientCommandMessage
 		if (shouldMarkWorking && (record.agentStartGeneration ?? 0) === agentStartGeneration) {
 			record.status = previousStatus;
 			record.agentRunning = previousAgentRunning;
+			record.activityGeneration = previousActivityGeneration;
 			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 			if (record.status === "idle" && record.agentRunning !== true && record.queue.length > 0) {
 				scheduleQueueSettleFallback(record);
@@ -2531,144 +1439,17 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 			if (value.startPoint !== undefined && (typeof value.startPoint !== "string" || !value.startPoint.trim())) throw new Error("create_worktree startPoint must be a non-empty string");
 		}
 	}
-	if (command.type === "steer_queue_item") {
-		return serializeQueueMutation(record, async () => {
-			if (record.queueDeliveryActive) throw new Error("Another queued message is already being delivered");
-			const queued = record.queue.find((item) => item.id === command.itemId);
-			if (!queued) throw new Error(`Unknown queue item ${command.itemId}`);
-			if (queued.deliveryState === "delivering") throw new Error(`Queue item ${command.itemId} has uncertain delivery`);
-
-			// Make the in-flight disposition durable before handing the item to Pi. If
-			// the daemon exits after acceptance but before cleanup, restart recovery
-			// leaves the item uncertain rather than silently sending it twice.
-			await transactionalQueueMutation({
-				get: () => record.queue,
-				set: (queue) => setWebQueueState(record, queue),
-				clone: cloneWebQueue,
-				mutate: (queue) => {
-					const item = queue.find((candidate) => candidate.id === command.itemId);
-					if (!item) throw new Error(`Unknown queue item ${command.itemId}`);
-					item.deliveryState = "delivering";
-				},
-				persist: () => persistWebQueue(record),
-			});
-			const item = record.queue.find((candidate) => candidate.id === command.itemId)!;
-			record.queueDeliveryActive = item.id;
-			broadcast(record.id, webQueueEvent(record));
-			broadcastQueueDelivery(record, item, "started");
-			try {
-				await routeCommand(record, {
-					type: "prompt",
-					message: item.message,
-					images: item.images,
-					// If the previous run settled during the durable transition, start the
-					// queued prompt immediately instead of steering a run that no longer exists.
-					streamingBehavior: record.status === "working" ? "steer" : undefined,
-				});
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				if (error instanceof CommandDeliveryUncertainError) {
-					broadcastQueueDelivery(record, item, "uncertain", `${message}; delivery may already have been accepted, so explicitly discard or confirm resubmission.`);
-					broadcast(record.id, webQueueEvent(record));
-					throw error;
-				}
-				broadcastQueueDelivery(record, item, "failed", message);
-				try {
-					await transactionalQueueMutation({
-						get: () => record.queue,
-						set: (queue) => setWebQueueState(record, queue),
-						clone: cloneWebQueue,
-						mutate: (queue) => {
-							const retryable = queue.find((candidate) => candidate.id === item.id);
-							if (retryable) delete retryable.deliveryState;
-						},
-						persist: () => persistWebQueue(record),
-					});
-					broadcast(record.id, webQueueEvent(record));
-				} catch (persistenceError) {
-					const persistenceMessage = persistenceError instanceof Error ? persistenceError.message : String(persistenceError);
-					const uncertain = record.queue.find((candidate) => candidate.id === item.id);
-					if (uncertain) {
-						uncertain.deliveryState = "delivering";
-						broadcastQueueDelivery(record, uncertain, "uncertain", `Could not persist steer failure: ${persistenceMessage}; explicitly discard or confirm resubmission.`);
-						broadcast(record.id, webQueueEvent(record));
-					}
-					throw new Error(`${message}; could not persist queued-message recovery: ${persistenceMessage}`);
-				}
-				throw error;
-			} finally {
-				record.queueDeliveryActive = undefined;
-			}
-
-			// Pi accepted the steer. Remove it from memory immediately and persist the
-			// accepted-removal snapshot in the bounded dirty worker; it is never retried.
-			record.queue = record.queue.filter((candidate) => candidate.id !== item.id);
-			broadcast(record.id, webQueueEvent(record));
-			markWebQueueSnapshotDirty(record);
-		});
-	}
-	if (command.type === "replace_queue") {
-		return serializeQueueMutation(record, async () => {
-		const uncertainById = new Map(record.queue
-			.filter((item) => item.deliveryState === "delivering")
-			.map((item) => [item.id, item]));
-		const seenIds = new Set<string>();
-		for (const replacement of command.queue) {
-			if (seenIds.has(replacement.id)) throw new Error(`Duplicate queue item ${replacement.id}`);
-			if (isWebReloadCommand(replacement.message) && replacement.images?.length) throw new Error("/reload does not accept image attachments");
-			seenIds.add(replacement.id);
-			const uncertain = uncertainById.get(replacement.id);
-			if ("deliveryState" in replacement && replacement.deliveryState !== undefined && !uncertain) {
-				throw new Error(`Queue item ${replacement.id} cannot set server-owned delivery state`);
-			}
-			if (uncertain && (replacement.message !== uncertain.message || JSON.stringify(replacement.images ?? []) !== JSON.stringify(uncertain.images ?? []))) {
-				throw new Error(`Uncertain queue item ${uncertain.id} requires explicit discard or resubmit`);
-			}
-		}
-		for (const uncertain of uncertainById.values()) {
-			if (!seenIds.has(uncertain.id)) throw new Error(`Uncertain queue item ${uncertain.id} requires explicit discard or resubmit`);
-		}
-		await transactionalQueueMutation({
-			get: () => record.queue,
-			set: (queue) => setWebQueueState(record, queue),
-			clone: cloneWebQueue,
-			mutate: (queue) => { queue.splice(0, queue.length, ...command.queue.map((replacement) => ({
-				...replacement,
-				images: replacement.images?.map((image) => ({ ...image })),
-				...(uncertainById.has(replacement.id) ? { deliveryState: "delivering" as const } : {}),
-			}))); },
-			persist: () => persistWebQueue(record),
-		});
-		broadcast(record.id, webQueueEvent(record));
-		if (record.status === "idle" && record.agentRunning !== true && record.queue.length > 0) scheduleQueueSettleFallback(record);
-		});
-	}
-	if (command.type === "reconcile_queue") {
-		return serializeQueueMutation(record, async () => {
-		const item = record.queue.find((queued) => queued.id === command.itemId);
-		if (!item || item.deliveryState !== "delivering") throw new Error(`Queue item ${command.itemId} is not uncertain`);
-		await transactionalQueueMutation({
-			get: () => record.queue,
-			set: (queue) => setWebQueueState(record, queue),
-			clone: cloneWebQueue,
-			mutate: (queue) => {
-				const index = queue.findIndex((queued) => queued.id === item.id);
-				if (command.action === "discard") queue.splice(index, 1);
-				else delete queue[index]!.deliveryState;
-			},
-			persist: () => persistWebQueue(record),
-		});
-		broadcast(record.id, webQueueEvent(record));
-		if (command.action === "resubmit") setTimeout(() => void flushWebQueue(record), 0);
-		});
+	if (command.type === "steer_queue_item" || command.type === "replace_queue" || command.type === "reconcile_queue") {
+		return await routeQueueCommand(record, command);
 	}
 	if (command.type === "reload" && record.managed) {
-		if (record.status !== "idle" || hasActiveWebSubagents(record.subagents)) throw new Error("Wait for Pi and its subagents to become idle before reloading");
+		const settled = (record.status === "idle" || record.status === "error") && record.agentRunning !== true;
+		if (!settled || hasActiveWebSubagents(record.subagents)) throw new Error("Wait for Pi and its subagents to become idle before reloading");
 		await record.managed.reload();
 		await refreshManagedSession(record);
 		record.status = "idle";
 		broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
-		slashCommandCache.delete(normalizePath(record.cwd));
+		slashCommands.invalidate(record.cwd);
 		return { reloaded: true };
 	}
 	if (command.type === "reload" && hasActiveWebSubagents(record.subagents)) {
@@ -2680,9 +1461,9 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 	if (command.type === "get_commands") {
 		if (record.managed) {
 			const { commands } = await record.managed.getCommands();
-			return { commands: webSlashCommands(parseDiscoveredSlashCommands(commands), true) };
+			return { commands: slashCommands.toWeb(slashCommands.parse(commands), true) };
 		}
-		return { commands: webSlashCommands(await discoverSlashCommands(record.cwd)) };
+		return { commands: slashCommands.toWeb(await slashCommands.discover(record.cwd)) };
 	}
 	if ((command.type === "create_worktree" || command.type === "create_worktree_v2") && hasActiveWebSubagents(record.subagents)) {
 		throw new Error("Wait for Pi and its subagents to become idle before creating a worktree");
@@ -2762,7 +1543,10 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 			case "prompt":
 				return await record.managed.prompt(command.message, command.streamingBehavior, command.images);
 			case "abort":
-				return await record.managed.abort();
+				// Stop is accepted once its RPC request is written. Do not hold the web
+				// response open while compaction and subagent teardown finish.
+				await record.managed.abort();
+				return { accepted: true };
 			case "bash":
 				return await record.managed.bash(command.command);
 			case "clone": {
@@ -2792,7 +1576,7 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 			externalCommand = { ...command, type: "create_worktree_v2" };
 		}
 		if (command.type === "prompt" && command.message.startsWith("/")) {
-			const commands = await discoverSlashCommands(record.cwd);
+			const commands = await slashCommands.discover(record.cwd);
 			externalCommand = {
 				...command,
 				message: await expandSlashCommand(commands, command.message, { rejectExtensionCommands: true }),
@@ -2800,6 +1584,12 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 		}
 		const target = Array.from(record.agentSockets)[0];
 		const requestId = randomUUID();
+		if (command.type === "abort") {
+			// Socket delivery is the acknowledgement boundary. New bridges also reply
+			// before teardown, but this keeps Stop responsive with older bridges.
+			target.send(JSON.stringify({ type: "agent.command", requestId, command: externalCommand } satisfies { type: "agent.command"; requestId: string; command: ClientCommandMessage["command"] }));
+			return { accepted: true };
+		}
 		const data = await new Promise<unknown>((resolve, reject) => {
 			const timeoutMs = command.type === "compact" || command.type === "bash" || command.type === "create_worktree" || command.type === "create_worktree_v2" || command.type === "reload"
 				? LONG_RUNNING_COMMAND_TIMEOUT_MS
@@ -2810,7 +1600,7 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 				owner.externalPending.delete(requestId);
 				owner.externalRequestTargets.delete(requestId);
 				const message = "Pi session command timed out";
-				reject(command.type === "prompt" ? new CommandDeliveryUncertainError(message) : new Error(message));
+				reject(isUncertainRpcDeliveryCommand(command.type) ? new CommandDeliveryUncertainError(message) : new Error(message));
 			}, timeoutMs);
 			pendingRequest = {
 				owner: record,
@@ -2833,20 +1623,19 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 				record.externalPending.delete(requestId);
 				record.externalRequestTargets.delete(requestId);
 				clearTimeout(timeout);
-				reject(error instanceof Error ? error : new Error(String(error)));
+				const cause = error instanceof Error ? error : new Error(String(error));
+				reject(isUncertainRpcDeliveryCommand(command.type) ? new CommandDeliveryUncertainError(cause.message) : cause);
 			}
 		});
 		if (command.type === "get_session_options") {
 			const options = isRecord(data) ? data : {};
 			if (Array.isArray(options.commands)) return options;
-			return { ...options, commands: webSlashCommands(await discoverSlashCommands(record.cwd)) };
+			return { ...options, commands: slashCommands.toWeb(await slashCommands.discover(record.cwd)) };
 		}
-		if (command.type === "reload") slashCommandCache.delete(normalizePath(record.cwd));
+		if (command.type === "reload") slashCommands.invalidate(record.cwd);
 		return data;
 	}
-	if (command.type === "get_fork_messages") {
-		return { messages: deriveForkMessages(sessionHistoryForRecord(record)) };
-	}
+	if (command.type === "get_fork_messages") return await runRpcSessionCommand(record, command);
 	if (command.type === "clone" || command.type === "fork" || command.type === "set_session_name" || command.type === "compact") {
 		if (!record.file) throw new Error(`Session ${record.id} is not active`);
 		return await runRpcSessionCommand(record, command as RpcSessionCommand);
@@ -2863,20 +1652,24 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			: hello.session.source === "web"
 				? "managed"
 				: "external";
-		const helloHistory = hello.entries?.length ? hello.entries : undefined;
-		const record = upsertSession(hello.session, kind, helloHistory ?? []);
-		if (!helloHistory?.length && record.file) {
-			const scan = parseSessionFile(record.file);
-			if (scan) record.history = scan.history;
+		const helloManagedWorktree = hello.session.managedWorktree ?? managedWorktreeFromEntries(hello.entries ?? []);
+		const helloHistory = boundedWebHistory(hello.entries ?? []);
+		const authoritativeHistory = hello.historyMode === "replace" || helloHistory.length > 0;
+		const record = upsertSession(hello.session, kind, authoritativeHistory ? helloHistory : []);
+		if (authoritativeHistory) replaceRecordHistory(record, helloHistory);
+		else if (!record.historyReady && record.file) {
+			// Bridges loaded before historyMode existed reconnect with an empty hello.
+			// Restore a bounded disk suffix without hydrating the full JSONL archive.
+			replaceRecordHistory(record, parseSessionHistoryFile(record.file));
 		}
-		record.managedWorktree = managedWorktreeFromEntries(record.history);
+		record.preview = extractPreviewFromHistory(record.history) ?? record.preview;
+		record.managedWorktree = helloManagedWorktree ?? record.managedWorktree;
 		record.agentSockets.add(socket);
 		record.active = true;
 		record.status = hello.session.status;
 		record.agentRunning = hello.session.status === "working";
 		record.updatedAt = hello.session.updatedAt;
-		const uncertain = record.queue.find((item) => item.deliveryState === "delivering");
-		if (uncertain) {
+		for (const uncertain of record.queue.filter((item) => item.deliveryState === "delivering")) {
 			broadcastQueueDelivery(
 				record,
 				uncertain,
@@ -2885,14 +1678,23 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			);
 		}
 		if (record.file) sessionsByFile.set(normalizePath(record.file), record);
-		broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+		broadcastSessionToAll(record);
+		void hydrateGitMetadata(record);
 		// Native sessions use the same bounded semantic history as managed sessions;
 		// no browser connection asks Pi to paint an additional TUI viewport.
-		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history.slice(-600) } satisfies ServerHistoryMessage);
+		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
 		void flushWebQueue(record);
 		return;
 	}
 	if (!socket.data.authed) throw new Error("Agent must send agent.hello first");
+	if (message.type === "agent.history") {
+		const update = message as AgentHistoryMessage;
+		const record = sessions.get(update.sessionId);
+		if (!record || !record.agentSockets.has(socket)) return;
+		replaceRecordHistory(record, update.entries);
+		broadcast(record.id, { type: "server.history", sessionId: record.id, entries: record.history, replace: true } satisfies ServerHistoryMessage);
+		return;
+	}
 	if (message.type === "agent.session_replaced") {
 		await completeExternalSessionReplacement(socket, message as AgentSessionReplacedMessage);
 		return;
@@ -2905,6 +1707,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			let lifecycleChanged = false;
 			if (event.event.type === "agent_start" || event.event.type === "turn_start") {
 				record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
+				markAgentActivity(record);
 			}
 			if (event.event.type === "agent_start" || event.event.type === "turn_start") {
 				cancelQueueSettleFallback(record);
@@ -2913,12 +1716,14 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				lifecycleChanged = true;
 			}
 			if (event.event.type === "agent_end" && !record.compaction) {
-				record.status = "idle";
+				markAgentSettling(record);
+				record.status = agentEndTerminalNotice(event.event)?.kind === "error" ? "error" : "idle";
 				record.agentRunning = false;
 				scheduleQueueSettleFallback(record);
 				lifecycleChanged = true;
 			}
 			if (event.event.type === "compaction_start") {
+				markAgentSettling(record);
 				record.status = "working";
 				record.agentRunning = true;
 				record.compaction = {
@@ -2935,28 +1740,31 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 					lifecycleChanged = true;
 				}
 			}
-			if (event.event.type === "agent_settled") {
+			if (event.event.type === "agent_settled" && isCurrentAgentSettlement(record)) {
 				cancelQueueSettleFallback(record);
+				record.settlingGeneration = undefined;
 				lifecycleChanged = true;
-				// Keep the newly admitted run authoritative when this settlement is
-				// delayed from the run that emitted the preceding agent_end.
-				if (record.agentRunning !== true) {
-					record.status = "idle";
-					record.agentRunning = false;
-					void flushWebQueue(record);
-				}
+				// Pi emits agent_settled only when no retry, compaction, or internal
+				// follow-up remains. It is authoritative even when an interrupted
+				// overflow compaction last advertised willRetry=true.
+				if (record.status !== "error") record.status = "idle";
+				record.agentRunning = false;
+				void flushWebQueue(record);
 			}
 			const subagentsChanged = updateSubagentsFromToolEvent(record, event.event);
 			let sessionMetadataChanged = false;
+			if (event.event.type === "session_info_changed") {
+				record.name = typeof event.event.name === "string" && event.event.name ? event.event.name : undefined;
+				sessionMetadataChanged = true;
+			}
 			if (event.event.type === "message_end" && isRecord(event.event.message)) {
-				record.history.push({
+				appendRecordHistory(record, {
 					type: "message",
 					id: randomUUID(),
 					parentId: null,
 					timestamp: new Date().toISOString(),
 					message: event.event.message,
 				});
-				record.history = record.history.slice(-600);
 				record.messageCount += 1;
 				if (event.event.message.role === "assistant" || event.event.message.role === "toolResult") {
 					record.usage ??= zeroWebUsage();
@@ -2964,14 +1772,16 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				}
 				if (event.event.message.role === "user" || event.event.message.role === "assistant") {
 					const preview = extractTextContent(event.event.message.content);
+					const terminalNotice = assistantTerminalNotice(event.event.message);
 					if (preview) record.preview = preview.slice(0, 180);
+					else if (terminalNotice) record.preview = `${terminalNotice.title}: ${terminalNotice.detail}`.slice(0, 180);
 				}
 				sessionMetadataChanged = true;
 			}
 			broadcast(event.sessionId, { type: "server.event", sessionId: event.sessionId, event: event.event } satisfies ServerEventMessage);
-			if (sessionMetadataChanged) {
-				broadcastToAll({ type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
-			} else if (lifecycleChanged || subagentsChanged || event.event.type === "compaction_start" || event.event.type === "compaction_end") {
+			if (sessionMetadataChanged || lifecycleChanged || event.event.type === "compaction_start" || event.event.type === "compaction_end") {
+				broadcastSessionToAll(record);
+			} else if (subagentsChanged) {
 				broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 			}
 		}
@@ -2998,13 +1808,18 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		// Older bridge runtimes reported `working` again immediately after their
 		// authoritative agent_end event. Preserve the lifecycle event until a new
 		// agent_start arrives so completed runs cannot get stuck visually working.
-		const session = existing?.agentRunning === false && update.session.status === "working"
-			? { ...update.session, status: "idle" as const }
-			: update.session;
+		const lifecycleSession = normalizeLegacySessionUpdate(existing, update.session);
+		// Older native bridges keep reporting their initial preview. Preserve
+		// message_end/file-derived metadata after hello during rolling upgrades.
+		const session = existing ? { ...lifecycleSession, preview: existing.preview } : lifecycleSession;
+		const catalogChanged = catalogSessionChanged(existing, session);
+		const gitContextChanged = existing?.cwd !== session.cwd || existing?.branch !== session.branch;
 		const record = upsertSession(session, "external", existing?.history ?? []);
 		record.agentSockets.add(socket);
 		record.updatedAt = update.session.updatedAt;
-		broadcast(update.session.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+		if (catalogChanged) broadcastSessionToAll(record);
+		else broadcast(update.session.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+		if (gitContextChanged) void hydrateGitMetadata(record);
 		return;
 	}
 	if (message.type === "agent.response") {
@@ -3192,6 +2007,22 @@ async function reconcileMissingSessionFiles(): Promise<void> {
 	}));
 }
 
+function scheduleManagedWorktreeCleanup(sessionId: string, sessionFile: string, managedWorktree: NonNullable<SessionRecord["managedWorktree"]>): void {
+	const timer = setTimeout(() => {
+		void (async () => {
+			// A new session may claim this checkout after durable deletion yields.
+			if (hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)) return;
+			try {
+				const result = await removeManagedWorktreeAsync(managedWorktree);
+				if (result.branchWarning) console.warn(`Removed worktree ${managedWorktree.path}, but could not delete branch ${managedWorktree.branch}: ${result.branchWarning}`);
+			} catch (error) {
+				console.warn(`Session ${sessionId} was deleted, but managed worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		})();
+	}, 0);
+	timer.unref?.();
+}
+
 async function deleteSession(sessionId: string): Promise<void> {
 	let record = sessions.get(sessionId) ?? sessionsByFile.get(normalizePath(sessionId)) ?? (() => {
 		const scan = scanSavedSessions(sessionsDir).find((item) => item.session.id === sessionId || normalizePath(item.file) === normalizePath(sessionId));
@@ -3207,7 +2038,10 @@ async function deleteSession(sessionId: string): Promise<void> {
 	}
 	const sessionFile = record.file;
 	let managedWorktree = record.managedWorktree;
-	if (!managedWorktree && sessionFile) managedWorktree = managedWorktreeFromEntries(parseSessionFile(sessionFile)?.entries ?? []);
+	if (!managedWorktree && sessionFile && !record.managedWorktreeScanned) {
+		managedWorktree = readManagedWorktreePrefix(sessionFile);
+		record.managedWorktreeScanned = true;
+	}
 	if (managedWorktree && sessionFile && hasOtherSessionInWorktree(sessionsDir, sessionFile, managedWorktree.path)) {
 		managedWorktree = undefined;
 	}
@@ -3244,15 +2078,9 @@ async function deleteSession(sessionId: string): Promise<void> {
 		managedWorktree = undefined;
 	}
 	// Durable deletion and client notification are complete before best-effort
-	// worktree cleanup, so cleanup failure cannot turn deletion into an error.
-	if (managedWorktree) {
-		try {
-			const result = removeManagedWorktree(managedWorktree);
-			if (result.branchWarning) console.warn(`Removed worktree ${managedWorktree.path}, but could not delete branch ${managedWorktree.branch}: ${result.branchWarning}`);
-		} catch (error) {
-			console.warn(`Session ${sessionId} was deleted, but managed worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
+	// worktree cleanup. Run slow checkout removal outside the HTTP request so a
+	// reverse proxy cannot report a false failure after the session is gone.
+	if (managedWorktree && sessionFile) scheduleManagedWorktreeCleanup(sessionId, sessionFile, managedWorktree);
 }
 
 async function handleApi(request: Request): Promise<Response> {
@@ -3260,7 +2088,7 @@ async function handleApi(request: Request): Promise<Response> {
 	if (
 		url.pathname.startsWith("/api/") &&
 		request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS" &&
-		!isTrustedBrowserOrigin(request)
+		!isTrustedBrowserOrigin(request, tailscaleStatus.published ? tailscaleStatus.url : undefined)
 	) {
 		return textResponse("Forbidden origin", { status: 403 });
 	}
@@ -3306,7 +2134,7 @@ async function handleApi(request: Request): Promise<Response> {
 	}
 	if (request.method === "GET" && url.pathname === "/api/sessions") {
 		await reconcileMissingSessionFiles();
-		const scans = scanSavedSessions(sessionsDir);
+		const scans = scanSavedSessions(sessionsDir, activeSessionFiles());
 		for (const scan of scans) {
 			const existing = sessions.get(scan.session.id) ?? sessionsByFile.get(normalizePath(scan.file));
 			if (!existing || !existing.active || existing.status === "offline") {
@@ -3314,9 +2142,13 @@ async function handleApi(request: Request): Promise<Response> {
 			}
 		}
 		const merged = new Map<string, WebSession>();
-		for (const scan of scans) merged.set(scan.session.file ? normalizePath(scan.session.file) : scan.session.id, sessionToClientPayload(scan.session));
+		for (const scan of scans) {
+			const live = sessions.get(scan.session.id) ?? sessionsByFile.get(normalizePath(scan.file));
+			if (live?.catalogReady === false) continue;
+			merged.set(scan.session.file ? normalizePath(scan.session.file) : scan.session.id, sessionToClientPayload(scan.session));
+		}
 		for (const item of sessions.values()) {
-			if (isMissingInactiveSession(item)) continue;
+			if (item.catalogReady === false || isMissingInactiveSession(item)) continue;
 			merged.set(item.file ? normalizePath(item.file) : item.id, sessionToClientPayload(item));
 		}
 		return jsonResponse({ sessions: sortSessions(Array.from(merged.values())) });
@@ -3351,6 +2183,10 @@ async function handleApi(request: Request): Promise<Response> {
 					branch: worktreeBranch || undefined,
 					startPoint: worktreeStartPoint || undefined,
 				});
+				worktree = inheritManagedBranchOwnership(
+					worktree,
+					[...sessions.values()].map((candidate) => candidate.managedWorktree),
+				);
 				cwd = worktree.path;
 			} catch (error) {
 				return badRequest(error instanceof Error ? error.message : String(error));
@@ -3403,7 +2239,7 @@ async function handleApi(request: Request): Promise<Response> {
 		} catch (error) {
 			return badRequest(error instanceof Error ? error.message : "Session file does not exist");
 		}
-		const scan = parseSessionFile(file);
+		const scan = parseSessionMetadataFile(file);
 		if (!scan) return badRequest("Invalid session file");
 		const existing = sessionsByFile.get(normalizePath(file));
 		if (existing?.active && existing.status !== "offline") {
@@ -3424,34 +2260,6 @@ async function handleApi(request: Request): Promise<Response> {
 		}
 	}
 	return notFound();
-}
-
-function staticFileResponse(filePath: string, isAppShell = false): Response {
-	const response = new Response(Bun.file(filePath));
-	// The app shell points at content-hashed bundles and must always revalidate so
-	// reopening Pi Web cannot strand a running tab on an obsolete client.
-	if (isAppShell) response.headers.set("cache-control", "no-cache");
-	return response;
-}
-
-function staticAssetResponse(request: Request): Response | undefined {
-	const url = new URL(request.url);
-	if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws/")) return undefined;
-	const pathname = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
-	const filePath = resolve(distDir, pathname);
-	if (!isWithinDir(filePath, distDir)) return new Response("Forbidden", { status: 403 });
-	try {
-		statSync(filePath);
-		return staticFileResponse(filePath, pathname === "index.html");
-	} catch {
-		try {
-			const appShellPath = join(distDir, "index.html");
-			statSync(appShellPath);
-			return staticFileResponse(appShellPath, true);
-		} catch {
-			return notFound();
-		}
-	}
 }
 
 function handleWebSocketOpen(socket: Bun.ServerWebSocket<SocketData>): void {
@@ -3491,6 +2299,7 @@ async function handleWebSocketMessage(socket: Bun.ServerWebSocket<SocketData>, d
 
 function handleWebSocketClose(socket: Bun.ServerWebSocket<SocketData>): void {
 	if (socket.data.kind === "client") {
+		connectedClientSockets.delete(socket as Bun.ServerWebSocket<ClientSocketData>);
 		for (const record of sessions.values()) {
 			if (!record.clientSockets.delete(socket as Bun.ServerWebSocket<ClientSocketData>)) continue;
 		}
@@ -3505,25 +2314,24 @@ function handleWebSocketClose(socket: Bun.ServerWebSocket<SocketData>): void {
 			if (pending?.surviveDisconnect) continue;
 			if (pending) {
 				record.externalPending.delete(requestId);
-				pending.reject(pending.commandType === "prompt"
-					? new CommandDeliveryUncertainError("Agent socket closed before prompt acknowledgement")
+				pending.reject(pending.commandType && isUncertainRpcDeliveryCommand(pending.commandType)
+					? new CommandDeliveryUncertainError(`Agent socket closed before ${pending.commandType} acknowledgement`)
 					: new Error("Agent socket closed"));
 			}
 		}
 		if (record.agentSockets.size === 0 && record.kind === "external") {
 			record.status = "offline";
 			record.active = false;
-			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			broadcastSessionToAll(record);
 		}
 	}
 }
 
 async function cleanupAndExit(code = 0): Promise<void> {
-	if (shutdownStarted) {
-		// A second termination request is an explicit escape hatch for a wedged run.
-		forceShutdownRequested = true;
-		return;
-	}
+	// Repeated TERM/INT delivery is common during deploys. Never reinterpret it as
+	// permission to abort managed work; an operator can still use SIGKILL for a
+	// truly wedged process.
+	if (shutdownStarted) return;
 	shutdownStarted = true;
 	if (missingSessionReconcileTimer) clearInterval(missingSessionReconcileTimer);
 	missingSessionReconcileTimer = undefined;
@@ -3532,7 +2340,7 @@ async function cleanupAndExit(code = 0): Promise<void> {
 		.map((record) => record.name ?? record.id);
 	let busy = busyNames();
 	if (busy.length > 0) console.error(`Waiting for active managed sessions before restart: ${busy.join(", ")}`);
-	while (shouldContinueManagedShutdownWait(busy.length, forceShutdownRequested)) {
+	while (shouldContinueManagedShutdownWait(busy.length)) {
 		await Bun.sleep(100);
 		busy = busyNames();
 	}
@@ -3580,7 +2388,7 @@ async function main(): Promise<void> {
 				// page to have the exact host served directly or forwarded by Tailscale.
 				// This preserves tokenless iOS bookmarks while preventing arbitrary web
 				// origins from driving shell-capable sessions.
-				if (!isTrustedBrowserOrigin(request)) return new Response("Forbidden WebSocket origin", { status: 403 });
+				if (!isTrustedBrowserOrigin(request, tailscaleStatus.published ? tailscaleStatus.url : undefined)) return new Response("Forbidden WebSocket origin", { status: 403 });
 				const upgraded = serverInstance.upgrade(request, { data: { kind: "client", id: randomUUID(), authed: false } as any });
 				return upgraded ? undefined : new Response("Upgrade failed", { status: 400 });
 			}
