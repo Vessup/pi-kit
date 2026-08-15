@@ -1,0 +1,7 @@
+name = "test"
+command = """
+set -eu
+bun run test
+"""
+timeout_minutes = 20
+container = { cpu = 2, memory_mb = 4096 }

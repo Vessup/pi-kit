@@ -1,0 +1,21 @@
+version = 1
+timeout_minutes = 30
+environment = { CI = "true" }
+cache = [{ paths = ["~/.bun/install/cache"], shared = true }]
+triggers = [
+  { event = "commit", branch = { names = ["main"] } },
+  { event = "commit", pull_request = { state = "open", draft = false } },
+]
+
+[container]
+image = "docker.io/oven/bun:1.3.10"
+prepareInputs = ["bun.lock", "package.json"]
+prepare = """
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends git
+rm -rf /var/lib/apt/lists/*
+cd "$INFORMANT_PREPARE_ROOT"
+bun install --frozen-lockfile --ignore-scripts
+"""
