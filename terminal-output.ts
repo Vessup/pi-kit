@@ -1,5 +1,8 @@
 const CSI_FINAL_MIN = 0x40;
 const CSI_FINAL_MAX = 0x7e;
+const MAX_RENDERED_ROWS = 10_000;
+const MAX_RENDERED_COLUMNS = 10_000;
+const MAX_RENDERED_CELLS = 100_000;
 
 /** Render terminal cursor updates into the final visible text. */
 export function renderTerminalOutput(source: string): string {
@@ -8,36 +11,57 @@ export function renderTerminalOutput(source: string): string {
 	let rows: string[][] = [[]];
 	let row = 0;
 	let column = 0;
+	let renderedCells = 0;
 	const currentRow = () => {
 		while (rows.length <= row) rows.push([]);
 		return rows[row]!;
 	};
+	const moveToRow = (next: number) => {
+		row = Math.max(0, Math.min(MAX_RENDERED_ROWS - 1, next));
+	};
 	const moveToColumn = (next: number) => {
-		column = Math.max(0, next);
+		column = Math.max(0, Math.min(MAX_RENDERED_COLUMNS - 1, next));
+	};
+	const truncateLine = (line: string[], length: number) => {
+		const nextLength = Math.min(length, line.length);
+		renderedCells -= line.length - nextLength;
+		line.length = nextLength;
+	};
+	const writeCharacter = (character: string): boolean => {
+		if (column >= MAX_RENDERED_COLUMNS) return false;
+		const line = currentRow();
+		const addedCells = Math.max(0, column + 1 - line.length);
+		if (renderedCells + addedCells > MAX_RENDERED_CELLS) return false;
+		while (line.length < column) line.push(" ");
+		line[column] = character;
+		renderedCells += addedCells;
+		column += 1;
+		return true;
 	};
 	const eraseDisplay = (mode: number) => {
 		if (mode === 2 || mode === 3) {
 			rows = [[]];
 			row = 0;
 			column = 0;
+			renderedCells = 0;
 			return;
 		}
 		if (mode === 0) {
-			currentRow().length = Math.min(column, currentRow().length);
+			truncateLine(currentRow(), column);
+			for (let index = row + 1; index < rows.length; index += 1) renderedCells -= rows[index]!.length;
 			rows.length = row + 1;
 		}
 	};
 	const eraseLine = (mode: number) => {
 		const line = currentRow();
-		if (mode === 2) {
-			line.length = 0;
-		} else if (mode === 0) line.length = Math.min(column, line.length);
+		if (mode === 2) truncateLine(line, 0);
+		else if (mode === 0) truncateLine(line, column);
 		else if (mode === 1) {
 			for (let index = 0; index <= Math.min(column, line.length - 1); index += 1) line[index] = " ";
 		}
 	};
 
-	for (let index = 0; index < source.length; index += 1) {
+	rendering: for (let index = 0; index < source.length; index += 1) {
 		const character = source[index]!;
 		if (character === "\u001b") {
 			const introducer = source[index + 1];
@@ -64,11 +88,11 @@ export function renderTerminalOutput(source: string): string {
 			const first = parameters[0] ?? 0;
 			if (final === "G") moveToColumn((first || 1) - 1);
 			else if (final === "H" || final === "f") {
-				row = Math.max(0, (first || 1) - 1);
+				moveToRow((first || 1) - 1);
 				moveToColumn((parameters[1] || 1) - 1);
-			} else if (final === "A") row = Math.max(0, row - (first || 1));
-			else if (final === "B") row += first || 1;
-			else if (final === "C") column += first || 1;
+			} else if (final === "A") moveToRow(row - (first || 1));
+			else if (final === "B") moveToRow(row + (first || 1));
+			else if (final === "C") moveToColumn(column + (first || 1));
 			else if (final === "D") moveToColumn(column - (first || 1));
 			else if (final === "J") eraseDisplay(first);
 			else if (final === "K") eraseLine(first);
@@ -80,7 +104,7 @@ export function renderTerminalOutput(source: string): string {
 			continue;
 		}
 		if (character === "\n") {
-			row += 1;
+			moveToRow(row + 1);
 			column = 0;
 			currentRow();
 			continue;
@@ -91,13 +115,13 @@ export function renderTerminalOutput(source: string): string {
 		}
 		if (character === "\t") {
 			const spaces = 8 - (column % 8);
-			for (let count = 0; count < spaces; count += 1) currentRow()[column++] = " ";
+			for (let count = 0; count < spaces; count += 1) {
+				if (!writeCharacter(" ")) break rendering;
+			}
 			continue;
 		}
 		if (character < " ") continue;
-		const line = currentRow();
-		while (line.length < column) line.push(" ");
-		line[column++] = character;
+		if (!writeCharacter(character)) break;
 	}
 
 	return rows.map((line) => line.join("").replace(/ +$/g, "")).join("\n");

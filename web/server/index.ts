@@ -44,6 +44,7 @@ import { resolveWebCwd } from "./paths.js";
 import {
 	createWebWorktree,
 	hasOtherSessionInWorktree,
+	inheritManagedBranchOwnership,
 	managedWorktreeFromEntries,
 	removeManagedWorktree,
 	removeManagedWorktreeAsync,
@@ -2182,6 +2183,10 @@ async function handleApi(request: Request): Promise<Response> {
 					branch: worktreeBranch || undefined,
 					startPoint: worktreeStartPoint || undefined,
 				});
+				worktree = inheritManagedBranchOwnership(
+					worktree,
+					[...sessions.values()].map((candidate) => candidate.managedWorktree),
+				);
 				cwd = worktree.path;
 			} catch (error) {
 				return badRequest(error instanceof Error ? error.message : String(error));

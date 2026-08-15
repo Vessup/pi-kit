@@ -10,7 +10,8 @@ export type DiscoveredSlashCommand = ExpandableSlashCommand & {
 
 export class SlashCommandService {
 	private readonly cache = new Map<string, { loadedAt: number; commands: DiscoveredSlashCommand[] }>();
-	private readonly inFlight = new Map<string, Promise<DiscoveredSlashCommand[]>>();
+	private readonly generations = new Map<string, number>();
+	private readonly inFlight = new Map<string, { generation: number; promise: Promise<DiscoveredSlashCommand[]> }>();
 
 	constructor(
 		private readonly normalizePath: (path: string) => string,
@@ -40,16 +41,21 @@ export class SlashCommandService {
 
 	async discover(cwd: string): Promise<DiscoveredSlashCommand[]> {
 		const key = this.normalizePath(cwd);
+		const generation = this.generations.get(key) ?? 0;
 		const cached = this.cache.get(key);
 		if (cached && Date.now() - cached.loadedAt < 30_000) return cached.commands;
 		const active = this.inFlight.get(key);
-		if (active) return active;
-		const pending = this.load(cwd, key).finally(() => this.inFlight.delete(key));
-		this.inFlight.set(key, pending);
+		if (active?.generation === generation) return active.promise;
+		const pending = this.load(cwd, key, generation).finally(() => {
+			// An invalidation may have started a replacement load while this one was
+			// still running. Only the promise that owns the slot may clear it.
+			if (this.inFlight.get(key)?.promise === pending) this.inFlight.delete(key);
+		});
+		this.inFlight.set(key, { generation, promise: pending });
 		return pending;
 	}
 
-	private async load(cwd: string, key: string): Promise<DiscoveredSlashCommand[]> {
+	private async load(cwd: string, key: string, generation: number): Promise<DiscoveredSlashCommand[]> {
 		const runtime = this.createRuntime(cwd);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
@@ -64,7 +70,11 @@ export class SlashCommandService {
 					timer.unref?.();
 				}),
 			]);
-			this.cache.set(key, { loadedAt: Date.now(), commands: parsed });
+			// A runtime started before invalidate() may finish after its replacement.
+			// Never let that stale result repopulate or overwrite the current cache.
+			if ((this.generations.get(key) ?? 0) === generation) {
+				this.cache.set(key, { loadedAt: Date.now(), commands: parsed });
+			}
 			return parsed;
 		} finally {
 			if (timer) clearTimeout(timer);
@@ -73,7 +83,9 @@ export class SlashCommandService {
 	}
 
 	invalidate(cwd: string): void {
-		this.cache.delete(this.normalizePath(cwd));
+		const key = this.normalizePath(cwd);
+		this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+		this.cache.delete(key);
 	}
 
 	toWeb(commands: readonly DiscoveredSlashCommand[], includeExtensions = false): WebSlashCommand[] {

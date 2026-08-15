@@ -56,6 +56,27 @@ test("uncertain deliveries block steering and all are reported on subscribe", as
   expect(frames.filter((frame) => frame.event?.type === "web_queue_delivery").map((frame) => frame.event?.item?.id)).toEqual(["uncertain-1", "uncertain-2"]);
 });
 
+test("reordering an uncertain delivery behind an ordinary item still blocks flushing", async () => {
+  const target = record([
+    { id: "uncertain", message: "possibly accepted", deliveryState: "delivering" },
+    { id: "ordinary", message: "must wait" },
+  ]);
+  const { coordinator, deliveries } = setup(target);
+
+  await coordinator.routeQueueCommand(target, {
+    type: "replace_queue",
+    queue: [
+      { id: "ordinary", message: "must wait" },
+      { id: "uncertain", message: "possibly accepted" },
+    ],
+  });
+  await coordinator.flushWebQueue(target);
+
+  expect(target.queue[1]?.deliveryState).toBe("delivering");
+  expect(deliveries).toEqual([]);
+  coordinator.cancelWebQueueWork(target);
+});
+
 test("queued control commands cannot be converted into steering prompts", async () => {
   const target = record([{ id: "compact", message: "/compact preserve names" }], "working");
   const { coordinator, deliveries } = setup(target);

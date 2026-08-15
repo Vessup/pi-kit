@@ -172,8 +172,12 @@ export function createSessionQueueCoordinator(options: QueueCoordinatorOptions) 
 
 	async function flushWebQueueLocked(record: SessionRecord): Promise<void> {
 		if (record.queue.length === 0 || record.queueDeliveryActive || (record.status !== "idle" && record.status !== "error") || hasActiveWebSubagents(record.subagents)) return;
+		// Any uncertain delivery blocks the whole queue. replace_queue may move an
+		// uncertain item behind an ordinary one, but that must never authorize a new
+		// delivery until the uncertain item is explicitly reconciled.
+		if (record.queue.some((queued) => queued.deliveryState === "delivering")) return;
 		let item = record.queue[0];
-		if (!item || item.deliveryState === "delivering") return;
+		if (!item) return;
 		// Persist the in-flight state before handing the prompt to Pi. A transient
 		// storage failure is published and retried with a bounded policy; Pi is not
 		// called until this transition is durable.

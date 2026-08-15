@@ -38,14 +38,28 @@ function spawnGit(args: string[]) {
 }
 
 /** Validate a short local branch name while allowing namespaced branches such as owner/topic. */
-export function validateLocalBranchName(input: string): string {
+function validateLocalBranchNameInput(input: string): string {
 	const branch = input.trim();
 	if (!branch) throw new Error("Missing local branch name");
 	if (branch.includes("\0")) throw new Error("Local branch name contains a NUL byte");
 	if (branch.startsWith("refs/")) throw new Error("Local branch must be a short branch name, not a refs/... path");
+	return branch;
+}
+
+export function validateLocalBranchName(input: string): string {
+	const branch = validateLocalBranchNameInput(input);
 	const result = spawnGit(["check-ref-format", "--branch", branch]);
 	if (result.status !== 0) {
 		throw new Error(`Invalid local branch name ${JSON.stringify(branch)}: ${result.stderr?.trim() || result.error?.message || "git check-ref-format rejected it"}`);
+	}
+	return branch;
+}
+
+async function validateLocalBranchNameAsync(input: string): Promise<string> {
+	const branch = validateLocalBranchNameInput(input);
+	const result = await spawnGitAsync(["check-ref-format", "--branch", branch]);
+	if (result.status !== 0) {
+		throw new Error(`Invalid local branch name ${JSON.stringify(branch)}: ${result.stderr || "git check-ref-format rejected it"}`);
 	}
 	return branch;
 }
@@ -59,11 +73,12 @@ function gitOutput(cwd: string, args: string[]): string {
 	return result.stdout?.trim() ?? "";
 }
 
-function gitOutputAsync(cwd: string, args: string[]): Promise<string> {
-	const fullArgs = ["-C", cwd, ...args];
-	const timeout = gitCommandTimeoutMs(fullArgs);
+type AsyncGitResult = { status: number | null; stdout: string; stderr: string };
+
+function spawnGitAsync(args: string[]): Promise<AsyncGitResult> {
+	const timeout = gitCommandTimeoutMs(args);
 	return new Promise((resolvePromise, rejectPromise) => {
-		const child = spawn("git", fullArgs, { stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;
@@ -79,19 +94,21 @@ function gitOutputAsync(cwd: string, args: string[]): Promise<string> {
 			clearTimeout(timer);
 			rejectPromise(error);
 		});
-		child.once("close", (code, signal) => {
+		child.once("close", (status, signal) => {
 			clearTimeout(timer);
 			if (timedOut || signal) {
-				rejectPromise(new Error(`git ${fullArgs.join(" ")} did not finish within ${timeout}ms`));
+				rejectPromise(new Error(`git ${args.join(" ")} did not finish within ${timeout}ms`));
 				return;
 			}
-			if (code !== 0) {
-				rejectPromise(new Error(stderr.trim() || `git ${args.join(" ")} failed`));
-				return;
-			}
-			resolvePromise(stdout.trim());
+			resolvePromise({ status, stdout: stdout.trim(), stderr: stderr.trim() });
 		});
 	});
+}
+
+async function gitOutputAsync(cwd: string, args: string[]): Promise<string> {
+	const result = await spawnGitAsync(["-C", cwd, ...args]);
+	if (result.status !== 0) throw new Error(result.stderr || `git ${args.join(" ")} failed`);
+	return result.stdout;
 }
 
 /** Require the Git features used for absolute paths and NUL-delimited worktree records. */
@@ -108,6 +125,12 @@ function ensureSupportedGit(): void {
 	const result = spawnGit(["--version"]);
 	if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || "Could not run git --version");
 	validateGitVersion(result.stdout ?? "");
+}
+
+async function ensureSupportedGitAsync(): Promise<void> {
+	const result = await spawnGitAsync(["--version"]);
+	if (result.status !== 0) throw new Error(result.stderr || "Could not run git --version");
+	validateGitVersion(result.stdout);
 }
 
 export type WorktreeRef = { kind: "branch" | "detached"; value: string };
@@ -204,6 +227,26 @@ function canonicalPath(path: string): string {
 
 function samePath(left: string, right: string): boolean {
 	return canonicalPath(left) === canonicalPath(right);
+}
+
+/** Compare all normalized fields that identify one managed checkout. */
+export function sameManagedWorktreeIdentity(left: ManagedWorktree, right: ManagedWorktree): boolean {
+	return left.name === right.name && left.branch === right.branch
+		&& samePath(left.path, right.path) && samePath(left.repoRoot, right.repoRoot);
+}
+
+/** Retain Pi's branch cleanup ownership when another session reuses its checkout. */
+export function inheritManagedBranchOwnership<T extends ManagedWorktree>(
+	worktree: T,
+	existing: Iterable<ManagedWorktree | undefined>,
+): T {
+	if (worktree.branchCreated) return worktree;
+	for (const candidate of existing) {
+		if (candidate?.branchCreated === true && sameManagedWorktreeIdentity(candidate, worktree)) {
+			return { ...worktree, branchCreated: true };
+		}
+	}
+	return worktree;
 }
 
 function pathIsWithin(path: string, root: string): boolean {
@@ -420,6 +463,39 @@ function verifiedManagedWorktree(worktree: ManagedWorktree): ManagedWorktree {
 	return verified;
 }
 
+async function verifiedManagedWorktreeAsync(worktree: ManagedWorktree): Promise<ManagedWorktree> {
+	// Yield before starting any child process so callers never synchronously block
+	// the server event loop while entering the asynchronous cleanup path.
+	await Promise.resolve();
+	await ensureSupportedGitAsync();
+	const name = validateWorktreeName(worktree.name);
+	const branch = await validateLocalBranchNameAsync(worktree.branch);
+	if (basename(worktree.path) !== name) throw new Error("Refusing to remove a worktree whose path and directory-name marker disagree");
+	const repoRoot = realpathSync(worktree.repoRoot);
+	let managedRoot = join(repoRoot, ".pi", "worktrees");
+	try {
+		managedRoot = realpathSync(managedRoot);
+	} catch {
+		managedRoot = resolve(managedRoot);
+	}
+	const path = realpathSync(worktree.path);
+	if (dirname(path) !== managedRoot) throw new Error(`Refusing to remove worktree outside ${managedRoot}`);
+	const [commonDirOutput, primaryGitDirOutput, symbolic] = await Promise.all([
+		gitOutputAsync(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+		gitOutputAsync(repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+		spawnGitAsync(["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"]),
+	]);
+	if (!samePath(resolve(commonDirOutput), resolve(primaryGitDirOutput))) {
+		throw new Error("Refusing to remove a worktree owned by another repository");
+	}
+	const topLevel = await gitOutputAsync(path, ["rev-parse", "--show-toplevel"]);
+	if (!samePath(topLevel, path)) throw new Error("Refusing to remove a worktree whose Git root differs from its ownership marker");
+	if (symbolic.status !== 0 || symbolic.stdout !== branch) {
+		throw new Error(`Refusing to remove a worktree whose checked-out branch differs from its ownership marker (${branch})`);
+	}
+	return { path, repoRoot, name, branch, branchCreated: worktree.branchCreated === true };
+}
+
 /** Remove a verified Pi-managed checkout, deleting only a branch created by Pi. */
 export function removeManagedWorktree(worktree: ManagedWorktree): { branchWarning?: string } {
 	const verified = verifiedManagedWorktree(worktree);
@@ -435,7 +511,7 @@ export function removeManagedWorktree(worktree: ManagedWorktree): { branchWarnin
 
 /** Remove a managed checkout without blocking the web server event loop. */
 export async function removeManagedWorktreeAsync(worktree: ManagedWorktree): Promise<{ branchWarning?: string }> {
-	const verified = verifiedManagedWorktree(worktree);
+	const verified = await verifiedManagedWorktreeAsync(worktree);
 	await gitOutputAsync(verified.repoRoot, ["worktree", "remove", "--force", verified.path]);
 	if (!verified.branchCreated) return {};
 	try {

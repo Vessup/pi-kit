@@ -15,6 +15,30 @@ test("terminal output handles carriage returns, erasure, and ordinary ANSI color
 	expect(renderTerminalOutput("abc\u001b[2KX")).toBe("   X");
 });
 
+test("oversized vertical cursor parameters are bounded", () => {
+	const huge = "9".repeat(400);
+	for (const command of ["B", "H", "f"]) {
+		const cursor = command === "B" ? `${huge}B` : `${huge};${huge}${command}`;
+		const output = renderTerminalOutput(`top\u001b[${cursor}X`);
+		expect(output.startsWith("top\n")).toBe(true);
+		expect(output.split("\n").at(-1)?.trim()).toBe("X");
+		expect(output.split("\n")).toHaveLength(10_000);
+	}
+});
+
+test("oversized horizontal cursor parameters and aggregate materialization are bounded", () => {
+	const huge = "9".repeat(400);
+	const line = renderTerminalOutput(`prefix\u001b[${huge}CX`);
+	expect(line).toHaveLength(10_000);
+	expect(line.startsWith("prefix")).toBe(true);
+	expect(line.endsWith("X")).toBe(true);
+
+	const denseRows = Array.from({ length: 200 }, (_, row) => `\u001b[${row + 1};1H\u001b[${huge}CX`).join("");
+	const output = renderTerminalOutput(denseRows);
+	expect(output.length).toBeLessThanOrEqual(100_100);
+	expect(output.match(/X/g)).toHaveLength(10);
+});
+
 test("ordinary command output is unchanged", () => {
 	const output = "one\ntwo\n";
 	expect(renderTerminalOutput(output)).toBe(output);

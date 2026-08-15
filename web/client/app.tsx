@@ -832,7 +832,6 @@ export function App() {
   React.useEffect(() => { savePreference(SESSION_SORT_KEY, sessionSort); }, [sessionSort]);
   React.useEffect(() => { savePreference(COLLAPSED_PROJECTS_KEY, JSON.stringify(collapsedProjects)); }, [collapsedProjects]);
   React.useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
-  React.useEffect(() => { entriesRef.current = entries; }, [entries]);
   React.useEffect(() => {
     if (deleteCandidate && !sessions.some((session) => session.id === deleteCandidate.id)) setDeleteCandidate(null);
   }, [deleteCandidate, sessions]);
@@ -884,7 +883,11 @@ export function App() {
       optimisticIds.add(pending.optimisticId);
       pending.reject(error);
     }
-    if (optimisticIds.size > 0) setEntries((previous) => previous.filter((entry) => !entry.id || !optimisticIds.has(entry.id)));
+    if (optimisticIds.size > 0) {
+      const next = entriesRef.current.filter((entry) => !entry.id || !optimisticIds.has(entry.id));
+      entriesRef.current = next;
+      setEntries(next);
+    }
   }, []);
 
   const connect = React.useCallback(async (sessionId: string) => {
@@ -955,7 +958,9 @@ export function App() {
               entriesRef.current = replacement;
               setEntries(replacement);
             } else {
-              setEntries((previous) => mergeSemanticHistory(previous, replacement));
+              const next = mergeSemanticHistory(entriesRef.current, replacement);
+              entriesRef.current = next;
+              setEntries(next);
             }
           }
           if (payload.replace) {
@@ -979,11 +984,9 @@ export function App() {
         pendingRequestsRef.current.delete(payload.requestId);
         if (payload.success) pending.resolve(payload.data);
         else {
-          setEntries((previous) => {
-            const next = previous.filter((entry) => entry.id !== pending.optimisticId);
-            entriesRef.current = next;
-            return next;
-          });
+          const next = entriesRef.current.filter((entry) => entry.id !== pending.optimisticId);
+          entriesRef.current = next;
+          setEntries(next);
           pending.reject(new Error(payload.error ?? "Request failed"));
         }
         return;
@@ -1031,9 +1034,8 @@ export function App() {
           // Atomically move the follow-up out of the editable queue and into the
           // normal transcript before the server asks Pi to begin its turn.
           setQueuedMessages((previous) => previous.filter((queued) => queued.id !== item.id));
-          setEntries((previous) => {
-            if (previous.some((entry) => entry.id === optimisticId)) return previous;
-            const next = [...previous, {
+          if (!entriesRef.current.some((entry) => entry.id === optimisticId)) {
+            const next = [...entriesRef.current, {
               id: optimisticId,
               type: "message" as const,
               timestamp: new Date().toISOString(),
@@ -1047,14 +1049,12 @@ export function App() {
               },
             }];
             entriesRef.current = next;
-            return next;
-          });
+            setEntries(next);
+          }
         } else if (event.phase === "failed") {
-          setEntries((previous) => {
-            const next = previous.filter((entry) => entry.id !== optimisticId);
-            entriesRef.current = next;
-            return next;
-          });
+          const next = entriesRef.current.filter((entry) => entry.id !== optimisticId);
+          entriesRef.current = next;
+          setEntries(next);
         }
       } else if (eventType === "message_start" && event.message && typeof event.message === "object" && (event.message as Record<string, unknown>).role === "assistant") {
         const assistant = event.message as Record<string, unknown>;
@@ -1080,28 +1080,31 @@ export function App() {
       } else if (eventType === "message_end" && event.message && typeof event.message === "object") {
         const finalized = event.message as Record<string, unknown>;
         const finalizedStreamingKey = streamingMessageKeyRef.current;
-        setEntries((previous) => {
-          const stableAssistantId = finalized.role === "assistant"
-            ? finalizedStreamingKey ?? String(finalized.id ?? finalized.timestamp ?? crypto.randomUUID())
-            : crypto.randomUUID();
-          const entry = { id: stableAssistantId, type: "message", timestamp: new Date().toISOString(), message: finalized };
-          if (finalized.role === "user") {
-            const confirmedText = messageText(finalized);
-            let optimisticIndex = previous.findIndex((item) =>
-              item.id?.startsWith("optimistic-") && item.message && messageText(item.message) === confirmedText
-            );
-            if (optimisticIndex < 0) optimisticIndex = previous.findIndex((item) => item.id?.startsWith("optimistic-"));
-            if (optimisticIndex >= 0) {
-              const next = [...previous];
-              next[optimisticIndex] = {
-                ...entry,
-                message: preserveOptimisticAttachments(finalized, previous[optimisticIndex]!),
-              };
-              return next;
-            }
+        const stableAssistantId = finalized.role === "assistant"
+          ? finalizedStreamingKey ?? String(finalized.id ?? finalized.timestamp ?? crypto.randomUUID())
+          : crypto.randomUUID();
+        const entry: SemanticEntry = { id: stableAssistantId, type: "message", timestamp: new Date().toISOString(), message: finalized };
+        let next: SemanticEntry[];
+        if (finalized.role === "user") {
+          const confirmedText = messageText(finalized);
+          let optimisticIndex = entriesRef.current.findIndex((item) =>
+            item.id?.startsWith("optimistic-") && item.message && messageText(item.message) === confirmedText
+          );
+          if (optimisticIndex < 0) optimisticIndex = entriesRef.current.findIndex((item) => item.id?.startsWith("optimistic-"));
+          if (optimisticIndex >= 0) {
+            next = [...entriesRef.current];
+            next[optimisticIndex] = {
+              ...entry,
+              message: preserveOptimisticAttachments(finalized, entriesRef.current[optimisticIndex]!),
+            };
+          } else {
+            next = [...entriesRef.current, entry];
           }
-          return [...previous, entry];
-        });
+        } else {
+          next = [...entriesRef.current, entry];
+        }
+        entriesRef.current = next;
+        setEntries(next);
         if (finalized.role === "assistant") {
           setStreamingMessage(null);
           setStreamingMessageKey(null);
@@ -1313,11 +1316,9 @@ export function App() {
       },
     };
     if (!queuedFollowUp) {
-      setEntries((previous) => {
-        const next = [...previous, optimistic];
-        entriesRef.current = next;
-        return next;
-      });
+      const next = [...entriesRef.current, optimistic];
+      entriesRef.current = next;
+      setEntries(next);
       // Let React commit and the browser paint the local user bubble before the
       // native bridge receives the prompt and renders it in the TUI.
       if (!controlCommand) await waitForVisibleBrowserPaint();
@@ -1333,11 +1334,9 @@ export function App() {
         } catch (cause) {
           pendingRequestsRef.current.delete(requestId);
           if (!queuedFollowUp) {
-            setEntries((previous) => {
-              const next = previous.filter((entry) => entry.id !== optimisticId);
-              entriesRef.current = next;
-              return next;
-            });
+            const next = entriesRef.current.filter((entry) => entry.id !== optimisticId);
+            entriesRef.current = next;
+            setEntries(next);
           }
           reject(cause instanceof Error ? cause : new Error(String(cause)));
         }
@@ -1350,7 +1349,9 @@ export function App() {
       throw cause;
     }
     if (isWebReloadCommand(message)) {
-      setEntries((previous) => previous.filter((entry) => entry.id !== optimisticId));
+      const next = entriesRef.current.filter((entry) => entry.id !== optimisticId);
+      entriesRef.current = next;
+      setEntries(next);
       const generation = ++optionsGenerationRef.current;
       await Promise.all([
         loadSessionOptions(sessionId, generation),
