@@ -1136,6 +1136,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 				|| event.type === "message_end";
 			if (catalogChanged) broadcastSessionToAll(record);
 			else broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
+			if (event.type === "agent_end") void hydrateGitMetadata(record);
 		},
 		onExit: () => {
 			record.status = "offline";
