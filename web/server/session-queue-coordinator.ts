@@ -112,7 +112,7 @@ export function createSessionQueueCoordinator(options: QueueCoordinatorOptions) 
 		// hooks time to finish, then advance the queue when no newer run has started.
 		record.queueSettleFallbackTimer = setTimeout(() => {
 			record.queueSettleFallbackTimer = undefined;
-			if (currentRecord(record.id) !== record || record.agentRunning !== false) return;
+			if (currentRecord(record.id) !== record || record.agentRunning === true) return;
 			void flushWebQueue(record);
 		}, 100);
 		record.queueSettleFallbackTimer.unref?.();
@@ -160,8 +160,9 @@ export function createSessionQueueCoordinator(options: QueueCoordinatorOptions) 
 		const payload: ServerSessionMessage = { type: "server.session", session: projectSession(record, true) };
 		socket.send(JSON.stringify(payload));
 		socket.send(JSON.stringify(webQueueEvent(record)));
-		const uncertain = record.queue.find((item) => item.deliveryState === "delivering");
-		if (uncertain) socket.send(JSON.stringify({ type: "server.event", sessionId: record.id, event: { type: "web_queue_delivery", phase: "uncertain", item: uncertain, error: "Delivery may already have been accepted; explicitly discard or confirm resubmission." } } satisfies ServerEventMessage));
+		for (const uncertain of record.queue.filter((item) => item.deliveryState === "delivering")) {
+			socket.send(JSON.stringify({ type: "server.event", sessionId: record.id, event: { type: "web_queue_delivery", phase: "uncertain", item: uncertain, error: "Delivery may already have been accepted; explicitly discard or confirm resubmission." } } satisfies ServerEventMessage));
+		}
 	}
 
 	async function flushWebQueue(record: SessionRecord): Promise<void> {
@@ -170,7 +171,7 @@ export function createSessionQueueCoordinator(options: QueueCoordinatorOptions) 
 	}
 
 	async function flushWebQueueLocked(record: SessionRecord): Promise<void> {
-		if (record.queue.length === 0 || record.queueDeliveryActive || record.status !== "idle" || hasActiveWebSubagents(record.subagents)) return;
+		if (record.queue.length === 0 || record.queueDeliveryActive || (record.status !== "idle" && record.status !== "error") || hasActiveWebSubagents(record.subagents)) return;
 		let item = record.queue[0];
 		if (!item || item.deliveryState === "delivering") return;
 		// Persist the in-flight state before handing the prompt to Pi. A transient
@@ -342,6 +343,10 @@ export function createSessionQueueCoordinator(options: QueueCoordinatorOptions) 
 				const queued = record.queue.find((item) => item.id === command.itemId);
 				if (!queued) throw new Error(`Unknown queue item ${command.itemId}`);
 				if (queued.deliveryState === "delivering") throw new Error(`Queue item ${command.itemId} has uncertain delivery`);
+				if (record.queue.some((item) => item.deliveryState === "delivering")) throw new Error("Another queued message has uncertain delivery");
+				if (isWebReloadCommand(queued.message) || parseWebCompactCommand(queued.message)) {
+					throw new Error(`${queued.message.split(/\s/, 1)[0]} must remain queued until the current run settles`);
+				}
 
 				// Make the in-flight disposition durable before handing the item to Pi. If
 				// the daemon exits after acceptance but before cleanup, restart recovery
@@ -459,13 +464,14 @@ export function createSessionQueueCoordinator(options: QueueCoordinatorOptions) 
 				clone: cloneWebQueue,
 				mutate: (queue) => {
 					const index = queue.findIndex((queued) => queued.id === item.id);
+					if (index < 0) throw new Error(`Queue item ${item.id} disappeared during reconciliation`);
 					if (command.action === "discard") queue.splice(index, 1);
 					else delete queue[index]!.deliveryState;
 				},
 				persist: () => persistWebQueue(record),
 			});
 			broadcast(record.id, webQueueEvent(record));
-			if (command.action === "resubmit") setTimeout(() => void flushWebQueue(record), 0);
+			if (command.action === "resubmit") scheduleWebQueueRetry(record);
 			});
 		}
 		throw new Error("Unsupported queue command");

@@ -42,6 +42,8 @@ test("web worktrees are created under the primary repository .pi directory", asy
 	expect(await realpath(result.path)).toBe(await realpath(join(repository, ".pi", "worktrees", "feature-one")));
 	const reused = await createWebWorktree(repository, "feature-one");
 	expect(reused).toMatchObject({ path: result.path, name: "feature-one", branch: "feature-one", branchCreated: false, setupRan: false });
+	await expect(createWebWorktree(repository, "feature-one", { startPoint: "HEAD" })).rejects.toThrow("omit the start point");
+	await expect(createWebWorktree(repository, "feature-one", { startPoint: "not-a-ref" })).rejects.toThrow("omit the start point");
 	await expect(createWebWorktree(repository, "feature-one", { branch: "different-branch" })).rejects.toThrow("not requested branch different-branch");
 	expect(result).toMatchObject({ name: "feature-one", branch: "feature-one", branchCreated: true });
 	expect((await Bun.$`git -C ${result.path} branch --show-current`.text()).trim()).toBe("feature-one");

@@ -12,6 +12,7 @@ test("terminal redraws retain only the final visible progress frame", () => {
 test("terminal output handles carriage returns, erasure, and ordinary ANSI colors", () => {
 	expect(renderTerminalOutput("0%\r50%\r100%\n\u001b[31mfailed\u001b[39m\n")).toBe("100%\nfailed\n");
 	expect(renderTerminalOutput("first\nsecond\u001b[1G\u001b[Jreplacement")).toBe("first\nreplacement");
+	expect(renderTerminalOutput("abc\u001b[2KX")).toBe("   X");
 });
 
 test("ordinary command output is unchanged", () => {

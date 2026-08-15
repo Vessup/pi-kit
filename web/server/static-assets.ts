@@ -18,20 +18,25 @@ export function createStaticAssetResponder(distDir: string): (request: Request) 
 	return (request) => {
 		const url = new URL(request.url);
 		if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws/")) return undefined;
-		const pathname = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+		let pathname: string;
+		try {
+			pathname = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+		} catch {
+			return new Response("Bad request", { status: 400 });
+		}
 		const filePath = resolve(root, pathname);
 		if (!isWithinDir(filePath, root)) return new Response("Forbidden", { status: 403 });
 		try {
-			statSync(filePath);
-			return staticFileResponse(filePath, pathname === "index.html");
+			if (statSync(filePath).isFile()) return staticFileResponse(filePath, pathname === "index.html");
 		} catch {
-			try {
-				const appShellPath = join(root, "index.html");
-				statSync(appShellPath);
-				return staticFileResponse(appShellPath, true);
-			} catch {
-				return notFound();
-			}
+			// Fall through to the app shell.
+		}
+		try {
+			const appShellPath = join(root, "index.html");
+			if (!statSync(appShellPath).isFile()) return notFound();
+			return staticFileResponse(appShellPath, true);
+		} catch {
+			return notFound();
 		}
 	};
 }

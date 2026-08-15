@@ -1676,11 +1676,11 @@ export function SemanticSession({ session, entries, historyRevision, streamingMe
                   title={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
                   aria-label={subagentsMinimized ? "Expand subagents" : "Minimize subagents"}
                   aria-expanded={!subagentsMinimized}
-                  onClick={() => setSubagentsMinimized((minimized) => {
-                    const next = !minimized;
+                  onClick={() => {
+                    const next = !subagentsMinimized;
+                    setSubagentsMinimized(next);
                     if (session?.id) saveSubagentsMinimized(session.id, next);
-                    return next;
-                  })}
+                  }}
                 >
                   {subagentsMinimized ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </button>

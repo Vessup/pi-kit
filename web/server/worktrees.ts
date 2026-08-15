@@ -488,6 +488,9 @@ export async function createWebWorktree(
 		}
 	}
 	if (pathExists) {
+		if (options.startPoint !== undefined) {
+			throw new Error(`Worktree ${path} already exists; omit the start point to reuse its current HEAD`);
+		}
 		let existing: ExistingWebWorktree;
 		try {
 			existing = inspectExistingWorktree(repoRoot, path);

@@ -10,6 +10,8 @@ const RPC_REQUEST_TIMEOUT_MS = Number.isFinite(configuredRpcTimeout) && configur
 	: 30_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const SHUTDOWN_DELIVERY_TIMEOUT_MS = Math.min(RPC_REQUEST_TIMEOUT_MS, 1_000);
+const SHUTDOWN_TERM_GRACE_MS = 500;
+const STDERR_TAIL_MAX_CHARS = 16 * 1024;
 
 type RpcResponse<T = unknown> =
 	| { id?: string; type: "response"; command: string; success: true; data?: T }
@@ -46,10 +48,19 @@ export function isUncertainRpcDeliveryCommand(command: string): boolean {
 	return command === "prompt" || command === "compact";
 }
 
+export function rpcDeliveryError(command: string, message: string): Error {
+	return isUncertainRpcDeliveryCommand(command) ? new CommandDeliveryUncertainError(message) : new Error(message);
+}
+
 export class ManagedRpcSession {
 	private readonly options: ManagedRpcSessionOptions;
 	private process: Bun.Subprocess | undefined;
+	private startPromise: Promise<void> | undefined;
+	private started = false;
+	private shutdownPromise: Promise<void> | undefined;
 	private stdoutBuffer = "";
+	private stderrTail = "";
+	private stderrPump: Promise<void> | undefined;
 	private readonly pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; command: string }>();
 	private stopped = false;
 	private readonly requestPrefix = `web-${randomUUID()}`;
@@ -63,19 +74,29 @@ export class ManagedRpcSession {
 	}
 
 	async start(): Promise<void> {
-		if (this.process) return;
+		if (this.started) return;
+		if (this.startPromise) return await this.startPromise;
+		const operation = this.startOnce();
+		this.startPromise = operation;
+		try {
+			await operation;
+			this.started = true;
+		} catch (error) {
+			this.stopped = true;
+			try { this.process?.kill("SIGKILL"); } catch { /* ignore */ }
+			throw error;
+		} finally {
+			if (this.startPromise === operation) this.startPromise = undefined;
+		}
+	}
+
+	private async startOnce(): Promise<void> {
+		if (this.stopped) throw new Error("RPC session stopped");
 		if (this.options.runtimeDirectory) mkdirSync(this.options.runtimeDirectory, { recursive: true });
-		const env = {
-			...process.env,
-			PI_WEB_MANAGED: "1",
-		};
+		const env = { ...process.env, PI_WEB_MANAGED: "1" };
 		const args = ["--mode", "rpc"];
 		if (this.options.noSession) args.push("--no-session");
 		if (this.options.name) args.push("--name", this.options.name);
-		if (this.options.sessionFile) {
-			// Start in the target cwd and switch to the existing session file immediately.
-			// This keeps the spawned process managed while preserving the existing branch history.
-		}
 		const proc = Bun.spawn({
 			cmd: ["pi", ...args],
 			cwd: this.options.cwd,
@@ -88,19 +109,27 @@ export class ManagedRpcSession {
 		void this.pumpStdout(proc).catch((error) => {
 			this.failAllPending(error instanceof Error ? error : new Error(String(error)));
 		});
-		this.pumpStderr(proc).catch(() => undefined);
-		proc.exited.then((code: number) => {
+		this.stderrPump = this.pumpStderr(proc).catch(() => undefined);
+		void proc.exited.then(async (code: number) => {
+			await this.stderrPump;
+			const expected = this.stopped;
+			this.started = false;
 			this.stopped = true;
+			if (this.process === proc) this.process = undefined;
 			this.options.onExit(code, null);
+			const detail = this.stderrTail.trim();
+			if (detail && (!expected || code !== 0)) console.error(`RPC process exited with code ${code}: ${detail}`);
 			this.failAllPending(new Error(`RPC process exited with code ${code}`));
 		}).catch((error: unknown) => {
+			this.started = false;
 			this.stopped = true;
+			if (this.process === proc) this.process = undefined;
 			this.options.onExit(null, error instanceof Error ? error.message : String(error));
 			this.failAllPending(error instanceof Error ? error : new Error(String(error)));
 		});
-		await this.send({ type: "get_state" });
+		await this.sendToStartedProcess({ type: "get_state" });
 		if (this.options.sessionFile) {
-			await this.send({ type: "switch_session", sessionPath: this.options.sessionFile });
+			await this.sendToStartedProcess({ type: "switch_session", sessionPath: this.options.sessionFile });
 		}
 	}
 
@@ -138,15 +167,22 @@ export class ManagedRpcSession {
 		const stream = (proc as unknown as { stderr?: ReadableStream<Uint8Array> }).stderr;
 		if (!stream) return;
 		const reader = stream.getReader();
+		const decoder = new TextDecoder();
 		try {
-			// Keep the pipe drained so the child cannot block, but do not retain its
-			// unbounded diagnostics for the lifetime of the managed session.
-			while (!(await reader.read()).done) {
-				// discarded
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				this.appendStderr(decoder.decode(value, { stream: true }));
 			}
+			this.appendStderr(decoder.decode());
 		} finally {
 			reader.releaseLock();
 		}
+	}
+
+	private appendStderr(text: string): void {
+		if (!text) return;
+		this.stderrTail = `${this.stderrTail}${text}`.slice(-STDERR_TAIL_MAX_CHARS);
 	}
 
 	private handleLine(line: string): void {
@@ -154,7 +190,8 @@ export class ManagedRpcSession {
 		try {
 			parsed = JSON.parse(line) as RpcEvent;
 		} catch (error) {
-			this.failAllPending(new Error(`Invalid JSONL from RPC child: ${error instanceof Error ? error.message : String(error)}`));
+			const preview = line.length > 500 ? `${line.slice(0, 500)}…` : line;
+			console.warn(`Ignoring invalid JSONL from RPC child (${error instanceof Error ? error.message : String(error)}): ${preview}`);
 			return;
 		}
 		if (!parsed || typeof parsed !== "object" || typeof parsed.type !== "string") return;
@@ -206,9 +243,7 @@ export class ManagedRpcSession {
 		for (const [id, pending] of this.pending.entries()) {
 			this.pending.delete(id);
 			try {
-				pending.reject(isUncertainRpcDeliveryCommand(pending.command)
-					? new CommandDeliveryUncertainError(error.message)
-					: error);
+				pending.reject(rpcDeliveryError(pending.command, error.message));
 			} catch {
 				// ignore
 			}
@@ -236,7 +271,7 @@ export class ManagedRpcSession {
 		const operation = (async () => {
 			if (!bypassReloadBarrier && this.reloadInFlight) await this.reloadInFlight;
 			if (this.stopped) throw new Error("RPC session stopped");
-			if (!this.process) await this.start();
+			if (!this.started) await this.start();
 			let writeStarted = false;
 			await this.writeLine(
 				`${JSON.stringify({ id: `${this.requestPrefix}-${randomUUID()}`, ...command })}\n`,
@@ -270,11 +305,19 @@ export class ManagedRpcSession {
 	): Promise<T> {
 		if (!bypassReloadBarrier && this.reloadInFlight) await this.reloadInFlight;
 		if (this.stopped) throw new Error("RPC session stopped");
-		if (!this.process) await this.start();
+		if (!this.started) await this.start();
+		return await this.sendToStartedProcess<T>(command, timeoutMs);
+	}
+
+	private sendToStartedProcess<T = unknown>(
+		command: Record<string, unknown>,
+		timeoutMs: number | null = RPC_REQUEST_TIMEOUT_MS,
+	): Promise<T> {
+		if (!this.process) return Promise.reject(new Error("RPC process is not running"));
 		const id = `${this.requestPrefix}-${randomUUID()}`;
 		const payload = { id, ...command };
 		const commandName = typeof command.type === "string" ? command.type : "unknown";
-		return await new Promise<T>((resolve, reject) => {
+		return new Promise<T>((resolve, reject) => {
 			let timeout: ReturnType<typeof setTimeout> | undefined;
 			const clearRequestTimeout = () => {
 				if (timeout) clearTimeout(timeout);
@@ -295,8 +338,7 @@ export class ManagedRpcSession {
 					const pending = this.pending.get(id);
 					if (!pending) return;
 					this.pending.delete(id);
-					const message = `RPC command ${pending.command} timed out after ${timeoutMs}ms`;
-					pending.reject(isUncertainRpcDeliveryCommand(pending.command) ? new CommandDeliveryUncertainError(message) : new Error(message));
+					pending.reject(rpcDeliveryError(pending.command, `RPC command ${pending.command} timed out after ${timeoutMs}ms`));
 				}, timeoutMs);
 			}
 			void this.writeLine(`${JSON.stringify(payload)}\n`, () => this.pending.has(id)).catch((error: unknown) => {
@@ -304,7 +346,7 @@ export class ManagedRpcSession {
 				if (!pending) return;
 				this.pending.delete(id);
 				const cause = error instanceof Error ? error : new Error(String(error));
-				pending.reject(isUncertainRpcDeliveryCommand(commandName) ? new CommandDeliveryUncertainError(cause.message) : cause);
+				pending.reject(rpcDeliveryError(commandName, cause.message));
 			});
 		});
 	}
@@ -442,7 +484,7 @@ export class ManagedRpcSession {
 
 	async respondToExtensionUi(command: Extract<RpcSessionCommand, { type: "extension_ui_response" }>): Promise<void> {
 		if (this.stopped) throw new Error("RPC session stopped");
-		if (!this.process) await this.start();
+		if (!this.started) await this.start();
 		await this.writeLine(`${JSON.stringify(command)}\n`);
 	}
 
@@ -451,7 +493,19 @@ export class ManagedRpcSession {
 	}
 
 	async shutdown(): Promise<void> {
-		if (!this.process || this.stopped) return;
+		if (this.shutdownPromise) return await this.shutdownPromise;
+		const operation = this.shutdownOnce();
+		this.shutdownPromise = operation;
+		try {
+			await operation;
+		} finally {
+			if (this.shutdownPromise === operation) this.shutdownPromise = undefined;
+		}
+	}
+
+	private async shutdownOnce(): Promise<void> {
+		const proc = this.process;
+		if (!proc || this.stopped) return;
 		try {
 			// Shutdown only needs confirmed stdin delivery, not an RPC response. A
 			// wedged child may never acknowledge abort and must not hold deletion or
@@ -462,10 +516,26 @@ export class ManagedRpcSession {
 		}
 		this.stopped = true;
 		this.failAllPending(new Error("RPC session stopped"));
+		try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+		if (!await this.waitForExit(proc, SHUTDOWN_TERM_GRACE_MS)) {
+			try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+			await proc.exited.catch(() => undefined);
+		}
+		if (this.process === proc) this.process = undefined;
+	}
+
+	private async waitForExit(proc: Bun.Subprocess, timeoutMs: number): Promise<boolean> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			(this.process as unknown as { kill?: (signal?: string) => void }).kill?.("SIGTERM");
-		} catch {
-			// ignore
+			return await Promise.race([
+				proc.exited.then(() => true, () => true),
+				new Promise<false>((resolve) => {
+					timer = setTimeout(() => resolve(false), timeoutMs);
+					timer.unref?.();
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
 		}
 	}
 }

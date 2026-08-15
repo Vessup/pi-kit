@@ -50,50 +50,9 @@ import { assertClientPromptPayloadFits } from "./image-payload";
 import { displaySessionStatus } from "./session-status";
 import { agentEndTerminalNotice } from "../assistant-message";
 import { localCommandEntryId, preserveLocalCommandEntries } from "./local-command";
+import { mergeSemanticHistory, preserveSemanticEntryKeys, semanticHistoriesEqual } from "./semantic-history";
 
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
-
-function semanticEntryIdentity(entry: SemanticEntry): string | undefined {
-  const message = entry.message;
-  if (typeof message?.id === "string") return `id:${message.id}`;
-  const role = typeof message?.role === "string" ? message.role : "";
-  const timestamp = typeof message?.timestamp === "number" || typeof message?.timestamp === "string" ? String(message.timestamp) : "";
-  if (timestamp) return `${role}:${timestamp}`;
-  if (entry.id && !entry.id.startsWith("optimistic-")) return `entry:${entry.id}`;
-  return undefined;
-}
-
-function preserveSemanticEntryKeys(previous: SemanticEntry[], incoming: SemanticEntry[]): SemanticEntry[] {
-  const previousIds = new Map<string, string>();
-  for (const entry of previous) {
-    const identity = semanticEntryIdentity(entry);
-    if (identity && entry.id && !entry.id.startsWith("optimistic-")) previousIds.set(identity, entry.id);
-  }
-  return incoming.map((entry) => {
-    const identity = semanticEntryIdentity(entry);
-    const id = identity ? previousIds.get(identity) : undefined;
-    return id ? { ...entry, id } : entry;
-  });
-}
-
-function mergeSemanticHistory(previous: SemanticEntry[], incoming: SemanticEntry[]): SemanticEntry[] {
-  const reconciled = preserveSemanticEntryKeys(previous, incoming);
-  const incomingIdentities = new Set(reconciled.map(semanticEntryIdentity).filter((identity): identity is string => Boolean(identity)));
-  const retained = previous.filter((entry) => {
-    const identity = semanticEntryIdentity(entry);
-    return identity ? !incomingIdentities.has(identity) : false;
-  });
-  return [...reconciled, ...retained];
-}
-
-function semanticHistoriesEqual(previous: SemanticEntry[], incoming: SemanticEntry[]): boolean {
-  if (previous.length !== incoming.length) return false;
-  return previous.every((entry, index) => {
-    const next = incoming[index];
-    if (!next || entry.id !== next.id) return false;
-    try { return JSON.stringify(entry) === JSON.stringify(next); } catch { return false; }
-  });
-}
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
 
@@ -988,7 +947,7 @@ export function App() {
         if (payload.sessionId === selectedIdRef.current) {
           const incoming = payload.entries;
           const replacement = incoming && (payload.replace || switchingSessions)
-            ? preserveLocalCommandEntries(entriesRef.current, incoming)
+            ? preserveSemanticEntryKeys(entriesRef.current, preserveLocalCommandEntries(entriesRef.current, incoming))
             : incoming;
           const transcriptChanged = Boolean(payload.replace && replacement && (switchingSessions || !semanticHistoriesEqual(entriesRef.current, replacement)));
           if (replacement) {

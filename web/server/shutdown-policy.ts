@@ -11,6 +11,10 @@ export function shouldContinueManagedShutdownWait(busyCount: number): boolean {
 	return busyCount > 0;
 }
 
+export function shouldRejectDuringShutdown(message: { type: string; command?: { type?: string } }): boolean {
+	return message.type === "client.prompt" || (message.type === "client.command" && message.command?.type !== "abort");
+}
+
 /** A graceful daemon restart must not abort work owned by a managed RPC child. */
 export function shouldWaitForManagedShutdown(record: ManagedShutdownState): boolean {
 	return Boolean(record.managed && record.active && (

@@ -31,7 +31,6 @@ export function renderTerminalOutput(source: string): string {
 		const line = currentRow();
 		if (mode === 2) {
 			line.length = 0;
-			column = 0;
 		} else if (mode === 0) line.length = Math.min(column, line.length);
 		else if (mode === 1) {
 			for (let index = 0; index <= Math.min(column, line.length - 1); index += 1) line[index] = " ";

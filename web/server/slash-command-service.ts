@@ -1,5 +1,6 @@
+import type { WebSlashCommand } from "../protocol.js";
 import type { ExpandableSlashCommand } from "../slash-commands.js";
-import { WEB_COMPACT_COMMAND } from "../compact-command.js";
+import { includeWebCompactCommand } from "../compact-command.js";
 import type { ManagedRpcSession } from "./managed-rpc-session.js";
 
 export type DiscoveredSlashCommand = ExpandableSlashCommand & {
@@ -9,10 +10,12 @@ export type DiscoveredSlashCommand = ExpandableSlashCommand & {
 
 export class SlashCommandService {
 	private readonly cache = new Map<string, { loadedAt: number; commands: DiscoveredSlashCommand[] }>();
+	private readonly inFlight = new Map<string, Promise<DiscoveredSlashCommand[]>>();
 
 	constructor(
 		private readonly normalizePath: (path: string) => string,
 		private readonly createRuntime: (cwd: string) => ManagedRpcSession,
+		private readonly discoverTimeoutMs = 10_000,
 	) {}
 
 	parse(values: Array<Record<string, unknown>>): DiscoveredSlashCommand[] {
@@ -39,15 +42,33 @@ export class SlashCommandService {
 		const key = this.normalizePath(cwd);
 		const cached = this.cache.get(key);
 		if (cached && Date.now() - cached.loadedAt < 30_000) return cached.commands;
+		const active = this.inFlight.get(key);
+		if (active) return active;
+		const pending = this.load(cwd, key).finally(() => this.inFlight.delete(key));
+		this.inFlight.set(key, pending);
+		return pending;
+	}
+
+	private async load(cwd: string, key: string): Promise<DiscoveredSlashCommand[]> {
 		const runtime = this.createRuntime(cwd);
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			await runtime.start();
-			const { commands } = await runtime.getCommands();
-			const parsed = this.parse(commands);
+			const parsed = await Promise.race([
+				(async () => {
+					await runtime.start();
+					const { commands } = await runtime.getCommands();
+					return this.parse(commands);
+				})(),
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(() => reject(new Error(`Slash command discovery timed out for ${cwd}`)), this.discoverTimeoutMs);
+					timer.unref?.();
+				}),
+			]);
 			this.cache.set(key, { loadedAt: Date.now(), commands: parsed });
 			return parsed;
 		} finally {
-			await runtime.shutdown();
+			if (timer) clearTimeout(timer);
+			await runtime.shutdown().catch(() => undefined);
 		}
 	}
 
@@ -55,8 +76,8 @@ export class SlashCommandService {
 		this.cache.delete(this.normalizePath(cwd));
 	}
 
-	toWeb(commands: readonly DiscoveredSlashCommand[], includeExtensions = false): Array<Record<string, unknown>> {
-		const visible = commands
+	toWeb(commands: readonly DiscoveredSlashCommand[], includeExtensions = false): WebSlashCommand[] {
+		const visible: WebSlashCommand[] = commands
 			.filter((command) => command.name !== "web-reload" && (includeExtensions || command.source === "prompt" || command.source === "skill" || command.name === "worktree"))
 			.map((command) => ({
 				name: command.name,
@@ -67,14 +88,6 @@ export class SlashCommandService {
 		if (!visible.some((command) => command.name === "reload")) {
 			visible.unshift({ name: "reload", description: "Reload extensions, skills, prompts, themes, and context files", source: "extension", location: "temporary" });
 		}
-		if (!visible.some((command) => command.name === "compact")) {
-			visible.unshift({
-				name: WEB_COMPACT_COMMAND.name,
-				description: WEB_COMPACT_COMMAND.description,
-				source: "extension",
-				location: "temporary",
-			});
-		}
-		return visible;
+		return includeWebCompactCommand(visible);
 	}
 }

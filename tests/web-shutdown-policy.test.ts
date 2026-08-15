@@ -1,11 +1,17 @@
 import { expect, test } from "bun:test";
-import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "../web/server/shutdown-policy.ts";
+import { shouldContinueManagedShutdownWait, shouldRejectDuringShutdown, shouldWaitForManagedShutdown } from "../web/server/shutdown-policy.ts";
 
 const base = { managed: {}, active: true, status: "idle" as const };
 
 test("graceful shutdown waits without a deadline until managed work settles", () => {
 	expect(shouldContinueManagedShutdownWait(1)).toBe(true);
 	expect(shouldContinueManagedShutdownWait(0)).toBe(false);
+});
+
+test("shutdown draining keeps Stop available while rejecting new work", () => {
+	expect(shouldRejectDuringShutdown({ type: "client.command", command: { type: "abort" } })).toBe(false);
+	expect(shouldRejectDuringShutdown({ type: "client.command", command: { type: "set_model" } })).toBe(true);
+	expect(shouldRejectDuringShutdown({ type: "client.prompt" })).toBe(true);
 });
 
 test("graceful daemon shutdown waits for managed main-agent work", () => {

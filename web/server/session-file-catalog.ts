@@ -154,7 +154,7 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 		return undefined;
 	}
 
-	function extractSessionMetadataFromEntries(entries: unknown[]): Partial<WebSession> {
+	function extractSessionMetadataFromEntries(entries: unknown[]): Pick<WebSession, "name" | "model" | "thinkingLevel" | "parentSession" | "messageCount"> {
 		let name: string | undefined;
 		let model: string | undefined;
 		let thinkingLevel: string | undefined;
@@ -220,7 +220,6 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 				file,
 				cwd,
 				name: meta.name,
-				branch: meta.branch,
 				model: meta.model,
 				thinkingLevel: meta.thinkingLevel,
 				status: "offline",
@@ -265,11 +264,22 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 		}
 	}
 
+	function freshMetadataScan(scan: SessionFileScan, file: string): SessionFileScan {
+		return {
+			...scan,
+			session: { ...scan.session, source: isManagedSessionFile(file) ? "web" : "saved" },
+			history: [...scan.history],
+			entries: [...scan.entries],
+		};
+	}
+
 	function parseSessionMetadataFile(file: string): SessionFileScan | undefined {
 		try {
 			const stats = statSync(file);
 			const cached = savedSessionMetadataCache.get(file);
-			if (cached?.ino === stats.ino && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached.scan;
+			if (cached?.ino === stats.ino && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+				return freshMetadataScan(cached.scan, file);
+			}
 			const incremental = cached !== undefined && cached.ino === stats.ino && stats.size > cached.size;
 			const start = incremental ? cached.parsedBytes : 0;
 			const rawText = incremental ? readFileSuffix(file, start, stats.size) : readFileSync(file, "utf8");
@@ -345,7 +355,7 @@ export function createSessionFileCatalog(options: { sessionsDir: string; managed
 				replacement: replacementFromEntries(metadataEntries),
 			};
 			savedSessionMetadataCache.set(file, { ino: stats.ino, mtimeMs: stats.mtimeMs, size: stats.size, parsedBytes, scan, metadataEntries });
-			return scan;
+			return freshMetadataScan(scan, file);
 		} catch {
 			return undefined;
 		}

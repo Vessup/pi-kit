@@ -53,8 +53,9 @@ import { CoalescedQueueStoreWriter, readQueueStore } from "./queue-store.js";
 import { ManagedSessionStore } from "./managed-session-store.js";
 import { preserveRetryAroundQuiescence, quiesceQueueMutations } from "./queue-mutation.js";
 import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js";
-import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
+import { shouldContinueManagedShutdownWait, shouldRejectDuringShutdown, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
+import { normalizeLegacySessionUpdate } from "./session-lifecycle.js";
 import { boundedWebHistory, messagesToWebHistory, WEB_HISTORY_MAX_BYTES, WEB_HISTORY_MAX_ENTRIES, webHistoryByteLength } from "../history.js";
 import { agentEndTerminalNotice, assistantTerminalNotice } from "../assistant-message.js";
 import { CommandDeliveryUncertainError, CommandRejectedError, isUncertainRpcDeliveryCommand, ManagedRpcSession, type ManagedRpcSessionOptions } from "./managed-rpc-session.js";
@@ -1264,7 +1265,7 @@ async function handleClientMessage(socket: Bun.ServerWebSocket<ClientSocketData>
 		return;
 	}
 	if (!socket.data.authed) throw new Error("Client must send a hello message first");
-	if (shutdownStarted && (message.type === "client.prompt" || message.type === "client.command")) {
+	if (shutdownStarted && shouldRejectDuringShutdown(message)) {
 		throw new Error("Pi Web is waiting for active sessions to finish before restarting");
 	}
 	if (message.type === "client.subscribe") {
@@ -1441,7 +1442,8 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 		return await routeQueueCommand(record, command);
 	}
 	if (command.type === "reload" && record.managed) {
-		if (record.status !== "idle" || hasActiveWebSubagents(record.subagents)) throw new Error("Wait for Pi and its subagents to become idle before reloading");
+		const settled = (record.status === "idle" || record.status === "error") && record.agentRunning !== true;
+		if (!settled || hasActiveWebSubagents(record.subagents)) throw new Error("Wait for Pi and its subagents to become idle before reloading");
 		await record.managed.reload();
 		await refreshManagedSession(record);
 		record.status = "idle";
@@ -1666,8 +1668,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		record.status = hello.session.status;
 		record.agentRunning = hello.session.status === "working";
 		record.updatedAt = hello.session.updatedAt;
-		const uncertain = record.queue.find((item) => item.deliveryState === "delivering");
-		if (uncertain) {
+		for (const uncertain of record.queue.filter((item) => item.deliveryState === "delivering")) {
 			broadcastQueueDelivery(
 				record,
 				uncertain,
@@ -1806,11 +1807,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		// Older bridge runtimes reported `working` again immediately after their
 		// authoritative agent_end event. Preserve the lifecycle event until a new
 		// agent_start arrives so completed runs cannot get stuck visually working.
-		const lifecycleSession = existing?.status === "error" && update.session.status === "idle"
-			? { ...update.session, status: "error" as const }
-			: existing?.agentRunning === false && update.session.status === "working"
-				? { ...update.session, status: "idle" as const }
-				: update.session;
+		const lifecycleSession = normalizeLegacySessionUpdate(existing, update.session);
 		// Older native bridges keep reporting their initial preview. Preserve
 		// message_end/file-derived metadata after hello during rolling upgrades.
 		const session = existing ? { ...lifecycleSession, preview: existing.preview } : lifecycleSession;

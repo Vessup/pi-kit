@@ -1,11 +1,7 @@
 export function jsonResponse(value: unknown, init?: ResponseInit): Response {
-	return new Response(JSON.stringify(value), {
-		status: init?.status ?? 200,
-		headers: {
-			"content-type": "application/json; charset=utf-8",
-			...(init?.headers ?? {}),
-		},
-	});
+	const headers = new Headers(init?.headers);
+	if (!headers.has("content-type")) headers.set("content-type", "application/json; charset=utf-8");
+	return new Response(JSON.stringify(value), { ...init, status: init?.status ?? 200, headers });
 }
 
 export function textResponse(value: string, init?: ResponseInit): Response {
