@@ -16,7 +16,7 @@ test("clone and fork outlive the server's 30-second operation bound", () => {
 	expect(sessionCommandTimeout({ type: "create_worktree", existing: "/repo/worktree" })).toBeGreaterThanOrEqual(10 * 60_000);
 	expect(sessionCommandTimeout({ type: "create_worktree_v2", repository: "/repo", name: "pr-30", branch: "owner/topic", startPoint: "origin/owner/topic" })).toBeGreaterThanOrEqual(10 * 60_000);
 	expect(sessionCommandTimeout({ type: "reload" })).toBeGreaterThanOrEqual(10 * 60_000);
-	expect(sessionCommandTimeout({ type: "abort" })).toBe(15_000);
+	expect(sessionCommandTimeout({ type: "abort" })).toBeGreaterThan(30_000);
 });
 
 test("worktree capability is refreshed for each create request", async () => {

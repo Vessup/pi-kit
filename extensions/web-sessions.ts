@@ -510,12 +510,17 @@ async function executeAgentCommand(
 				return;
 			}
 			case "abort":
-				await abortSessionAndSubagents({
+				// Acknowledge delivery before waiting for the main run and subagents to
+				// settle. Compaction can delay that teardown well past the browser's
+				// command bound even though Stop has already taken effect.
+				respond(state, requestId, true, { accepted: true });
+				void abortSessionAndSubagents({
 					sessionId: state.session.id,
 					abortMain: () => state.ctx.abort(),
 					emit: (request) => pi.events.emit(SUBAGENT_ABORT_EVENT, request),
+				}).catch((error) => {
+					console.error(`Pi web Stop failed after acknowledgement: ${error instanceof Error ? error.message : String(error)}`);
 				});
-				respond(state, requestId, true);
 				return;
 			case "replace_queue":
 				respond(state, requestId, true);

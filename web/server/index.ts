@@ -2790,7 +2790,12 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 			case "prompt":
 				return await record.managed.prompt(command.message, command.streamingBehavior, command.images);
 			case "abort":
-				return await record.managed.abort();
+				// Stop is accepted once its RPC request is written. Do not hold the web
+				// response open while compaction and subagent teardown finish.
+				void record.managed.abort().catch((error) => {
+					console.error(`Managed Stop failed after acknowledgement for ${record.id}: ${error instanceof Error ? error.message : String(error)}`);
+				});
+				return { accepted: true };
 			case "bash":
 				return await record.managed.bash(command.command);
 			case "clone": {
@@ -2828,6 +2833,12 @@ async function routeCommandCore(record: SessionRecord, command: ClientCommandMes
 		}
 		const target = Array.from(record.agentSockets)[0];
 		const requestId = randomUUID();
+		if (command.type === "abort") {
+			// Socket delivery is the acknowledgement boundary. New bridges also reply
+			// before teardown, but this keeps Stop responsive with older bridges.
+			target.send(JSON.stringify({ type: "agent.command", requestId, command: externalCommand } satisfies { type: "agent.command"; requestId: string; command: ClientCommandMessage["command"] }));
+			return { accepted: true };
+		}
 		const data = await new Promise<unknown>((resolve, reject) => {
 			const timeoutMs = command.type === "compact" || command.type === "bash" || command.type === "create_worktree" || command.type === "create_worktree_v2" || command.type === "reload"
 				? LONG_RUNNING_COMMAND_TIMEOUT_MS

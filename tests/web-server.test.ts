@@ -799,6 +799,57 @@ test("TUI metadata changes update every connected web catalog", async () => {
 	}
 }, 10_000);
 
+test("Stop acknowledges delivery without waiting for agent teardown", async () => {
+	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-stop-ack-test-"));
+	const statePath = join(tempDir, "web", "server.json");
+	child = Bun.spawn({
+		cmd: ["bun", "run", "web/server/index.ts"], cwd: process.cwd(),
+		env: { ...process.env, PI_WEB_PORT: "0", PI_WEB_ROOT: process.cwd(), PI_WEB_STATE_FILE: statePath, PI_CODING_AGENT_DIR: join(tempDir, "pi-agent") },
+		stdout: "ignore", stderr: "ignore",
+	});
+	const { port } = await waitForState(statePath);
+	const sessionId = `stop-${crypto.randomUUID()}`;
+	const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
+	let resolveAbortDelivered!: () => void;
+	const abortDelivered = new Promise<void>((resolve) => { resolveAbortDelivered = resolve; });
+	agent.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; command?: { type?: string } };
+		if (message.type === "agent.command" && message.command?.type === "abort") resolveAbortDelivered();
+		// Deliberately never acknowledge the agent command. The daemon should have
+		// already acknowledged socket delivery to the browser.
+	};
+	await new Promise<void>((resolve, reject) => {
+		agent.onopen = () => {
+			agent.send(JSON.stringify({
+				type: "agent.hello",
+				session: { id: sessionId, cwd: tempDir, status: "working", source: "tui", createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+				entries: [],
+			}));
+			resolve();
+		};
+		agent.onerror = () => reject(new Error("Stop acknowledgement agent socket failed"));
+	});
+	const registrationDeadline = Date.now() + 3_000;
+	while (Date.now() < registrationDeadline) {
+		const catalog = await fetch(`http://127.0.0.1:${port}/api/sessions`).then((response) => response.json()) as { sessions: Array<{ id: string }> };
+		if (catalog.sessions.some((session) => session.id === sessionId)) break;
+		await Bun.sleep(25);
+	}
+	try {
+		const result = await Promise.race([
+			sessionCommand(`ws://127.0.0.1:${port}/ws/client`, sessionId, { type: "abort" }),
+			Bun.sleep(2_000).then(() => { throw new Error("Stop waited for agent teardown"); }),
+		]);
+		expect(result).toEqual({ accepted: true });
+		await Promise.race([
+			abortDelivered,
+			Bun.sleep(2_000).then(() => { throw new Error("Stop was acknowledged without being delivered"); }),
+		]);
+	} finally {
+		agent.close();
+	}
+}, 10_000);
+
 test("an idle native session flushes its restored web follow-up queue on hello", async () => {
 	tempDir = await mkdtemp(join(tmpdir(), "pi-kit-restored-queue-test-"));
 	const statePath = join(tempDir, "web", "server.json");
