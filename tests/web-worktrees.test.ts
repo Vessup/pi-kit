@@ -327,8 +327,13 @@ test("async managed cleanup yields before spawning Git verification", async () =
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const elapsed = Number((await new Response(probe.stdout).text()).trim());
-	expect(await probe.exited).toBe(0);
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(probe.stdout).text(),
+		new Response(probe.stderr).text(),
+		probe.exited,
+	]);
+	if (exitCode !== 0) throw new Error(`Async cleanup probe failed: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
+	const elapsed = Number(stdout.trim());
 	expect(elapsed).toBeLessThan(500);
 }, 5_000);
 

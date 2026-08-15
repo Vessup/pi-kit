@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import {
+import subagentsExtension, {
 	abortRunningSubagentSessions,
 	appendBoundedStreamingText,
 	countsAgainstSubagentLimit,
@@ -18,6 +18,27 @@ import {
 	subagentModelGuidance,
 	subagentModelRuntime,
 } from "../extensions/subagents.ts";
+
+test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
+	const tools: string[] = [];
+	const commands: string[] = [];
+	const hooks: string[] = [];
+	const events: string[] = [];
+	const pi = {
+		events: { on(name: string) { events.push(name); }, emit() {} },
+		on(name: string) { hooks.push(name); },
+		registerTool(tool: { name: string }) { tools.push(tool.name); },
+		registerCommand(name: string) { commands.push(name); },
+		getActiveTools() { return []; },
+	};
+
+	subagentsExtension(pi as never);
+
+	assert.deepEqual(tools, ["subagent_create", "subagent_read", "subagent_send", "subagent_configure", "subagent_terminate"]);
+	assert.deepEqual(commands, ["subagents", "subagents-cleanup"]);
+	assert.deepEqual(hooks, ["before_agent_start", "session_start", "input", "agent_start", "agent_settled", "session_shutdown"]);
+	assert.deepEqual(events, ["vessup:subagents:abort"]);
+});
 
 const usage = {
 	input: 10,

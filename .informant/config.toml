@@ -14,7 +14,7 @@ prepare = """
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends git
+apt-get install -y --no-install-recommends git lsof
 rm -rf /var/lib/apt/lists/*
 cd "$INFORMANT_PREPARE_ROOT"
 bun install --frozen-lockfile --ignore-scripts
