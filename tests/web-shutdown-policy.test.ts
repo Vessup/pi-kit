@@ -3,10 +3,9 @@ import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from 
 
 const base = { managed: {}, active: true, status: "idle" as const };
 
-test("graceful shutdown waits without a deadline until work settles or shutdown is forced", () => {
-	expect(shouldContinueManagedShutdownWait(1, false)).toBe(true);
-	expect(shouldContinueManagedShutdownWait(1, true)).toBe(false);
-	expect(shouldContinueManagedShutdownWait(0, false)).toBe(false);
+test("graceful shutdown waits without a deadline until managed work settles", () => {
+	expect(shouldContinueManagedShutdownWait(1)).toBe(true);
+	expect(shouldContinueManagedShutdownWait(0)).toBe(false);
 });
 
 test("graceful daemon shutdown waits for managed main-agent work", () => {

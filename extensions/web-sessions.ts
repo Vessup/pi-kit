@@ -38,6 +38,7 @@ import { expandSlashCommand, isSkillSlashCommand } from "../web/slash-commands.j
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
 import { WEB_COMPACT_COMMAND } from "../web/compact-command.js";
 import { boundedWebHistory } from "../web/history.js";
+import { agentEndTerminalNotice } from "../web/assistant-message.js";
 import { managedWorktreeFromEntries } from "../web/server/worktrees.js";
 import { readWebTailscaleSetting, writeWebTailscaleSetting } from "./web-settings.js";
 import {
@@ -1117,15 +1118,17 @@ export default function webSessions(pi: ExtensionAPI): void {
 		forward(event, ctx);
 	});
 	pi.on("agent_start", (event, ctx) => forward(event, ctx, "working"));
-	// The visible run is complete at agent_end. agent_settled remains the
-	// authoritative point for queue delivery and teardown, but the session must
-	// not keep presenting itself as working while those final hooks drain.
-	pi.on("agent_end", (event, ctx) => forward(event, ctx, "idle"));
+	// The visible run is complete at agent_end. Surface provider/runtime failures
+	// instead of making an unfinished transcript look successfully idle.
+	pi.on("agent_end", (event, ctx) => {
+		const status = agentEndTerminalNotice(event)?.kind === "error" ? "error" : "idle";
+		forward(event, ctx, status);
+	});
 	pi.on("agent_settled", (event, ctx) => {
 		if (bridge?.session.compaction) {
 			endBridgeCompaction(bridge, { aborted: false, willRetry: false, errorMessage: "Compaction stopped before completion" });
 		}
-		forward(event, ctx, "idle");
+		forward(event, ctx, bridge?.session.status === "error" ? "error" : "idle");
 	});
 	pi.on("turn_start", (event, ctx) => forward(event, ctx, "working"));
 	pi.on("turn_end", (event, ctx) => forward(event, ctx));

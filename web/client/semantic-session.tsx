@@ -75,6 +75,7 @@ import { totalSubagentUsage } from "./usage";
 import { toolHasArgumentDetails } from "./tool-expansion";
 import { cn } from "./lib/utils";
 import { moveWebQueuedMessage, type SemanticImage, type WebQueuedMessage, type WebQueueReplacement, type WebSession, type WebSessionOptions, type WebSlashCommand, type WebSubagent, type WebUsage } from "../protocol";
+import { assistantTerminalNotice } from "../assistant-message";
 import { assertClientPromptPayloadFits } from "./image-payload";
 
 export type SemanticEntry = {
@@ -821,6 +822,7 @@ const MessageCard = React.memo(function MessageCard({
 }) {
   const role = typeof message.role === "string" ? message.role : "assistant";
   const parts = displayContentParts(message);
+  const terminalNotice = assistantTerminalNotice(message);
   const messageTime = formatMessageTime(message.timestamp);
   const fullTimestamp = formatFullTimestamp(message.timestamp);
   if (role === "toolResult") return null;
@@ -853,6 +855,12 @@ const MessageCard = React.memo(function MessageCard({
           }
           return null;
         })}
+        {terminalNotice && (
+          <div className={cn("semantic-terminal-notice", `is-${terminalNotice.kind}`)} role="alert">
+            <strong>{terminalNotice.title}</strong>
+            <span>{terminalNotice.detail}</span>
+          </div>
+        )}
         </div>
       </div>
     </article>

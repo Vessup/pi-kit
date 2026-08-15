@@ -48,6 +48,7 @@ import { includeWebCompactCommand, parseWebCompactCommand } from "../compact-com
 import { includeWebReloadCommand, isWebReloadCommand } from "../reload-command";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { displaySessionStatus } from "./session-status";
+import { agentEndTerminalNotice } from "../assistant-message";
 
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
 
@@ -1023,13 +1024,16 @@ export function App() {
       const event = payload.event;
       const eventType = String(event.type ?? "");
       if (eventType === "agent_start" || eventType === "turn_start" || eventType === "agent_end" || eventType === "agent_settled") {
+        const terminalNotice = eventType === "agent_end" ? agentEndTerminalNotice(event) : undefined;
         const applyLifecycle = (session: WebSession): WebSession => {
           if (eventType === "agent_start" || eventType === "turn_start") return { ...session, status: "working" };
           if (eventType === "agent_end" && session.compaction) return session;
+          if (terminalNotice?.kind === "error" || (eventType === "agent_settled" && session.status === "error")) return { ...session, status: "error" };
           return { ...session, status: "idle" };
         };
         setCurrentSession((current) => current?.id === payload.sessionId ? applyLifecycle(current) : current);
         setSessions((previous) => previous.map((session) => session.id === payload.sessionId ? applyLifecycle(session) : session));
+        if (eventType === "agent_end" || eventType === "agent_settled") setActiveTools([]);
       }
       if (eventType === "subagents_update") {
         const updates = Array.isArray(event.agents) ? event.agents as WebSubagentUpdate[] : [];

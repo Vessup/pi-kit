@@ -55,6 +55,7 @@ import { runManagedRefresh, serializeManagedRefresh } from "./refresh-policy.js"
 import { shouldContinueManagedShutdownWait, shouldWaitForManagedShutdown } from "./shutdown-policy.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
 import { boundedWebHistory, messagesToWebHistory, WEB_HISTORY_MAX_BYTES, WEB_HISTORY_MAX_ENTRIES, webHistoryByteLength } from "../history.js";
+import { agentEndTerminalNotice, assistantTerminalNotice } from "../assistant-message.js";
 import { CommandDeliveryUncertainError, CommandRejectedError, isUncertainRpcDeliveryCommand, ManagedRpcSession, type ManagedRpcSessionOptions } from "./managed-rpc-session.js";
 import {
 	disableTailscaleServe,
@@ -102,7 +103,6 @@ const missingSessionReconciliations = new Set<SessionRecord>();
 let server: Bun.Server<any> | undefined;
 let missingSessionReconcileTimer: ReturnType<typeof setInterval> | undefined;
 let shutdownStarted = false;
-let forceShutdownRequested = false;
 let webState: ServerStateFile;
 let tailscaleStatus: TailscaleStatus = {
 	installed: false,
@@ -448,7 +448,7 @@ function updateRecordFromState(record: SessionRecord, state: unknown): void {
 		record.status = "working";
 	} else if (s.isCompacting === false) {
 		record.compaction = undefined;
-		if (s.isStreaming === false) record.status = "idle";
+		if (s.isStreaming === false && record.status !== "error") record.status = "idle";
 	}
 	record.updatedAt = Date.now();
 }
@@ -1052,7 +1052,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			}
 			if (event.type === "agent_end" && !record.compaction) {
 				markAgentSettling(record);
-				record.status = "idle";
+				record.status = agentEndTerminalNotice(event)?.kind === "error" ? "error" : "idle";
 				record.agentRunning = false;
 				scheduleQueueSettleFallback(record);
 			}
@@ -1079,7 +1079,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 				// Pi emits agent_settled only when no retry, compaction, or internal
 				// follow-up remains. It is authoritative even when an interrupted
 				// overflow compaction last advertised willRetry=true.
-				record.status = "idle";
+				if (record.status !== "error") record.status = "idle";
 				record.agentRunning = false;
 				void refreshManagedSession(record, true);
 				void flushWebQueue(record);
@@ -1098,6 +1098,10 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					message: event.message,
 				});
 				record.messageCount += 1;
+				const terminalNotice = assistantTerminalNotice(event.message);
+				if (terminalNotice && !extractTextContent(event.message.content)) {
+					record.preview = `${terminalNotice.title}: ${terminalNotice.detail}`.slice(0, 180);
+				}
 			}
 			const compactionEntry = compactionEntryFromEvent(event);
 			if (compactionEntry) {
@@ -1707,7 +1711,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			}
 			if (event.event.type === "agent_end" && !record.compaction) {
 				markAgentSettling(record);
-				record.status = "idle";
+				record.status = agentEndTerminalNotice(event.event)?.kind === "error" ? "error" : "idle";
 				record.agentRunning = false;
 				scheduleQueueSettleFallback(record);
 				lifecycleChanged = true;
@@ -1737,7 +1741,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				// Pi emits agent_settled only when no retry, compaction, or internal
 				// follow-up remains. It is authoritative even when an interrupted
 				// overflow compaction last advertised willRetry=true.
-				record.status = "idle";
+				if (record.status !== "error") record.status = "idle";
 				record.agentRunning = false;
 				void flushWebQueue(record);
 			}
@@ -1762,7 +1766,9 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				}
 				if (event.event.message.role === "user" || event.event.message.role === "assistant") {
 					const preview = extractTextContent(event.event.message.content);
+					const terminalNotice = assistantTerminalNotice(event.event.message);
 					if (preview) record.preview = preview.slice(0, 180);
+					else if (terminalNotice) record.preview = `${terminalNotice.title}: ${terminalNotice.detail}`.slice(0, 180);
 				}
 				sessionMetadataChanged = true;
 			}
@@ -1796,9 +1802,11 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 		// Older bridge runtimes reported `working` again immediately after their
 		// authoritative agent_end event. Preserve the lifecycle event until a new
 		// agent_start arrives so completed runs cannot get stuck visually working.
-		const lifecycleSession = existing?.agentRunning === false && update.session.status === "working"
-			? { ...update.session, status: "idle" as const }
-			: update.session;
+		const lifecycleSession = existing?.status === "error" && update.session.status === "idle"
+			? { ...update.session, status: "error" as const }
+			: existing?.agentRunning === false && update.session.status === "working"
+				? { ...update.session, status: "idle" as const }
+				: update.session;
 		// Older native bridges keep reporting their initial preview. Preserve
 		// message_end/file-derived metadata after hello during rolling upgrades.
 		const session = existing ? { ...lifecycleSession, preview: existing.preview } : lifecycleSession;
@@ -2301,11 +2309,10 @@ function handleWebSocketClose(socket: Bun.ServerWebSocket<SocketData>): void {
 }
 
 async function cleanupAndExit(code = 0): Promise<void> {
-	if (shutdownStarted) {
-		// A second termination request is an explicit escape hatch for a wedged run.
-		forceShutdownRequested = true;
-		return;
-	}
+	// Repeated TERM/INT delivery is common during deploys. Never reinterpret it as
+	// permission to abort managed work; an operator can still use SIGKILL for a
+	// truly wedged process.
+	if (shutdownStarted) return;
 	shutdownStarted = true;
 	if (missingSessionReconcileTimer) clearInterval(missingSessionReconcileTimer);
 	missingSessionReconcileTimer = undefined;
@@ -2314,7 +2321,7 @@ async function cleanupAndExit(code = 0): Promise<void> {
 		.map((record) => record.name ?? record.id);
 	let busy = busyNames();
 	if (busy.length > 0) console.error(`Waiting for active managed sessions before restart: ${busy.join(", ")}`);
-	while (shouldContinueManagedShutdownWait(busy.length, forceShutdownRequested)) {
+	while (shouldContinueManagedShutdownWait(busy.length)) {
 		await Bun.sleep(100);
 		busy = busyNames();
 	}

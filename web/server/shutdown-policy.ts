@@ -7,8 +7,8 @@ export type ManagedShutdownState = Pick<WebSession, "status" | "subagents"> & {
 	compaction?: unknown;
 };
 
-export function shouldContinueManagedShutdownWait(busyCount: number, forceRequested: boolean): boolean {
-	return busyCount > 0 && !forceRequested;
+export function shouldContinueManagedShutdownWait(busyCount: number): boolean {
+	return busyCount > 0;
 }
 
 /** A graceful daemon restart must not abort work owned by a managed RPC child. */
