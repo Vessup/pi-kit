@@ -120,6 +120,8 @@ type SessionRecord = {
 	/** Last authoritative agent lifecycle state; guards against stale bridge updates. */
 	agentRunning?: boolean;
 	agentStartGeneration?: number;
+	activityGeneration?: number;
+	settlingGeneration?: number;
 	/** RPC runtime used only for saved-session management operations. */
 	managed?: ManagedRpcSession;
 	agentSockets: Set<Bun.ServerWebSocket<AgentSocketData>>;
@@ -1604,6 +1606,18 @@ function markWebQueueSnapshotDirty(record: SessionRecord): void {
 	record.queueDirtyWorker.markDirty();
 }
 
+function markAgentActivity(record: SessionRecord): void {
+	record.activityGeneration = (record.activityGeneration ?? 0) + 1;
+}
+
+function markAgentSettling(record: SessionRecord): void {
+	record.settlingGeneration = record.activityGeneration ?? 0;
+}
+
+function isCurrentAgentSettlement(record: SessionRecord): boolean {
+	return record.settlingGeneration === undefined || record.settlingGeneration === (record.activityGeneration ?? 0);
+}
+
 function cancelQueueSettleFallback(record: SessionRecord): void {
 	if (record.queueSettleFallbackTimer) clearTimeout(record.queueSettleFallbackTimer);
 	record.queueSettleFallbackTimer = undefined;
@@ -2293,6 +2307,7 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 			updateSubagentsFromToolEvent(record, event);
 			if (event.type === "agent_start" || event.type === "turn_start") {
 				record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
+				markAgentActivity(record);
 			}
 			if (event.type === "agent_start" || event.type === "turn_start") {
 				cancelQueueSettleFallback(record);
@@ -2300,11 +2315,13 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 				record.agentRunning = true;
 			}
 			if (event.type === "agent_end" && !record.compaction) {
+				markAgentSettling(record);
 				record.status = "idle";
 				record.agentRunning = false;
 				scheduleQueueSettleFallback(record);
 			}
 			if (event.type === "compaction_start") {
+				markAgentSettling(record);
 				record.status = "working";
 				record.agentRunning = true;
 				record.compaction = {
@@ -2320,16 +2337,16 @@ async function createManagedSessionUnlocked(cwd: string, name?: string, sessionF
 					scheduleQueueSettleFallback(record);
 				}
 			}
-			if (event.type === "agent_settled") {
+			if (event.type === "agent_settled" && isCurrentAgentSettlement(record)) {
 				cancelQueueSettleFallback(record);
-				// A prompt may have been accepted during an agent_end compatibility
-				// fallback. In that case this settlement belongs to the previous run.
-				if (record.agentRunning !== true) {
-					record.status = "idle";
-					record.agentRunning = false;
-					void refreshManagedSession(record, true);
-					void flushWebQueue(record);
-				}
+				record.settlingGeneration = undefined;
+				// Pi emits agent_settled only when no retry, compaction, or internal
+				// follow-up remains. It is authoritative even when an interrupted
+				// overflow compaction last advertised willRetry=true.
+				record.status = "idle";
+				record.agentRunning = false;
+				void refreshManagedSession(record, true);
+				void flushWebQueue(record);
 			}
 
 			if (event.type === "message_end" && isRecord(event.message)) {
@@ -2624,8 +2641,10 @@ async function routeCommand(record: SessionRecord, command: ClientCommandMessage
 	const shouldMarkWorking = record.status !== "working" || record.agentRunning !== true;
 	const previousStatus = record.status;
 	const previousAgentRunning = record.agentRunning;
+	const previousActivityGeneration = record.activityGeneration;
 	const agentStartGeneration = record.agentStartGeneration ?? 0;
 	if (shouldMarkWorking) {
+		markAgentActivity(record);
 		cancelQueueSettleFallback(record);
 		record.status = "working";
 		record.agentRunning = true;
@@ -2638,6 +2657,7 @@ async function routeCommand(record: SessionRecord, command: ClientCommandMessage
 		if (shouldMarkWorking && (record.agentStartGeneration ?? 0) === agentStartGeneration) {
 			record.status = previousStatus;
 			record.agentRunning = previousAgentRunning;
+			record.activityGeneration = previousActivityGeneration;
 			broadcast(record.id, { type: "server.session", session: sessionToClientPayload(record) } satisfies ServerSessionMessage);
 			if (record.status === "idle" && record.agentRunning !== true && record.queue.length > 0) {
 				scheduleQueueSettleFallback(record);
@@ -3052,6 +3072,7 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 			let lifecycleChanged = false;
 			if (event.event.type === "agent_start" || event.event.type === "turn_start") {
 				record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
+				markAgentActivity(record);
 			}
 			if (event.event.type === "agent_start" || event.event.type === "turn_start") {
 				cancelQueueSettleFallback(record);
@@ -3060,12 +3081,14 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 				lifecycleChanged = true;
 			}
 			if (event.event.type === "agent_end" && !record.compaction) {
+				markAgentSettling(record);
 				record.status = "idle";
 				record.agentRunning = false;
 				scheduleQueueSettleFallback(record);
 				lifecycleChanged = true;
 			}
 			if (event.event.type === "compaction_start") {
+				markAgentSettling(record);
 				record.status = "working";
 				record.agentRunning = true;
 				record.compaction = {
@@ -3082,16 +3105,16 @@ async function handleAgentMessage(socket: Bun.ServerWebSocket<AgentSocketData>, 
 					lifecycleChanged = true;
 				}
 			}
-			if (event.event.type === "agent_settled") {
+			if (event.event.type === "agent_settled" && isCurrentAgentSettlement(record)) {
 				cancelQueueSettleFallback(record);
+				record.settlingGeneration = undefined;
 				lifecycleChanged = true;
-				// Keep the newly admitted run authoritative when this settlement is
-				// delayed from the run that emitted the preceding agent_end.
-				if (record.agentRunning !== true) {
-					record.status = "idle";
-					record.agentRunning = false;
-					void flushWebQueue(record);
-				}
+				// Pi emits agent_settled only when no retry, compaction, or internal
+				// follow-up remains. It is authoritative even when an interrupted
+				// overflow compaction last advertised willRetry=true.
+				record.status = "idle";
+				record.agentRunning = false;
+				void flushWebQueue(record);
 			}
 			const subagentsChanged = updateSubagentsFromToolEvent(record, event.event);
 			let sessionMetadataChanged = false;

@@ -418,6 +418,44 @@ async function queuedFollowUpDeliveryOrder(
 	});
 }
 
+async function stoppedOverflowCompactionDeliversQueuedFollowUp(url: string, sessionId: string, agent: WebSocket): Promise<string | undefined> {
+	let behavior: string | undefined;
+	let lifecycleSent = false;
+	agent.onmessage = ({ data }) => {
+		const message = JSON.parse(String(data)) as { type?: string; requestId?: string; command?: { type?: string; streamingBehavior?: string } };
+		if (message.type !== "agent.command" || message.command?.type !== "prompt" || !message.requestId) return;
+		behavior = message.command.streamingBehavior;
+		agent.send(JSON.stringify({ type: "agent.response", requestId: message.requestId, success: true }));
+	};
+	return await new Promise((resolve, reject) => {
+		const socket = browserSocket(url);
+		const requestId = crypto.randomUUID();
+		const timeout = setTimeout(() => { socket.close(); reject(new Error("stopped compaction did not advance the queue")); }, 10_000);
+		socket.onopen = () => socket.send(JSON.stringify({ type: "client.hello" }));
+		socket.onmessage = ({ data }) => {
+			const message = JSON.parse(String(data)) as { type?: string; event?: { type?: string; queue?: unknown[] } };
+			if (message.type === "server.snapshot") {
+				socket.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+				socket.send(JSON.stringify({ type: "client.prompt", requestId, sessionId, message: "run after stopped compaction", streamingBehavior: "followUp" }));
+			}
+			if (message.event?.type === "web_queue_update" && message.event.queue?.length === 1 && !lifecycleSent) {
+				lifecycleSent = true;
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "compaction_start", reason: "overflow", willRetry: true } }));
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "compaction_end", reason: "overflow", aborted: false, willRetry: true } }));
+				// Stopping the aborted turn can prevent the advertised retry from
+				// starting, leaving agent_settled as the authoritative idle boundary.
+				agent.send(JSON.stringify({ type: "agent.event", sessionId, event: { type: "agent_settled" } }));
+			}
+			if (lifecycleSent && behavior && message.event?.type === "web_queue_update" && message.event.queue?.length === 0) {
+				clearTimeout(timeout);
+				socket.close();
+				resolve(behavior);
+			}
+		};
+		socket.onerror = () => { clearTimeout(timeout); reject(new Error("stopped compaction queue websocket failed")); };
+	});
+}
+
 async function steerQueuedFollowUpNow(url: string, sessionId: string, agent: WebSocket): Promise<{ behavior?: string; transcriptBeforePrompt: boolean; queueCleared: boolean }> {
 	let deliveryStarted = false;
 	let deliveryStartedWhenPrompted = false;
@@ -2106,6 +2144,7 @@ test("native sessions expose queued-delivery ordering and context compaction lif
 	expect(await rejectedPromptPreservesLegacyQueueFallback(socketUrl, sessionId, agent)).toBe("followUp");
 	expect(await lateSettlementDoesNotBurstQueue(socketUrl, sessionId, agent)).toEqual([1, 2]);
 	expect(await promptAdmissionStatus(socketUrl, sessionId, agent)).toEqual(["idle", "working"]);
+	expect(await stoppedOverflowCompactionDeliversQueuedFollowUp(socketUrl, sessionId, agent)).toBe("followUp");
 	expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual({
 		states: [
 			{ reason: "overflow", status: "working" },
