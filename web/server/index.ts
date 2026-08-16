@@ -776,14 +776,17 @@ async function hydrateGitMetadata(record: SessionRecord): Promise<void> {
   broadcastSessionToAll(record);
 }
 
-async function announceWebCompactionComplete(
-  record: SessionRecord,
-): Promise<void> {
-  // A managed bridge can replace compacted history right after the compact
-  // response resolves. Wait for that snapshot so the completion notice is not
-  // immediately wiped by the authoritative history replacement.
-  await record.compactionHistoryRefresh;
-  broadcastCompactionComplete(record);
+function broadcastCompactionNotice(record: SessionRecord): void {
+  // A managed bridge can replace compacted history after the compaction_end
+  // event settles. Wait for that trailing snapshot so the completion notice is
+  // not immediately wiped by the authoritative history replacement.
+  const refresh = record.compactionHistoryRefresh;
+  const deliver = () => {
+    if (sessions.get(record.id) !== record) return;
+    broadcastCompactionComplete(record);
+  };
+  if (refresh) void refresh.finally(deliver);
+  else deliver();
 }
 
 async function runRpcSessionCommand(
@@ -801,11 +804,8 @@ async function runRpcSessionCommand(
       case "set_session_name":
         await record.managed.setSessionName(command.name);
         return undefined;
-      case "compact": {
-        const result = await record.managed.compact(command.customInstructions);
-        await announceWebCompactionComplete(record);
-        return result;
-      }
+      case "compact":
+        return await record.managed.compact(command.customInstructions);
       case "bash":
         return await record.managed.bash(command.command);
       case "extension_ui_response":
@@ -844,11 +844,8 @@ async function runRpcSessionCommand(
           case "set_session_name":
             await temp.setSessionName(command.name);
             return undefined;
-          case "compact": {
-            const result = await temp.compact(command.customInstructions);
-            await announceWebCompactionComplete(record);
-            return result;
-          }
+          case "compact":
+            return await temp.compact(command.customInstructions);
           case "bash":
             return await temp.bash(command.command);
           case "extension_ui_response":
@@ -1636,8 +1633,8 @@ async function createManagedSessionUnlocked(
         } satisfies ServerHistoryMessage);
         const runtime = record.managed;
         if (runtime) {
-          // Track the trailing authoritative snapshot so a web-initiated compact
-          // can wait for it before announcing completion; otherwise the notice
+          // Track the trailing authoritative snapshot so any compaction_end
+          // notice can wait for it before broadcasting; otherwise the notice
           // would be wiped by this history replacement on subscribed clients.
           const refresh: Promise<void> = runtime
             .getMessages()
@@ -1666,6 +1663,9 @@ async function createManagedSessionUnlocked(
             });
           record.compactionHistoryRefresh = refresh;
         }
+      }
+      if (event.type === "compaction_end" && event.aborted !== true) {
+        broadcastCompactionNotice(record);
       }
       broadcast(record.id, {
         type: "server.event",
@@ -2379,11 +2379,8 @@ async function routeCommandCore(
       case "set_session_name":
         await record.managed.setSessionName(command.name);
         return undefined;
-      case "compact": {
-        const result = await record.managed.compact(command.customInstructions);
-        await announceWebCompactionComplete(record);
-        return result;
-      }
+      case "compact":
+        return await record.managed.compact(command.customInstructions);
       case "extension_ui_response":
         return await record.managed.respondToExtensionUi(command);
     }
@@ -2487,7 +2484,6 @@ async function routeCommandCore(
         );
       }
     });
-    if (command.type === "compact") await announceWebCompactionComplete(record);
     if (command.type === "get_session_options") {
       const options = isRecord(data) ? data : {};
       if (Array.isArray(options.commands)) return options;
@@ -2652,6 +2648,9 @@ async function handleAgentMessage(
           record.agentRunning = false;
           scheduleQueueSettleFallback(record);
           lifecycleChanged = true;
+        }
+        if (event.event.aborted !== true) {
+          broadcastCompactionNotice(record);
         }
       }
       if (

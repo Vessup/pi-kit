@@ -3770,6 +3770,20 @@ test("native sessions route the web /compact command with optional instructions"
       )
         return;
       clearTimeout(timeout);
+      // Mirror the real native bridge: emit compaction_end before acking so the
+      // web server can broadcast "Compaction complete." to subscribed clients.
+      agent.send(
+        JSON.stringify({
+          type: "agent.event",
+          sessionId,
+          event: {
+            type: "compaction_end",
+            reason: "manual",
+            aborted: false,
+            willRetry: false,
+          },
+        }),
+      );
       resolve({
         requestId: message.requestId,
         customInstructions: message.command.customInstructions,
@@ -3789,8 +3803,8 @@ test("native sessions route the web /compact command with optional instructions"
     }, 5_000);
     const finish = () => {
       if (settled) return;
-      // The completion notice is broadcast before the command response, but
-      // accept either ordering so the assertion only pins that both arrive.
+      // The completion notice is broadcast from the compaction_end handler and
+      // the command response arrives once the agent acks; accept either order.
       if (!responseError && (!responded || completionNotice === undefined))
         return;
       clearTimeout(timeout);
@@ -4719,9 +4733,9 @@ test("native sessions expose queued-delivery ordering and context compaction lif
   expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual({
     states: [{ reason: "overflow", status: "working" }, { status: "idle" }],
     historyReset: true,
-    // Overflow compaction is not web-initiated, so it must not announce
-    // "Compaction complete." the way an explicit /compact does.
-    completionNotice: undefined,
+    // Overflow compaction completes server-side and announces "Compaction
+    // complete." to subscribed clients just like a manual /compact.
+    completionNotice: "Compaction complete.",
   });
   const compactedHistory = JSON.stringify(
     await waitForSemanticHistory(socketUrl, sessionId),
