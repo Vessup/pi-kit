@@ -10,14 +10,16 @@
     "pi-extension"
   ],
   "scripts": {
-    "build": "bun run web:build",
+    "build": "bun run webBuild",
     "check": "tsc --noEmit && tsc -p web/server/tsconfig.json --noEmit && tsc -p web/client/tsconfig.json --noEmit",
-    "postinstall": "bun run web:build",
+    "postinstall": "bun run webBuild",
     "test": "bun test",
-    "web:build": "vite build --config web/vite.config.ts",
-    "web:dev": "vite --config web/vite.config.ts",
-    "web:server": "bun run web/server/index.ts",
-    "format": "biome check --write --unsafe ."
+    "webBuild": "vite build --config web/vite.config.ts",
+    "webDev": "vite --config web/vite.config.ts",
+    "webServer": "bun run web/server/index.ts",
+    "format": "biome check --write --unsafe .",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint ."
   },
   "pi": {
     "extensions": [
