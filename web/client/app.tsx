@@ -2187,21 +2187,23 @@ export function App() {
     [],
   );
 
+  // Refire when the session identity or status changes, not on every agent
+  // update (which churns the selectedSession reference). Refiring on every
+  // reference races the in-flight RPC call against its successor; the
+  // failure of the latest generation would clear models and leave the picker
+  // stuck on the synthetic single-model fallback.
   React.useEffect(() => {
+    const sessionId = selectedSession?.id;
+    const status = selectedSession?.status;
     const generation = ++optionsGenerationRef.current;
-    if (!selectedSession || selectedSession.status === "offline") {
+    if (!sessionId || status === "offline") {
       setSessionOptions({ models: [], thinkingLevels: [], commands: [] });
       return;
     }
     // get_session_options already includes commands; avoid a second connection
     // and native get_commands process spawn on every session selection.
-    void loadSessionOptions(selectedSession.id, generation);
-  }, [
-    loadSessionOptions,
-    selectedSession?.id,
-    selectedSession?.status,
-    selectedSession,
-  ]);
+    void loadSessionOptions(sessionId, generation);
+  }, [loadSessionOptions, selectedSession?.id, selectedSession?.status]);
 
   const selectModel = React.useCallback(
     async (provider: string, modelId: string) => {
