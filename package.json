@@ -12,6 +12,7 @@
 	"scripts": {
 		"build": "bun run web:build",
 		"check": "tsc --noEmit && tsc -p web/server/tsconfig.json --noEmit && tsc -p web/client/tsconfig.json --noEmit",
+		"postinstall": "bun run web:build",
 		"test": "bun test",
 		"web:build": "vite build --config web/vite.config.ts",
 		"web:dev": "vite --config web/vite.config.ts",

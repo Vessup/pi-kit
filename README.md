@@ -92,7 +92,7 @@ Use `/web-tailscale off` to remove Pi's active Serve route immediately and disab
 
 To publish as a named entry on the Tailscale **Services** page, use `/web-tailscale on pi-web` or set `serviceName: "pi-web"`. Named Services require this machine to be a tagged node, an admin-defined `svc:pi-web` resource, approval (or auto-approval), and an access grant. Pi reports Tailscale's actionable error until those requirements are met.
 
-For frontend development, run `bun run web:dev`. To rebuild the checked-in production assets, run `bun run web:build`.
+For frontend development, run `bun run web:dev`. Production assets in `web/dist` are not checked in — `bun install` builds them via `postinstall`, and `bun run web:server` rebuilds them on every startup, so a manual `bun run web:build` is only needed to preview the production bundle without starting the server.
 
 ## Prompt templates
 

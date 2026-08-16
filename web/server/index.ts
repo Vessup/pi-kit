@@ -2379,7 +2379,17 @@ async function cleanupAndExit(code = 0): Promise<void> {
 	setTimeout(() => process.exit(code), 25).unref();
 }
 
+// web/dist is not checked in; rebuild it on every startup so a long-running
+// server always serves the client assets that match the checked-out source.
+async function buildWebClientAssets(): Promise<void> {
+	console.log("Building web client assets...");
+	const build = Bun.spawn({ cmd: ["bun", "run", "web:build"], cwd: rootDir, stdout: "inherit", stderr: "inherit" });
+	const code = await build.exited;
+	if (code !== 0) console.error(`web:build exited with code ${code}; serving whatever assets already exist in ${distDir}.`);
+}
+
 async function main(): Promise<void> {
+	await buildWebClientAssets();
 	await recoverStagedSourceSessionDeletions();
 	webState = getOrCreateWebState();
 	server = Bun.serve<any>({
