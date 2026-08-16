@@ -17,14 +17,23 @@ const FORK_COMMAND_TIMEOUT_MS = 35_000;
 const WORKTREE_COMMAND_TIMEOUT_MS = 11 * 60_000;
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 11 * 60_000;
 function healthCapability(health: unknown, key: string): boolean {
-  const capabilities = health && typeof health === "object" && "capabilities" in health
-    ? (health as { capabilities?: unknown }).capabilities
-    : undefined;
-  return Boolean(capabilities && typeof capabilities === "object" && (capabilities as Record<string, unknown>)[key] === true);
+  const capabilities =
+    health && typeof health === "object" && "capabilities" in health
+      ? (health as { capabilities?: unknown }).capabilities
+      : undefined;
+  return Boolean(
+    capabilities &&
+      typeof capabilities === "object" &&
+      (capabilities as Record<string, unknown>)[key] === true,
+  );
 }
 
-export function commandHelloType(health: unknown): "client.hello" | "client.command_hello" {
-  return healthCapability(health, "commandHello") ? "client.command_hello" : "client.hello";
+export function commandHelloType(
+  health: unknown,
+): "client.hello" | "client.command_hello" {
+  return healthCapability(health, "commandHello")
+    ? "client.command_hello"
+    : "client.hello";
 }
 
 export function healthSupportsWorktreeRefs(health: unknown): boolean {
@@ -48,10 +57,18 @@ async function supportsCommandHello(): Promise<boolean> {
   return supportsHealthCapability("commandHello");
 }
 
-export function sessionCommandTimeout(command: AgentCommand | RpcSessionCommand): number {
-  if (command.type === "create_worktree" || command.type === "create_worktree_v2" || command.type === "reload") return WORKTREE_COMMAND_TIMEOUT_MS;
+export function sessionCommandTimeout(
+  command: AgentCommand | RpcSessionCommand,
+): number {
+  if (
+    command.type === "create_worktree" ||
+    command.type === "create_worktree_v2" ||
+    command.type === "reload"
+  )
+    return WORKTREE_COMMAND_TIMEOUT_MS;
   if (command.type === "abort") return ABORT_COMMAND_TIMEOUT_MS;
-  if (command.type === "clone" || command.type === "fork") return FORK_COMMAND_TIMEOUT_MS;
+  if (command.type === "clone" || command.type === "fork")
+    return FORK_COMMAND_TIMEOUT_MS;
   return command.type === "compact" || command.type === "bash"
     ? LONG_RUNNING_COMMAND_TIMEOUT_MS
     : DEFAULT_COMMAND_TIMEOUT_MS;
@@ -64,8 +81,16 @@ export type ForkMessageItem = {
 };
 
 export type SessionListResponse = WebSession[] | { sessions: WebSession[] };
-export type ForkMessagesResponse = { messages: ForkMessageItem[] } | { entries: ForkMessageItem[] } | ForkMessageItem[];
-export type SessionActionResponse = { session?: WebSession; sessions?: WebSession[]; ok?: boolean; data?: unknown };
+export type ForkMessagesResponse =
+  | { messages: ForkMessageItem[] }
+  | { entries: ForkMessageItem[] }
+  | ForkMessageItem[];
+export type SessionActionResponse = {
+  session?: WebSession;
+  sessions?: WebSession[];
+  ok?: boolean;
+  data?: unknown;
+};
 
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -89,7 +114,10 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function tryJson<T>(paths: readonly string[], init: RequestInit = {}): Promise<T> {
+async function tryJson<T>(
+  paths: readonly string[],
+  init: RequestInit = {},
+): Promise<T> {
   let lastError: unknown = new Error("No API endpoint matched");
   for (const path of paths) {
     try {
@@ -106,9 +134,16 @@ export async function listSessions(): Promise<WebSession[]> {
   return Array.isArray(data) ? data : data.sessions;
 }
 
-export async function createSession(request: CreateSessionRequest): Promise<WebSession> {
-  if ((request.worktreeBranch || request.worktreeStartPoint) && !await supportsWorktreeRefs()) {
-    throw new Error("The running Pi Web daemon must be updated before creating a worktree with branch or start-point options");
+export async function createSession(
+  request: CreateSessionRequest,
+): Promise<WebSession> {
+  if (
+    (request.worktreeBranch || request.worktreeStartPoint) &&
+    !(await supportsWorktreeRefs())
+  ) {
+    throw new Error(
+      "The running Pi Web daemon must be updated before creating a worktree with branch or start-point options",
+    );
   }
   const data = await tryJson<SessionActionResponse>(["/api/sessions"], {
     method: "POST",
@@ -119,7 +154,9 @@ export async function createSession(request: CreateSessionRequest): Promise<WebS
   return session;
 }
 
-export async function resumeSession(request: ResumeSessionRequest): Promise<WebSession> {
+export async function resumeSession(
+  request: ResumeSessionRequest,
+): Promise<WebSession> {
   const data = await tryJson<SessionActionResponse>(["/api/sessions/resume"], {
     method: "POST",
     body: JSON.stringify(request),
@@ -130,9 +167,10 @@ export async function resumeSession(request: ResumeSessionRequest): Promise<WebS
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  await tryJson<SessionActionResponse>([
-    `/api/sessions/${encodeURIComponent(sessionId)}`,
-  ], { method: "DELETE" });
+  await tryJson<SessionActionResponse>(
+    [`/api/sessions/${encodeURIComponent(sessionId)}`],
+    { method: "DELETE" },
+  );
 }
 
 export function getSocketCandidates(): readonly string[] {
@@ -140,7 +178,9 @@ export function getSocketCandidates(): readonly string[] {
 }
 
 export function buildSocketUrl(path: string): string {
-  return new URL(path, window.location.origin).toString().replace(/^http/, "ws");
+  return new URL(path, window.location.origin)
+    .toString()
+    .replace(/^http/, "ws");
 }
 
 export function parseSocketMessage(data: string): unknown {
@@ -151,17 +191,26 @@ export function parseSocketMessage(data: string): unknown {
   }
 }
 
-export function isServerMessage(message: unknown): message is ServerToClientMessage {
+export function isServerMessage(
+  message: unknown,
+): message is ServerToClientMessage {
   return !!message && typeof message === "object" && "type" in message;
 }
 
-export async function sendSessionCommand(sessionId: string, command: AgentCommand | RpcSessionCommand): Promise<unknown> {
+export async function sendSessionCommand(
+  sessionId: string,
+  command: AgentCommand | RpcSessionCommand,
+): Promise<unknown> {
   // New daemons avoid a full session-catalog snapshot on one-shot command sockets.
   // Fall back to client.hello when an older daemon is still serving a freshly built
   // client bundle; this protocol skew previously broke Stop and every queue action.
-  const socket = new SessionSocket(await supportsCommandHello() ? "client.command_hello" : "client.hello");
+  const socket = new SessionSocket(
+    (await supportsCommandHello()) ? "client.command_hello" : "client.hello",
+  );
   let earlyClose: CloseEvent | undefined;
-  const unsubscribeEarlyClose = socket.onClose((event) => { earlyClose = event; });
+  const unsubscribeEarlyClose = socket.onClose((event) => {
+    earlyClose = event;
+  });
   try {
     await socket.connect();
   } catch (error) {
@@ -184,13 +233,30 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
       callback();
     };
     const rejectClosed = (event: CloseEvent) => {
-      finish(() => reject(new Error(`Command socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`)));
+      finish(() =>
+        reject(
+          new Error(
+            `Command socket closed (${event.code}${event.reason ? `: ${event.reason}` : ""})`,
+          ),
+        ),
+      );
     };
     unsubscribeMessage = socket.onMessage((message) => {
-      if (!message || typeof message !== "object" || !("requestId" in message) || message.requestId !== requestId) return;
-      const response = message as unknown as { success?: boolean; error?: string; data?: unknown };
+      if (
+        !message ||
+        typeof message !== "object" ||
+        !("requestId" in message) ||
+        message.requestId !== requestId
+      )
+        return;
+      const response = message as unknown as {
+        success?: boolean;
+        error?: string;
+        data?: unknown;
+      };
       finish(() => {
-        if (response.success === false) reject(new Error(response.error ?? "Request failed"));
+        if (response.success === false)
+          reject(new Error(response.error ?? "Request failed"));
         else resolve(response.data);
       });
     });
@@ -201,43 +267,97 @@ export async function sendSessionCommand(sessionId: string, command: AgentComman
       return;
     }
     timeout = window.setTimeout(
-      () => finish(() => reject(new Error(`Command timed out after ${sessionCommandTimeout(command)}ms`))),
+      () =>
+        finish(() =>
+          reject(
+            new Error(
+              `Command timed out after ${sessionCommandTimeout(command)}ms`,
+            ),
+          ),
+        ),
       sessionCommandTimeout(command),
     );
     try {
-      socket.send({ type: "client.command", requestId, sessionId, command } satisfies ClientToServerMessage as Record<string, unknown>);
+      socket.send({
+        type: "client.command",
+        requestId,
+        sessionId,
+        command,
+      } satisfies ClientToServerMessage as Record<string, unknown>);
     } catch (error) {
-      finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      finish(() =>
+        reject(error instanceof Error ? error : new Error(String(error))),
+      );
     }
   });
 }
 
-export async function getForkMessages(sessionId: string): Promise<ForkMessageItem[]> {
-  const data = await sendSessionCommand(sessionId, { type: "get_fork_messages" });
+export async function getForkMessages(
+  sessionId: string,
+): Promise<ForkMessageItem[]> {
+  const data = await sendSessionCommand(sessionId, {
+    type: "get_fork_messages",
+  });
   const typed = data as ForkMessagesResponse | undefined;
-  const messages = Array.isArray(typed) ? typed : typed && "messages" in typed ? typed.messages : typed && "entries" in typed ? typed.entries : [];
+  const messages = Array.isArray(typed)
+    ? typed
+    : typed && "messages" in typed
+      ? typed.messages
+      : typed && "entries" in typed
+        ? typed.entries
+        : [];
   return messages.flatMap((message) => {
-    const candidate = message as unknown as { entryId?: unknown; id?: unknown; text?: unknown; timestamp?: unknown };
-    const entryId = typeof candidate.entryId === "string" ? candidate.entryId : typeof candidate.id === "string" ? candidate.id : undefined;
+    const candidate = message as unknown as {
+      entryId?: unknown;
+      id?: unknown;
+      text?: unknown;
+      timestamp?: unknown;
+    };
+    const entryId =
+      typeof candidate.entryId === "string"
+        ? candidate.entryId
+        : typeof candidate.id === "string"
+          ? candidate.id
+          : undefined;
     return entryId && typeof candidate.text === "string"
-      ? [{ entryId, text: candidate.text, timestamp: typeof candidate.timestamp === "string" ? candidate.timestamp : undefined }]
+      ? [
+          {
+            entryId,
+            text: candidate.text,
+            timestamp:
+              typeof candidate.timestamp === "string"
+                ? candidate.timestamp
+                : undefined,
+          },
+        ]
       : [];
   });
 }
 
-export async function renameSessionViaCommand(sessionId: string, name: string): Promise<void> {
+export async function renameSessionViaCommand(
+  sessionId: string,
+  name: string,
+): Promise<void> {
   await sendSessionCommand(sessionId, { type: "set_session_name", name });
 }
 
-export async function compactSessionViaCommand(sessionId: string, customInstructions?: string): Promise<void> {
+export async function compactSessionViaCommand(
+  sessionId: string,
+  customInstructions?: string,
+): Promise<void> {
   await sendSessionCommand(sessionId, { type: "compact", customInstructions });
 }
 
-export async function cloneSessionViaCommand(sessionId: string): Promise<unknown> {
+export async function cloneSessionViaCommand(
+  sessionId: string,
+): Promise<unknown> {
   return sendSessionCommand(sessionId, { type: "clone" });
 }
 
-export async function forkSessionViaCommand(sessionId: string, entryId: string): Promise<unknown> {
+export async function forkSessionViaCommand(
+  sessionId: string,
+  entryId: string,
+): Promise<unknown> {
   return sendSessionCommand(sessionId, { type: "fork", entryId });
 }
 
@@ -247,10 +367,17 @@ export async function createSessionWorktreeViaCommand(
   name: string,
   options: { branch?: string; startPoint?: string } = {},
 ): Promise<unknown> {
-  return sendSessionCommand(sessionId, { type: "create_worktree", repository, name, ...options });
+  return sendSessionCommand(sessionId, {
+    type: "create_worktree",
+    repository,
+    name,
+    ...options,
+  });
 }
 
-export async function openSessionSocket(onMessage: (message: unknown) => void): Promise<SessionSocket> {
+export async function openSessionSocket(
+  onMessage: (message: unknown) => void,
+): Promise<SessionSocket> {
   const socket = new SessionSocket();
   socket.onMessage(onMessage);
   await socket.connect();

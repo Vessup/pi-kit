@@ -12,7 +12,14 @@ type AnchoredPopoverProps = {
   align?: "start" | "end";
 };
 
-export function AnchoredPopover({ open, onOpenChange, anchorRef, children, className, align = "end" }: AnchoredPopoverProps) {
+export function AnchoredPopover({
+  open,
+  onOpenChange,
+  anchorRef,
+  children,
+  className,
+  align = "end",
+}: AnchoredPopoverProps) {
   const panelRef = React.useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = React.useState({ left: 8, top: 8 });
 
@@ -37,7 +44,9 @@ export function AnchoredPopover({ open, onOpenChange, anchorRef, children, class
         },
         align,
       });
-      setPosition((current) => current.left === next.left && current.top === next.top ? current : next);
+      setPosition((current) =>
+        current.left === next.left && current.top === next.top ? current : next,
+      );
     };
     const scheduleUpdate = () => {
       if (frame !== undefined) return;
@@ -71,7 +80,11 @@ export function AnchoredPopover({ open, onOpenChange, anchorRef, children, class
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (panelRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
+      if (
+        panelRef.current?.contains(target) ||
+        anchorRef.current?.contains(target)
+      )
+        return;
       onOpenChange(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -89,7 +102,10 @@ export function AnchoredPopover({ open, onOpenChange, anchorRef, children, class
   return createPortal(
     <div
       ref={panelRef}
-      className={cn("fixed z-[70] rounded-lg border border-zinc-700 bg-zinc-950 p-1 shadow-2xl shadow-black/60", className)}
+      className={cn(
+        "fixed z-[70] rounded-lg border border-zinc-700 bg-zinc-950 p-1 shadow-2xl shadow-black/60",
+        className,
+      )}
       style={position}
     >
       {children}

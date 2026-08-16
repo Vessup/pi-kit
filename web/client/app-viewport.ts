@@ -14,7 +14,10 @@ export type AppViewportMeasurement = {
 
 export type AppViewportRect = { top: number; height: number };
 
-function isKeyboardOpenByHeuristic(measurement: AppViewportMeasurement, closedHeight: number): boolean {
+function isKeyboardOpenByHeuristic(
+  measurement: AppViewportMeasurement,
+  closedHeight: number,
+): boolean {
   if (!measurement.standalone) return false;
   const visualHeight = measurement.visualHeight ?? measurement.innerHeight;
   const visualOffsetTop = Math.max(0, measurement.visualOffsetTop ?? 0);
@@ -28,8 +31,11 @@ function isKeyboardOpenByHeuristic(measurement: AppViewportMeasurement, closedHe
  * In standalone, use the visual viewport while the keyboard is active.
  * Otherwise use the known closed-screen height.
  */
-export function resolveAppViewportRect(measurement: AppViewportMeasurement): AppViewportRect | undefined {
-  if (!isKeyboardOpenByHeuristic(measurement, measurement.screenHeight)) return undefined;
+export function resolveAppViewportRect(
+  measurement: AppViewportMeasurement,
+): AppViewportRect | undefined {
+  if (!isKeyboardOpenByHeuristic(measurement, measurement.screenHeight))
+    return undefined;
   const visualHeight = measurement.visualHeight ?? measurement.innerHeight;
   const visualOffsetTop = Math.max(0, measurement.visualOffsetTop ?? 0);
   return {
@@ -39,8 +45,10 @@ export function resolveAppViewportRect(measurement: AppViewportMeasurement): App
 }
 
 function isStandalone(): boolean {
-  return window.matchMedia("(display-mode: standalone)").matches
-    || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+  return (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    Boolean((navigator as Navigator & { standalone?: boolean }).standalone)
+  );
 }
 
 export function installAppViewportHeight(): void {
@@ -85,7 +93,10 @@ export function installAppViewportHeight(): void {
       }
     } else {
       const openRect = resolveAppViewportRect(measurement);
-      const rect = openRect ?? { top: 0, height: Math.round(measurement.screenHeight) };
+      const rect = openRect ?? {
+        top: 0,
+        height: Math.round(measurement.screenHeight),
+      };
       if (rect.height !== lastHeightPx || rect.top !== lastTopPx) {
         root.style.setProperty("--pi-app-height", `${rect.height}px`);
         root.style.setProperty("--pi-app-top", `${rect.top}px`);

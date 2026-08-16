@@ -6,7 +6,15 @@ function jsonStringBytes(value: string): number {
   let bytes = 2; // Surrounding quotes.
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) {
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d
+    ) {
       bytes += 2;
     } else if (code < 0x20) {
       bytes += 6;
@@ -35,7 +43,11 @@ function semanticImagePayloadBytes(image: SemanticImage): number {
   let bytes = 2;
   let fields = 0;
   const addString = (key: string, value: string) => {
-    bytes += (fields++ > 0 ? 1 : 0) + jsonStringBytes(key) + 1 + jsonStringBytes(value);
+    bytes +=
+      (fields++ > 0 ? 1 : 0) +
+      jsonStringBytes(key) +
+      1 +
+      jsonStringBytes(value);
   };
   addString("type", image.type);
   addString("data", image.data);
@@ -55,19 +67,27 @@ export function clientPromptPayloadBytes(prompt: ClientPromptMessage): number {
   addField("sessionId", jsonStringBytes(prompt.sessionId));
   addField("message", jsonStringBytes(prompt.message));
   if (prompt.images !== undefined) {
-    const imagesBytes = 2 + prompt.images.reduce(
-      (total, image, index) => total + (index > 0 ? 1 : 0) + semanticImagePayloadBytes(image),
-      0,
-    );
+    const imagesBytes =
+      2 +
+      prompt.images.reduce(
+        (total, image, index) =>
+          total + (index > 0 ? 1 : 0) + semanticImagePayloadBytes(image),
+        0,
+      );
     addField("images", imagesBytes);
   }
-  if (prompt.streamingBehavior !== undefined) addField("streamingBehavior", jsonStringBytes(prompt.streamingBehavior));
+  if (prompt.streamingBehavior !== undefined)
+    addField("streamingBehavior", jsonStringBytes(prompt.streamingBehavior));
   return bytes;
 }
 
 /** Validate the complete frame, including prompt text, image metadata, and JSON framing. */
-export function assertClientPromptPayloadFits(prompt: ClientPromptMessage): void {
+export function assertClientPromptPayloadFits(
+  prompt: ClientPromptMessage,
+): void {
   if (clientPromptPayloadBytes(prompt) > MAX_CLIENT_PROMPT_PAYLOAD_BYTES) {
-    throw new Error(`Prompt and attachments exceed the ${MAX_CLIENT_PROMPT_PAYLOAD_BYTES / (1024 * 1024)} MiB WebSocket payload limit`);
+    throw new Error(
+      `Prompt and attachments exceed the ${MAX_CLIENT_PROMPT_PAYLOAD_BYTES / (1024 * 1024)} MiB WebSocket payload limit`,
+    );
   }
 }

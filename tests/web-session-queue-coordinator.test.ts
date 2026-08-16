@@ -1,14 +1,36 @@
 import { expect, test } from "bun:test";
-import type { ClientCommandMessage, ServerToClientMessage, WebSession } from "../web/protocol";
+import type {
+  ClientCommandMessage,
+  ServerToClientMessage,
+  WebSession,
+} from "../web/protocol";
 import { CoalescedQueueStoreWriter } from "../web/server/queue-store";
+import type {
+  ClientSocketData,
+  SessionRecord,
+} from "../web/server/server-types";
 import { createSessionQueueCoordinator } from "../web/server/session-queue-coordinator";
-import type { ClientSocketData, SessionRecord } from "../web/server/server-types";
 
-function record(queue: SessionRecord["queue"], status: SessionRecord["status"] = "idle"): SessionRecord {
+function record(
+  queue: SessionRecord["queue"],
+  status: SessionRecord["status"] = "idle",
+): SessionRecord {
   return {
-    id: "session", cwd: "/repo", status, source: "web", createdAt: 1, updatedAt: 1, messageCount: 0,
-    kind: "managed", history: [], active: true, agentSockets: new Set(), clientSockets: new Set(),
-    externalRequestTargets: new Map(), externalPending: new Map(), queue,
+    id: "session",
+    cwd: "/repo",
+    status,
+    source: "web",
+    createdAt: 1,
+    updatedAt: 1,
+    messageCount: 0,
+    kind: "managed",
+    history: [],
+    active: true,
+    agentSockets: new Set(),
+    clientSockets: new Set(),
+    externalRequestTargets: new Map(),
+    externalPending: new Map(),
+    queue,
   };
 }
 
@@ -21,11 +43,22 @@ function setup(target: SessionRecord) {
     queueStoreWriter: new CoalescedQueueStoreWriter("/unused", async () => {}),
     currentRecord: () => current,
     isShutdownStarted: () => false,
-    broadcast: (_id, message) => { broadcasts.push(message); },
-    deliverCommand: async (_record, command) => { deliveries.push(command); },
+    broadcast: (_id, message) => {
+      broadcasts.push(message);
+    },
+    deliverCommand: async (_record, command) => {
+      deliveries.push(command);
+    },
     projectSession: (item) => item as unknown as WebSession,
   });
-  return { coordinator, deliveries, broadcasts, replace: (next?: SessionRecord) => { current = next; } };
+  return {
+    coordinator,
+    deliveries,
+    broadcasts,
+    replace: (next?: SessionRecord) => {
+      current = next;
+    },
+  };
 }
 
 async function settleTimers(): Promise<void> {
@@ -42,23 +75,47 @@ test("settle fallback advances queues when agent activity is initially unknown",
 });
 
 test("uncertain deliveries block steering and all are reported on subscribe", async () => {
-  const target = record([
-    { id: "uncertain-1", message: "first", deliveryState: "delivering" },
-    { id: "uncertain-2", message: "second", deliveryState: "delivering" },
-    { id: "ordinary", message: "third" },
-  ], "working");
+  const target = record(
+    [
+      { id: "uncertain-1", message: "first", deliveryState: "delivering" },
+      { id: "uncertain-2", message: "second", deliveryState: "delivering" },
+      { id: "ordinary", message: "third" },
+    ],
+    "working",
+  );
   const { coordinator, deliveries } = setup(target);
-  await expect(coordinator.routeQueueCommand(target, { type: "steer_queue_item", itemId: "ordinary" })).rejects.toThrow("uncertain delivery");
+  await expect(
+    coordinator.routeQueueCommand(target, {
+      type: "steer_queue_item",
+      itemId: "ordinary",
+    }),
+  ).rejects.toThrow("uncertain delivery");
   expect(deliveries).toEqual([]);
 
-  const frames: Array<{ event?: { type?: string; item?: { id?: string } } }> = [];
-  coordinator.sendSessionState({ send: (value: string) => { frames.push(JSON.parse(value)); } } as unknown as Bun.ServerWebSocket<ClientSocketData>, target);
-  expect(frames.filter((frame) => frame.event?.type === "web_queue_delivery").map((frame) => frame.event?.item?.id)).toEqual(["uncertain-1", "uncertain-2"]);
+  const frames: Array<{ event?: { type?: string; item?: { id?: string } } }> =
+    [];
+  coordinator.sendSessionState(
+    {
+      send: (value: string) => {
+        frames.push(JSON.parse(value));
+      },
+    } as unknown as Bun.ServerWebSocket<ClientSocketData>,
+    target,
+  );
+  expect(
+    frames
+      .filter((frame) => frame.event?.type === "web_queue_delivery")
+      .map((frame) => frame.event?.item?.id),
+  ).toEqual(["uncertain-1", "uncertain-2"]);
 });
 
 test("reordering an uncertain delivery behind an ordinary item still blocks flushing", async () => {
   const target = record([
-    { id: "uncertain", message: "possibly accepted", deliveryState: "delivering" },
+    {
+      id: "uncertain",
+      message: "possibly accepted",
+      deliveryState: "delivering",
+    },
     { id: "ordinary", message: "must wait" },
   ]);
   const { coordinator, deliveries } = setup(target);
@@ -78,10 +135,20 @@ test("reordering an uncertain delivery behind an ordinary item still blocks flus
 });
 
 test("queued control commands cannot be converted into steering prompts", async () => {
-  const target = record([{ id: "compact", message: "/compact preserve names" }], "working");
+  const target = record(
+    [{ id: "compact", message: "/compact preserve names" }],
+    "working",
+  );
   const { coordinator, deliveries } = setup(target);
-  await expect(coordinator.routeQueueCommand(target, { type: "steer_queue_item", itemId: "compact" })).rejects.toThrow("must remain queued");
-  expect(target.queue).toEqual([{ id: "compact", message: "/compact preserve names" }]);
+  await expect(
+    coordinator.routeQueueCommand(target, {
+      type: "steer_queue_item",
+      itemId: "compact",
+    }),
+  ).rejects.toThrow("must remain queued");
+  expect(target.queue).toEqual([
+    { id: "compact", message: "/compact preserve names" },
+  ]);
   expect(deliveries).toEqual([]);
 });
 
@@ -96,9 +163,15 @@ test("settled failures advance queues without erasing the visible error", async 
 });
 
 test("resubmit retry is cancellable and cannot flush a stale record", async () => {
-  const target = record([{ id: "uncertain", message: "retry", deliveryState: "delivering" }]);
+  const target = record([
+    { id: "uncertain", message: "retry", deliveryState: "delivering" },
+  ]);
   const { coordinator, deliveries, replace } = setup(target);
-  await coordinator.routeQueueCommand(target, { type: "reconcile_queue", itemId: "uncertain", action: "resubmit" });
+  await coordinator.routeQueueCommand(target, {
+    type: "reconcile_queue",
+    itemId: "uncertain",
+    action: "resubmit",
+  });
   replace(undefined);
   coordinator.cancelWebQueueWork(target);
   await Bun.sleep(20);

@@ -19,8 +19,14 @@ test("metadata cache results have fresh arrays and current ownership", async () 
   const file = join(sessionsDir, "saved.jsonl");
   const store = new ManagedSessionStore(join(tempDir, "managed.json"));
   await mkdir(sessionsDir, { recursive: true });
-  await writeFile(file, `${JSON.stringify({ type: "session", id: "saved", cwd: tempDir })}\n`);
-  const catalog = createSessionFileCatalog({ sessionsDir, managedSessionStore: store });
+  await writeFile(
+    file,
+    `${JSON.stringify({ type: "session", id: "saved", cwd: tempDir })}\n`,
+  );
+  const catalog = createSessionFileCatalog({
+    sessionsDir,
+    managedSessionStore: store,
+  });
 
   const first = catalog.parseSessionMetadataFile(file)!;
   first.history.push("pollution");
@@ -44,10 +50,17 @@ test("deletion reads worktree ownership from a bounded session prefix", async ()
     branchCreated: true,
   };
   await mkdir(sessionsDir, { recursive: true });
-  await writeFile(file, [
-    JSON.stringify({ type: "session", id: "large", cwd: tempDir }),
-    JSON.stringify({ type: "custom", customType: WORKTREE_SESSION_ENTRY, data: worktree }),
-  ].join("\n") + "\n");
+  await writeFile(
+    file,
+    `${[
+      JSON.stringify({ type: "session", id: "large", cwd: tempDir }),
+      JSON.stringify({
+        type: "custom",
+        customType: WORKTREE_SESSION_ENTRY,
+        data: worktree,
+      }),
+    ].join("\n")}\n`,
+  );
   await truncate(file, 64 * 1024 * 1024);
 
   const catalog = createSessionFileCatalog({

@@ -12,13 +12,28 @@ afterEach(async () => {
 });
 
 test("JSON responses preserve every HeadersInit representation", () => {
-  const fromHeaders = jsonResponse({}, { headers: new Headers({ "x-test": "headers" }) });
+  const fromHeaders = jsonResponse(
+    {},
+    { headers: new Headers({ "x-test": "headers" }) },
+  );
   expect(fromHeaders.headers.get("x-test")).toBe("headers");
-  expect(fromHeaders.headers.get("content-type")).toBe("application/json; charset=utf-8");
+  expect(fromHeaders.headers.get("content-type")).toBe(
+    "application/json; charset=utf-8",
+  );
 
-  const fromEntries = jsonResponse({}, { headers: [["x-test", "entries"], ["content-type", "application/problem+json"]] });
+  const fromEntries = jsonResponse(
+    {},
+    {
+      headers: [
+        ["x-test", "entries"],
+        ["content-type", "application/problem+json"],
+      ],
+    },
+  );
   expect(fromEntries.headers.get("x-test")).toBe("entries");
-  expect(fromEntries.headers.get("content-type")).toBe("application/problem+json");
+  expect(fromEntries.headers.get("content-type")).toBe(
+    "application/problem+json",
+  );
 });
 
 test("static assets reject malformed paths and never serve directories", async () => {

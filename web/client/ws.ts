@@ -1,4 +1,9 @@
-import { buildSocketUrl, getSocketCandidates, isServerMessage, parseSocketMessage } from "./api";
+import {
+  buildSocketUrl,
+  getSocketCandidates,
+  isServerMessage,
+  parseSocketMessage,
+} from "./api";
 
 type Listener<T> = (value: T) => void;
 
@@ -11,7 +16,11 @@ export class SessionSocket {
   private attempts = 0;
   private readonly candidates = getSocketCandidates();
 
-  constructor(private readonly helloType: "client.hello" | "client.command_hello" = "client.hello") {}
+  constructor(
+    private readonly helloType:
+      | "client.hello"
+      | "client.command_hello" = "client.hello",
+  ) {}
 
   onMessage(listener: Listener<unknown>): () => void {
     this.messageListeners.add(listener);
@@ -51,32 +60,45 @@ export class SessionSocket {
           advanced = true;
           tryNext();
         };
-        socket.addEventListener("open", (event) => {
-          connected = true;
-          for (const listener of this.openListeners) listener(event);
-          socket.send(JSON.stringify({ type: this.helloType }));
-          resolve();
-        }, { once: true });
+        socket.addEventListener(
+          "open",
+          (event) => {
+            connected = true;
+            for (const listener of this.openListeners) listener(event);
+            socket.send(JSON.stringify({ type: this.helloType }));
+            resolve();
+          },
+          { once: true },
+        );
         socket.addEventListener("message", (event) => {
           const message = parseSocketMessage(String(event.data));
           if (isServerMessage(message) || typeof message !== "undefined") {
             for (const listener of this.messageListeners) listener(message);
           }
         });
-        socket.addEventListener("close", (event) => {
-          for (const listener of this.closeListeners) listener(event);
-          advanceOnce();
-        }, { once: true });
-        socket.addEventListener("error", () => {
-          advanceOnce();
-        }, { once: true });
+        socket.addEventListener(
+          "close",
+          (event) => {
+            for (const listener of this.closeListeners) listener(event);
+            advanceOnce();
+          },
+          { once: true },
+        );
+        socket.addEventListener(
+          "error",
+          () => {
+            advanceOnce();
+          },
+          { once: true },
+        );
       };
       tryNext();
     });
   }
 
   send(message: Record<string, unknown>): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) throw new Error("Session socket is not open");
+    if (this.socket?.readyState !== WebSocket.OPEN)
+      throw new Error("Session socket is not open");
     this.socket.send(JSON.stringify(message));
   }
 

@@ -8,10 +8,12 @@ export type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 
 const variantClasses: Record<NonNullable<ButtonProps["variant"]>, string> = {
   default: "bg-zinc-100 text-zinc-950 hover:bg-white shadow-sm",
-  secondary: "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700",
+  secondary:
+    "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700",
   ghost: "bg-transparent text-zinc-300 hover:bg-zinc-800 hover:text-white",
   destructive: "bg-red-500/90 text-white hover:bg-red-500",
-  outline: "border border-zinc-700 bg-transparent text-zinc-100 hover:bg-zinc-800",
+  outline:
+    "border border-zinc-700 bg-transparent text-zinc-100 hover:bg-zinc-800",
 };
 
 const sizeClasses: Record<NonNullable<ButtonProps["size"]>, string> = {
@@ -21,20 +23,22 @@ const sizeClasses: Record<NonNullable<ButtonProps["size"]>, string> = {
   icon: "h-9 w-9 p-0",
 };
 
-export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { className, variant = "default", size = "default", ...props },
-  ref,
-) {
-  return (
-    <button
-      ref={ref}
-      className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400/70 disabled:pointer-events-none disabled:opacity-50",
-        variantClasses[variant],
-        sizeClasses[size],
-        className,
-      )}
-      {...props}
-    />
-  );
-});
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  function Button(
+    { className, variant = "default", size = "default", ...props },
+    ref,
+  ) {
+    return (
+      <button
+        ref={ref}
+        className={cn(
+          "inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-sky-400/70 disabled:pointer-events-none disabled:opacity-50",
+          variantClasses[variant],
+          sizeClasses[size],
+          className,
+        )}
+        {...props}
+      />
+    );
+  },
+);

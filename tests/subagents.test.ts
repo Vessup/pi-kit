@@ -4,236 +4,380 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import subagentsExtension, {
-	abortRunningSubagentSessions,
-	appendBoundedStreamingText,
-	countsAgainstSubagentLimit,
-	filterModelsToScope,
-	inheritedSubagentModel,
-	isFailedStopReason,
-	isTerminalSubagentStatus,
-	MAX_WEB_STREAMING_CHARS,
-	parsePersistedUsageState,
-	shouldArchiveTerminalSubagent,
-	subagentModelGuidance,
-	subagentModelRuntime,
-} from "../extensions/subagents.ts";
-import { stringifyCompact, truncateChars, truncateToolOutput } from "../extensions/subagents/format.ts";
+import {
+  stringifyCompact,
+  truncateChars,
+  truncateToolOutput,
+} from "../extensions/subagents/format.ts";
 import { MAX_TOOL_OUTPUT_BYTES } from "../extensions/subagents/types.ts";
-import { AgentDetailDialog, FooterNavigationEditor } from "../extensions/subagents/ui.ts";
+import {
+  AgentDetailDialog,
+  FooterNavigationEditor,
+} from "../extensions/subagents/ui.ts";
+import subagentsExtension, {
+  abortRunningSubagentSessions,
+  appendBoundedStreamingText,
+  countsAgainstSubagentLimit,
+  filterModelsToScope,
+  inheritedSubagentModel,
+  isFailedStopReason,
+  isTerminalSubagentStatus,
+  MAX_WEB_STREAMING_CHARS,
+  parsePersistedUsageState,
+  shouldArchiveTerminalSubagent,
+  subagentModelGuidance,
+  subagentModelRuntime,
+} from "../extensions/subagents.ts";
 
 test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
-	const tools: string[] = [];
-	const commands: string[] = [];
-	const hooks: string[] = [];
-	const events: string[] = [];
-	const pi = {
-		events: { on(name: string) { events.push(name); }, emit() {} },
-		on(name: string) { hooks.push(name); },
-		registerTool(tool: { name: string }) { tools.push(tool.name); },
-		registerCommand(name: string) { commands.push(name); },
-		getActiveTools() { return []; },
-	};
+  const tools: string[] = [];
+  const commands: string[] = [];
+  const hooks: string[] = [];
+  const events: string[] = [];
+  const pi = {
+    events: {
+      on(name: string) {
+        events.push(name);
+      },
+      emit() {},
+    },
+    on(name: string) {
+      hooks.push(name);
+    },
+    registerTool(tool: { name: string }) {
+      tools.push(tool.name);
+    },
+    registerCommand(name: string) {
+      commands.push(name);
+    },
+    getActiveTools() {
+      return [];
+    },
+  };
 
-	subagentsExtension(pi as never);
+  subagentsExtension(pi as never);
 
-	assert.deepEqual(tools, ["subagent_create", "subagent_read", "subagent_send", "subagent_configure", "subagent_terminate"]);
-	assert.deepEqual(commands, ["subagents", "subagents-cleanup"]);
-	assert.deepEqual(hooks, ["before_agent_start", "session_start", "input", "agent_start", "agent_settled", "session_shutdown"]);
-	assert.deepEqual(events, ["vessup:subagents:abort"]);
+  assert.deepEqual(tools, [
+    "subagent_create",
+    "subagent_read",
+    "subagent_send",
+    "subagent_configure",
+    "subagent_terminate",
+  ]);
+  assert.deepEqual(commands, ["subagents", "subagents-cleanup"]);
+  assert.deepEqual(hooks, [
+    "before_agent_start",
+    "session_start",
+    "input",
+    "agent_start",
+    "agent_settled",
+    "session_shutdown",
+  ]);
+  assert.deepEqual(events, ["vessup:subagents:abort"]);
 });
 
 const usage = {
-	input: 10,
-	output: 4,
-	cacheRead: 3,
-	cacheWrite: 2,
-	totalTokens: 19,
-	cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 },
+  input: 10,
+  output: 4,
+  cacheRead: 3,
+  cacheWrite: 2,
+  totalTokens: 19,
+  cost: {
+    input: 0.1,
+    output: 0.2,
+    cacheRead: 0.01,
+    cacheWrite: 0.02,
+    total: 0.33,
+  },
 };
 
 test("compact formatting handles non-JSON values and preserves Unicode code points", () => {
-	assert.equal(stringifyCompact(undefined), "undefined");
-	assert.equal(stringifyCompact(Symbol("value")), "Symbol(value)");
-	assert.equal(stringifyCompact("🙂", 2), '"🙂…');
-	assert.equal(truncateChars("a🙂b", 2), "a🙂\n[… 1 characters omitted]");
+  assert.equal(stringifyCompact(undefined), "undefined");
+  assert.equal(stringifyCompact(Symbol("value")), "Symbol(value)");
+  assert.equal(stringifyCompact("🙂", 2), '"🙂…');
+  assert.equal(truncateChars("a🙂b", 2), "a🙂\n[… 1 characters omitted]");
 });
 
 test("subagent tool output truncates at a valid UTF-8 byte boundary", () => {
-	const source = `a${"🙂".repeat(Math.ceil(MAX_TOOL_OUTPUT_BYTES / 4) + 10)}`;
-	const result = truncateToolOutput(source);
-	const output = result.split("\n\n[Output truncated:", 1)[0]!;
-	assert.ok(Buffer.byteLength(output, "utf8") <= MAX_TOOL_OUTPUT_BYTES);
-	assert.equal(output.endsWith("�"), false);
-	assert.match(result, new RegExp(`Output truncated: ${Buffer.byteLength(source, "utf8") - Buffer.byteLength(output, "utf8")} bytes omitted`));
+  const source = `a${"🙂".repeat(Math.ceil(MAX_TOOL_OUTPUT_BYTES / 4) + 10)}`;
+  const result = truncateToolOutput(source);
+  const output = result.split("\n\n[Output truncated:", 1)[0]!;
+  assert.ok(Buffer.byteLength(output, "utf8") <= MAX_TOOL_OUTPUT_BYTES);
+  assert.equal(output.endsWith("�"), false);
+  assert.match(
+    result,
+    new RegExp(
+      `Output truncated: ${Buffer.byteLength(source, "utf8") - Buffer.byteLength(output, "utf8")} bytes omitted`,
+    ),
+  );
 });
 
 test("subagent footer editor preserves key-release preferences", () => {
-	const base = { focused: false, wantsKeyRelease: true };
-	const editor = new FooterNavigationEditor(base as never, {} as never, {} as never, () => {});
-	assert.equal(editor.wantsKeyRelease, true);
-	editor.wantsKeyRelease = false;
-	assert.equal(base.wantsKeyRelease, false);
+  const base = { focused: false, wantsKeyRelease: true };
+  const editor = new FooterNavigationEditor(
+    base as never,
+    {} as never,
+    {} as never,
+    () => {},
+  );
+  assert.equal(editor.wantsKeyRelease, true);
+  editor.wantsKeyRelease = false;
+  assert.equal(base.wantsKeyRelease, false);
 });
 
 test("subagent detail rendering caches wrapped transcript lines", () => {
-	let contentFormats = 0;
-	const agent = {
-		id: "worker",
-		status: "completed",
-		model: "provider/model",
-		effort: "medium",
-		createdAt: Date.now(),
-		prompt: "task",
-		usage,
-		transcript: [{ timestamp: Date.now(), role: "assistant", text: "hello" }],
-		streamingText: "",
-	};
-	const theme = {
-		fg(_color: string, text: string) {
-			if (text === "hello") contentFormats++;
-			return text;
-		},
-	};
-	const dialog = new AgentDetailDialog(agent as never, { requestRender() {} } as never, theme as never, {} as never, () => {});
-	try {
-		dialog.render(80);
-		dialog.render(80);
-		assert.equal(contentFormats, 1);
-		agent.streamingText = "streaming";
-		dialog.render(80);
-		assert.equal(contentFormats, 2);
-		dialog.render(79);
-		assert.equal(contentFormats, 3);
-		agent.transcript.push({ timestamp: Date.now(), role: "assistant", text: "next" });
-		dialog.render(79);
-		assert.equal(contentFormats, 4);
-	} finally {
-		dialog.dispose();
-	}
+  let contentFormats = 0;
+  const agent = {
+    id: "worker",
+    status: "completed",
+    model: "provider/model",
+    effort: "medium",
+    createdAt: Date.now(),
+    prompt: "task",
+    usage,
+    transcript: [{ timestamp: Date.now(), role: "assistant", text: "hello" }],
+    streamingText: "",
+  };
+  const theme = {
+    fg(_color: string, text: string) {
+      if (text === "hello") contentFormats++;
+      return text;
+    },
+  };
+  const dialog = new AgentDetailDialog(
+    agent as never,
+    { requestRender() {} } as never,
+    theme as never,
+    {} as never,
+    () => {},
+  );
+  try {
+    dialog.render(80);
+    dialog.render(80);
+    assert.equal(contentFormats, 1);
+    agent.streamingText = "streaming";
+    dialog.render(80);
+    assert.equal(contentFormats, 2);
+    dialog.render(79);
+    assert.equal(contentFormats, 3);
+    agent.transcript.push({
+      timestamp: Date.now(),
+      role: "assistant",
+      text: "next",
+    });
+    dialog.render(79);
+    assert.equal(contentFormats, 4);
+  } finally {
+    dialog.dispose();
+  }
 });
 
 test("creating agents reserve capacity before their session exists", () => {
-	assert.equal(countsAgainstSubagentLimit({ status: "creating" }), true);
-	assert.equal(countsAgainstSubagentLimit({ status: "completed", session: {} }), true);
-	assert.equal(countsAgainstSubagentLimit({ status: "failed" }), false);
-	assert.equal(countsAgainstSubagentLimit({ status: "terminated" }), false);
+  assert.equal(countsAgainstSubagentLimit({ status: "creating" }), true);
+  assert.equal(
+    countsAgainstSubagentLimit({ status: "completed", session: {} }),
+    true,
+  );
+  assert.equal(countsAgainstSubagentLimit({ status: "failed" }), false);
+  assert.equal(countsAgainstSubagentLimit({ status: "terminated" }), false);
 });
 
 test("aborting the main run aborts every running subagent and leaves completed agents alone", async () => {
-	const aborted: string[] = [];
-	const agents = [
-		{ status: "working" as const, session: { async abort() { aborted.push("working"); } } },
-		{ status: "creating" as const, session: { async abort() { aborted.push("creating"); } } },
-		{ status: "completed" as const, session: { async abort() { aborted.push("completed"); } } },
-		{ status: "failed" as const },
-	];
-	const results = await abortRunningSubagentSessions(agents);
-	assert.deepEqual(aborted.sort(), ["creating", "working"]);
-	assert.equal(results.length, 2);
-	assert.equal(results.every((result) => result.error === undefined), true);
+  const aborted: string[] = [];
+  const agents = [
+    {
+      status: "working" as const,
+      session: {
+        async abort() {
+          aborted.push("working");
+        },
+      },
+    },
+    {
+      status: "creating" as const,
+      session: {
+        async abort() {
+          aborted.push("creating");
+        },
+      },
+    },
+    {
+      status: "completed" as const,
+      session: {
+        async abort() {
+          aborted.push("completed");
+        },
+      },
+    },
+    { status: "failed" as const },
+  ];
+  const results = await abortRunningSubagentSessions(agents);
+  assert.deepEqual(aborted.sort(), ["creating", "working"]);
+  assert.equal(results.length, 2);
+  assert.equal(
+    results.every((result) => result.error === undefined),
+    true,
+  );
 });
 
 test("terminal provider errors are classified as failures", () => {
-	assert.equal(isFailedStopReason("error"), true);
-	assert.equal(isFailedStopReason("aborted"), true);
-	assert.equal(isFailedStopReason("stop"), false);
-	assert.equal(isFailedStopReason(undefined), false);
+  assert.equal(isFailedStopReason("error"), true);
+  assert.equal(isFailedStopReason("aborted"), true);
+  assert.equal(isFailedStopReason("stop"), false);
+  assert.equal(isFailedStopReason(undefined), false);
 });
 
 test("terminal cleanup classification preserves live subagents and archives unread output", () => {
-	assert.equal(isTerminalSubagentStatus("completed"), true);
-	assert.equal(isTerminalSubagentStatus("failed"), true);
-	assert.equal(isTerminalSubagentStatus("terminated"), true);
-	assert.equal(isTerminalSubagentStatus("creating"), false);
-	assert.equal(isTerminalSubagentStatus("working"), false);
-	assert.equal(isTerminalSubagentStatus("terminating"), false);
-	assert.equal(shouldArchiveTerminalSubagent({ status: "completed", lastReadActivity: 1, activity: [{}, {}] }), true);
-	assert.equal(shouldArchiveTerminalSubagent({ status: "failed", lastReadActivity: 2, activity: [{}, {}] }), false);
-	assert.equal(shouldArchiveTerminalSubagent({ status: "working", lastReadActivity: 0, activity: [{}] }), false);
+  assert.equal(isTerminalSubagentStatus("completed"), true);
+  assert.equal(isTerminalSubagentStatus("failed"), true);
+  assert.equal(isTerminalSubagentStatus("terminated"), true);
+  assert.equal(isTerminalSubagentStatus("creating"), false);
+  assert.equal(isTerminalSubagentStatus("working"), false);
+  assert.equal(isTerminalSubagentStatus("terminating"), false);
+  assert.equal(
+    shouldArchiveTerminalSubagent({
+      status: "completed",
+      lastReadActivity: 1,
+      activity: [{}, {}],
+    }),
+    true,
+  );
+  assert.equal(
+    shouldArchiveTerminalSubagent({
+      status: "failed",
+      lastReadActivity: 2,
+      activity: [{}, {}],
+    }),
+    false,
+  );
+  assert.equal(
+    shouldArchiveTerminalSubagent({
+      status: "working",
+      lastReadActivity: 0,
+      activity: [{}],
+    }),
+    false,
+  );
 });
 
 test("available subagent models honor a configured scope", () => {
-	const available = [
-		{ provider: "openai", id: "large" },
-		{ provider: "openai", id: "small" },
-		{ provider: "anthropic", id: "large" },
-	];
-	assert.deepEqual(
-		filterModelsToScope(available, [{ model: { provider: "openai", id: "small" } }]),
-		[{ provider: "openai", id: "small" }],
-	);
-	assert.equal(filterModelsToScope(available, []), available);
-	assert.deepEqual(
-		inheritedSubagentModel(available[0], undefined),
-		{ provider: "openai", id: "large" },
-		"omitted model inherits the host model even when an explicit-override scope excludes it",
-	);
+  const available = [
+    { provider: "openai", id: "large" },
+    { provider: "openai", id: "small" },
+    { provider: "anthropic", id: "large" },
+  ];
+  assert.deepEqual(
+    filterModelsToScope(available, [
+      { model: { provider: "openai", id: "small" } },
+    ]),
+    [{ provider: "openai", id: "small" }],
+  );
+  assert.equal(filterModelsToScope(available, []), available);
+  assert.deepEqual(
+    inheritedSubagentModel(available[0], undefined),
+    { provider: "openai", id: "large" },
+    "omitted model inherits the host model even when an explicit-override scope excludes it",
+  );
 });
 
 test("inherited subagents reuse headers-only temporary host authentication", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-kit-subagent-auth-"));
-	const previousAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-	const previousGatewayId = process.env.CLOUDFLARE_GATEWAY_ID;
-	process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
-	process.env.CLOUDFLARE_GATEWAY_ID = "test-gateway";
-	try {
-		const hostRuntime = await ModelRuntime.create({
-			authPath: join(directory, "auth.json"),
-			modelsPath: null,
-			refreshOnCreate: false,
-		});
-		await hostRuntime.setRuntimeApiKey("cloudflare-ai-gateway", "session-only-key");
-		assert.deepEqual(hostRuntime.getProviderAuthStatus("cloudflare-ai-gateway"), {
-			configured: true,
-			source: "runtime",
-		});
+  const directory = await mkdtemp(join(tmpdir(), "pi-kit-subagent-auth-"));
+  const previousAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const previousGatewayId = process.env.CLOUDFLARE_GATEWAY_ID;
+  process.env.CLOUDFLARE_ACCOUNT_ID = "test-account";
+  process.env.CLOUDFLARE_GATEWAY_ID = "test-gateway";
+  try {
+    const hostRuntime = await ModelRuntime.create({
+      authPath: join(directory, "auth.json"),
+      modelsPath: null,
+      refreshOnCreate: false,
+    });
+    await hostRuntime.setRuntimeApiKey(
+      "cloudflare-ai-gateway",
+      "session-only-key",
+    );
+    assert.deepEqual(
+      hostRuntime.getProviderAuthStatus("cloudflare-ai-gateway"),
+      {
+        configured: true,
+        source: "runtime",
+      },
+    );
 
-		const inheritedRuntime = subagentModelRuntime(new ModelRegistry(hostRuntime));
-		assert.equal(inheritedRuntime, hostRuntime, "host and child share credential refresh state");
-		const resolved = await inheritedRuntime.getAuth("cloudflare-ai-gateway");
-		assert.ok(resolved);
-		assert.equal(resolved.auth.apiKey, undefined);
-		assert.equal(resolved.auth.headers?.["cf-aig-authorization"], "Bearer session-only-key");
-		assert.deepEqual(resolved.env, {
-			CLOUDFLARE_ACCOUNT_ID: "test-account",
-			CLOUDFLARE_GATEWAY_ID: "test-gateway",
-		});
-	} finally {
-		if (previousAccountId === undefined) delete process.env.CLOUDFLARE_ACCOUNT_ID;
-		else process.env.CLOUDFLARE_ACCOUNT_ID = previousAccountId;
-		if (previousGatewayId === undefined) delete process.env.CLOUDFLARE_GATEWAY_ID;
-		else process.env.CLOUDFLARE_GATEWAY_ID = previousGatewayId;
-		await rm(directory, { recursive: true, force: true });
-	}
+    const inheritedRuntime = subagentModelRuntime(
+      new ModelRegistry(hostRuntime),
+    );
+    assert.equal(
+      inheritedRuntime,
+      hostRuntime,
+      "host and child share credential refresh state",
+    );
+    const resolved = await inheritedRuntime.getAuth("cloudflare-ai-gateway");
+    assert.ok(resolved);
+    assert.equal(resolved.auth.apiKey, undefined);
+    assert.equal(
+      resolved.auth.headers?.["cf-aig-authorization"],
+      "Bearer session-only-key",
+    );
+    assert.deepEqual(resolved.env, {
+      CLOUDFLARE_ACCOUNT_ID: "test-account",
+      CLOUDFLARE_GATEWAY_ID: "test-gateway",
+    });
+  } finally {
+    if (previousAccountId === undefined)
+      delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    else process.env.CLOUDFLARE_ACCOUNT_ID = previousAccountId;
+    if (previousGatewayId === undefined)
+      delete process.env.CLOUDFLARE_GATEWAY_ID;
+    else process.env.CLOUDFLARE_GATEWAY_ID = previousGatewayId;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("subagent model guidance exposes exact choices and inheritance", () => {
-	const guidance = subagentModelGuidance(
-		{ provider: "openai-codex", id: "gpt-5.6-sol" },
-		[
-			{ provider: "openai-codex", id: "gpt-5.6-luna" },
-			{ provider: "openai-codex", id: "gpt-5.6-sol" },
-			{ provider: "openai-codex", id: "gpt-5.6-sol" },
-		],
-	);
-	assert.match(guidance, /inherits openai-codex\/gpt-5\.6-sol when model is omitted/);
-	assert.match(guidance, /openai-codex\/gpt-5\.6-luna, openai-codex\/gpt-5\.6-sol/);
-	assert.doesNotMatch(guidance, /gpt-5\.6-sol, openai-codex\/gpt-5\.6-sol/);
-	assert.match(guidance, /Never shorten, generalize, or invent a model ID/);
+  const guidance = subagentModelGuidance(
+    { provider: "openai-codex", id: "gpt-5.6-sol" },
+    [
+      { provider: "openai-codex", id: "gpt-5.6-luna" },
+      { provider: "openai-codex", id: "gpt-5.6-sol" },
+      { provider: "openai-codex", id: "gpt-5.6-sol" },
+    ],
+  );
+  assert.match(
+    guidance,
+    /inherits openai-codex\/gpt-5\.6-sol when model is omitted/,
+  );
+  assert.match(
+    guidance,
+    /openai-codex\/gpt-5\.6-luna, openai-codex\/gpt-5\.6-sol/,
+  );
+  assert.doesNotMatch(guidance, /gpt-5\.6-sol, openai-codex\/gpt-5\.6-sol/);
+  assert.match(guidance, /Never shorten, generalize, or invent a model ID/);
 });
 
 test("streaming subagent output remains bounded to its newest text", () => {
-	const prefix = "a".repeat(MAX_WEB_STREAMING_CHARS - 2);
-	assert.equal(appendBoundedStreamingText(prefix, "bc"), `${prefix}bc`);
-	assert.equal(appendBoundedStreamingText(prefix, "012345"), `${prefix.slice(4)}012345`);
+  const prefix = "a".repeat(MAX_WEB_STREAMING_CHARS - 2);
+  assert.equal(appendBoundedStreamingText(prefix, "bc"), `${prefix}bc`);
+  assert.equal(
+    appendBoundedStreamingText(prefix, "012345"),
+    `${prefix.slice(4)}012345`,
+  );
 });
 
 test("persisted usage checkpoints reject malformed data", () => {
-	assert.deepEqual(parsePersistedUsageState({ total: usage, accounted: usage }), {
-		total: usage,
-		accounted: usage,
-	});
-	assert.equal(parsePersistedUsageState({ total: usage, accounted: { ...usage, output: "4" } }), undefined);
-	assert.equal(parsePersistedUsageState(null), undefined);
+  assert.deepEqual(
+    parsePersistedUsageState({ total: usage, accounted: usage }),
+    {
+      total: usage,
+      accounted: usage,
+    },
+  );
+  assert.equal(
+    parsePersistedUsageState({
+      total: usage,
+      accounted: { ...usage, output: "4" },
+    }),
+    undefined,
+  );
+  assert.equal(parsePersistedUsageState(null), undefined);
 });
