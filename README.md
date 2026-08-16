@@ -33,6 +33,46 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 
 The subagent extension independently contributes its token use and status to `extensions/session-footer.ts`, the package's generic composable footer. When subagents are involved, a third footer line shows their aggregate status. With an empty editor, press Option+Down (Alt+Down) to select that line and Enter to open the manager; `/subagents` opens it directly. The manager shows individual status and transcripts and supports model, effort, messaging, and termination controls. Run `/subagents-cleanup` to stop and remove every retained subagent.
 
+## Auto model routing
+
+`extensions/auto-router.ts` adds an "Auto" entry to `/model`. Selecting it routes each turn to a model/reasoning-effort pair chosen from your own configured lists, based on the turn's classified complexity, and fails over to other configured models or tiers when one is unhealthy or out of usage.
+
+Configure it under a new `autoRouter` key in `~/.pi/agent/settings.json` (or `.pi/settings.json` for a project override):
+
+```json
+{
+  "autoRouter": {
+    "efforts": {
+      "medium": {
+        "models": [
+          { "provider": "anthropic", "id": "claude-sonnet-4-5" },
+          { "provider": "openai", "id": "gpt-5.3-codex" }
+        ]
+      },
+      "high": {
+        "models": [{ "provider": "anthropic", "id": "claude-opus-4-7" }]
+      },
+      "xhigh": {
+        "models": [{ "provider": "openai", "id": "gpt-5.6-sol" }]
+      }
+    }
+  }
+}
+```
+
+Each tier key is a Pi thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); `medium` is the default/anchor tier. Each tier holds an ordered list of `{ provider, id }` model references — the first is preferred, later entries are failover within that tier.
+
+On every turn, Auto asks the `medium` tier's first healthy model (the "default model") to classify the turn as `low`, `medium`, `high`, or `xhigh`, then routes to the resolved tier: if the classified level has no configured models, it steps toward `medium` until it finds one (a classified `low` with nothing configured there falls back to `medium`). Within that tier it picks the first model that isn't in a failure/rate-limit cooldown; if every model in the tier is unhealthy, it escalates to the next *higher* configured tier; if nothing anywhere is healthy, it uses the first configured model anyway rather than blocking the turn, with a warning.
+
+Health is tracked from the router's own observed traffic (HTTP status codes, rate-limit headers) and, best-effort, reconciled against real provider usage at session start and on `/usage` for providers with a known quota API (currently Anthropic, OpenAI Codex, Z.ai, Kimi Coding, and OpenRouter) — this lets the router self-correct for usage consumed outside the current session (a different session, a manual `/model` pick, another tool) instead of only reacting to its own failures.
+
+Run `/usage` to see health/usage for every configured model, grouped by tier, in a bordered dashboard in the TUI or a compact summary elsewhere (including Pi Web). The `/model` picker's effort/thinking control is inert while Auto is selected, since effort is chosen per turn internally; the footer (and Pi Web's model display) always shows the real underlying model and effort actually in use, plus a small `🔀` badge in the TUI footer while Auto is engaged. Manually picking a different model from `/model` turns Auto off; reselecting "Auto" turns it back on.
+
+### Requirements
+
+- Pi 0.84.1
+- Network access from the machine running Pi, for the optional quota reconciliation calls (never required — routing and `/usage` work fully offline from router-observed data alone)
+
 ## Worktrees
 
 Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the managed checkout. The backward-compatible default creates or reuses local branch `<name>`; a missing branch starts at the selected checkout's `HEAD`.
@@ -129,5 +169,5 @@ bun install --frozen-lockfile
 bun run check
 bun test
 bun run webBuild
-pi -e ./extensions/session-footer.ts -e ./extensions/pr-footer.ts -e ./extensions/subagents.ts -e ./extensions/worktree.ts -e ./extensions/web-sessions.ts
+pi -e ./extensions/session-footer.ts -e ./extensions/pr-footer.ts -e ./extensions/subagents.ts -e ./extensions/worktree.ts -e ./extensions/web-sessions.ts -e ./extensions/auto-router.ts
 ```

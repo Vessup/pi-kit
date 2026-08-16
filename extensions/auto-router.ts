@@ -1,0 +1,501 @@
+import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+  DynamicBorder,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  getMarkdownTheme,
+  type ModelRegistry,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+import { classifyTurnComplexity } from "./auto-router-classify.js";
+import {
+  AutoRouterHealthStore,
+  type ModelHealthEntry,
+  type ModelIdentity,
+  modelKey,
+} from "./auto-router-health.js";
+import { reconcileProviderQuota } from "./auto-router-quota.js";
+import {
+  AUTO_ROUTER_EFFORT_ORDER,
+  type AutoRouterEffortLevel,
+  type AutoRouterModelRef,
+  type AutoRouterSettings,
+  allConfiguredModels,
+  escalationTiers,
+  readAutoRouterSettings,
+  resolveEffortTier,
+} from "./auto-router-settings.js";
+import {
+  FOOTER_CONTRIBUTION_EVENT,
+  type FooterContribution,
+} from "./footer-events.js";
+
+const AUTO_PROVIDER_ID = "auto";
+const AUTO_MODEL_ID = "auto";
+const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
+const AUTO_STATUS_KEY = "auto-router";
+const FOOTER_KEY = "auto-router";
+
+function numeric(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** Resolve config model refs to real, currently-usable `Model` objects (auth configured), preserving order. */
+function resolveAvailableModels(
+  modelRegistry: ModelRegistry,
+  refs: AutoRouterModelRef[],
+): Model<Api>[] {
+  const models: Model<Api>[] = [];
+  for (const ref of refs) {
+    const model = modelRegistry.find(ref.provider, ref.id);
+    if (model && modelRegistry.hasConfiguredAuth(model)) models.push(model);
+  }
+  return models;
+}
+
+function restoreAutoActive(ctx: ExtensionContext): boolean {
+  const entries = ctx.sessionManager.getEntries();
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (
+      entry.type === "custom" &&
+      entry.customType === AUTO_ACTIVE_ENTRY_TYPE
+    ) {
+      const data = entry.data;
+      return isRecord(data) && data.enabled === true;
+    }
+  }
+  return false;
+}
+
+function formatTier(tier: AutoRouterEffortLevel): string {
+  return tier;
+}
+
+function statusLine(tier: AutoRouterEffortLevel, model: ModelIdentity): string {
+  return `🔀 auto → ${formatTier(tier)} · ${model.id}`;
+}
+
+export default function autoRouter(pi: ExtensionAPI): void {
+  pi.registerProvider(AUTO_PROVIDER_ID, {
+    name: "Auto",
+    // Never actually dispatched to: `before_agent_start` always swaps to a real
+    // routed model before any request would be sent here.
+    baseUrl: "http://127.0.0.1:0",
+    apiKey: "auto-router",
+    api: "openai-completions",
+    models: [
+      {
+        id: AUTO_MODEL_ID,
+        name: "Auto",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128_000,
+        maxTokens: 4096,
+      },
+    ],
+  });
+
+  let currentSessionId: string | undefined;
+  let autoActive = false;
+  let routingInFlight = false;
+  let currentInFlightModel: ModelIdentity | undefined;
+  let healthStore = new AutoRouterHealthStore();
+
+  function publishFooter(tier: AutoRouterEffortLevel): void {
+    if (!currentSessionId) return;
+    pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
+      sessionId: currentSessionId,
+      key: FOOTER_KEY,
+      identitySuffix: (theme: Theme) =>
+        theme.fg("accent", `🔀${formatTier(tier)}`),
+    } satisfies FooterContribution);
+  }
+
+  function clearFooter(): void {
+    if (!currentSessionId) return;
+    pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
+      sessionId: currentSessionId,
+      key: FOOTER_KEY,
+      remove: true,
+    } satisfies FooterContribution);
+  }
+
+  /** Pick the best available (resolved + healthy) model for `tier`, escalating to higher configured tiers when everything in `tier` is unhealthy, then falling back to the first available model anywhere as a last resort. */
+  function pickForTier(
+    ctx: ExtensionContext,
+    settings: AutoRouterSettings,
+    tier: AutoRouterEffortLevel,
+  ): { model: Model<Api>; tier: AutoRouterEffortLevel } | undefined {
+    for (const candidateTier of [tier, ...escalationTiers(settings, tier)]) {
+      const refs = settings.efforts[candidateTier]?.models ?? [];
+      const available = resolveAvailableModels(ctx.modelRegistry, refs);
+      const healthy = healthStore.pickHealthy(available);
+      if (healthy) {
+        const model = available.find(
+          (candidate) =>
+            candidate.id === healthy.id &&
+            candidate.provider === healthy.provider,
+        );
+        if (model) return { model, tier: candidateTier };
+      }
+    }
+    // Last resort: nothing healthy anywhere. Use the first resolvable model in `tier`,
+    // or failing that the first resolvable model anywhere, rather than blocking the turn.
+    const fallbackRefs =
+      settings.efforts[tier]?.models ?? allConfiguredModels(settings);
+    const fallback =
+      resolveAvailableModels(ctx.modelRegistry, fallbackRefs)[0] ??
+      resolveAvailableModels(
+        ctx.modelRegistry,
+        allConfiguredModels(settings),
+      )[0];
+    if (fallback) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Auto: every configured ${formatTier(tier)} model looks unavailable; using ${fallback.provider}/${fallback.id} anyway. Check /usage.`,
+          "warning",
+        );
+      }
+      return { model: fallback, tier };
+    }
+    return undefined;
+  }
+
+  async function applyRouting(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    model: Model<Api>,
+    tier: AutoRouterEffortLevel,
+  ): Promise<void> {
+    routingInFlight = true;
+    try {
+      const success = await pi.setModel(model);
+      if (!success) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Auto: no credentials configured for ${model.provider}/${model.id}`,
+            "warning",
+          );
+        }
+        return;
+      }
+      await pi.setThinkingLevel(tier);
+    } finally {
+      routingInFlight = false;
+    }
+    currentInFlightModel = { provider: model.provider, id: model.id };
+    if (ctx.hasUI) ctx.ui.setStatus(AUTO_STATUS_KEY, statusLine(tier, model));
+    publishFooter(tier);
+  }
+
+  async function activateDefault(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    const settings = await readAutoRouterSettings();
+    const picked = pickForTier(ctx, settings, "medium");
+    if (!picked) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          "Auto has no configured models yet. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
+          "warning",
+        );
+      }
+      return;
+    }
+    await applyRouting(pi, ctx, picked.model, picked.tier);
+  }
+
+  async function routeForPrompt(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    prompt: string,
+    hasImages: boolean,
+  ): Promise<void> {
+    const settings = await readAutoRouterSettings();
+    const classifierPool = resolveAvailableModels(
+      ctx.modelRegistry,
+      settings.efforts.medium?.models ?? allConfiguredModels(settings),
+    );
+    const classifierRef = healthStore.pickHealthy(classifierPool);
+    const classifierModel = classifierRef
+      ? classifierPool.find(
+          (m) =>
+            m.id === classifierRef.id && m.provider === classifierRef.provider,
+        )
+      : undefined;
+
+    let level: AutoRouterEffortLevel = "medium";
+    if (classifierModel) {
+      const result = await classifyTurnComplexity(
+        ctx.modelRegistry,
+        classifierModel,
+        prompt,
+        hasImages,
+      );
+      level = result.level;
+      if (result.usage) {
+        healthStore.recordSuccess(modelKey(classifierModel), result.usage);
+      }
+    }
+
+    const tier = resolveEffortTier(settings, level);
+    const picked = pickForTier(ctx, settings, tier);
+    if (!picked) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          "Auto has no configured models yet. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
+          "warning",
+        );
+      }
+      return;
+    }
+    await applyRouting(pi, ctx, picked.model, picked.tier);
+  }
+
+  async function reconcileAllProviders(
+    modelRegistry: ModelRegistry,
+    settings: AutoRouterSettings,
+  ): Promise<void> {
+    const models = allConfiguredModels(settings);
+    const providers = Array.from(
+      new Set(models.map((model) => model.provider)),
+    );
+    await Promise.all(
+      providers.map(async (provider) => {
+        const result = await reconcileProviderQuota(provider, modelRegistry);
+        if (!result) return;
+        for (const model of models) {
+          if (model.provider !== provider) continue;
+          healthStore.applyQuotaResult(modelKey(model), result);
+        }
+      }),
+    );
+  }
+
+  pi.on("model_select", async (event, ctx) => {
+    if (routingInFlight) return;
+    if (event.model.provider === AUTO_PROVIDER_ID) {
+      autoActive = true;
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true });
+      await activateDefault(pi, ctx);
+      return;
+    }
+    if (event.source !== "restore" && autoActive) {
+      autoActive = false;
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: false });
+      currentInFlightModel = undefined;
+      if (ctx.hasUI) ctx.ui.setStatus(AUTO_STATUS_KEY, undefined);
+      clearFooter();
+    }
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    currentSessionId = ctx.sessionManager.getSessionId();
+    routingInFlight = false;
+    currentInFlightModel = undefined;
+    healthStore = new AutoRouterHealthStore();
+    await healthStore.load();
+    autoActive = restoreAutoActive(ctx);
+    if (
+      autoActive &&
+      ctx.model &&
+      ctx.model.provider !== AUTO_PROVIDER_ID &&
+      ctx.thinkingLevel
+    ) {
+      if (ctx.hasUI)
+        ctx.ui.setStatus(
+          AUTO_STATUS_KEY,
+          statusLine(ctx.thinkingLevel, ctx.model),
+        );
+      currentInFlightModel = { provider: ctx.model.provider, id: ctx.model.id };
+      publishFooter(ctx.thinkingLevel);
+    }
+    const settings = await readAutoRouterSettings();
+    void reconcileAllProviders(ctx.modelRegistry, settings);
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!autoActive) return;
+    await routeForPrompt(pi, ctx, event.prompt, Boolean(event.images?.length));
+  });
+
+  pi.on("after_provider_response", (event) => {
+    if (!currentInFlightModel) return;
+    if (event.status >= 200 && event.status < 300) return;
+    healthStore.recordFailure(
+      modelKey(currentInFlightModel),
+      event.status,
+      event.headers,
+    );
+  });
+
+  pi.on("message_end", (event) => {
+    if (!autoActive || !currentInFlightModel) return;
+    if (event.message.role !== "assistant") return;
+    const usage = isRecord(event.message) ? event.message.usage : undefined;
+    healthStore.recordSuccess(modelKey(currentInFlightModel), {
+      input: numeric(isRecord(usage) ? usage.input : undefined),
+      output: numeric(isRecord(usage) ? usage.output : undefined),
+      cost: numeric(
+        isRecord(usage) && isRecord(usage.cost) ? usage.cost.total : undefined,
+      ),
+    });
+  });
+
+  pi.on("session_shutdown", () => {
+    void healthStore.flush();
+    currentSessionId = undefined;
+    autoActive = false;
+    currentInFlightModel = undefined;
+  });
+
+  pi.registerCommand("usage", {
+    description: "Show Auto router health/usage for every configured model",
+    handler: async (_args, ctx: ExtensionCommandContext) => {
+      const settings = await readAutoRouterSettings();
+      if (Object.keys(settings.efforts).length === 0) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            "Auto has no configured models. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
+            "info",
+          );
+        }
+        return;
+      }
+      await reconcileAllProviders(ctx.modelRegistry, settings);
+      const rows = buildUsageRows(settings, healthStore);
+      if (ctx.mode === "tui") {
+        await showUsageDashboard(rows, ctx);
+      } else if (ctx.hasUI) {
+        ctx.ui.notify(formatUsagePlainText(rows), "info");
+      }
+    },
+  });
+}
+
+type UsageRow = {
+  tier: AutoRouterEffortLevel;
+  model: AutoRouterModelRef;
+  entry: ModelHealthEntry | undefined;
+};
+
+function buildUsageRows(
+  settings: AutoRouterSettings,
+  healthStore: AutoRouterHealthStore,
+): UsageRow[] {
+  const rows: UsageRow[] = [];
+  for (const tier of AUTO_ROUTER_EFFORT_ORDER) {
+    for (const model of settings.efforts[tier]?.models ?? []) {
+      rows.push({ tier, model, entry: healthStore.getEntry(modelKey(model)) });
+    }
+  }
+  return rows;
+}
+
+function formatTokenCount(count: number): string {
+  if (count < 1_000) return String(count);
+  if (count < 1_000_000) return `${(count / 1_000).toFixed(1)}k`;
+  return `${(count / 1_000_000).toFixed(1)}M`;
+}
+
+function rowStatus(entry: ModelHealthEntry | undefined, now: number): string {
+  if (!entry) return "unused";
+  if (entry.cooldownUntil && entry.cooldownUntil > now) {
+    const minutes = Math.max(
+      1,
+      Math.round((entry.cooldownUntil - now) / 60_000),
+    );
+    const cause = entry.lastError ? ` (${entry.lastError.status})` : "";
+    return `cooldown${cause} ~${minutes}m`;
+  }
+  return "healthy";
+}
+
+function rowLine(row: UsageRow, now: number): string {
+  const entry = row.entry;
+  const status = rowStatus(entry, now);
+  const requests = entry?.totals.requests ?? 0;
+  const tokens = formatTokenCount(
+    (entry?.totals.input ?? 0) + (entry?.totals.output ?? 0),
+  );
+  const verified = entry?.verifiedAt ? "✓" : "~";
+  return `${row.model.provider}/${row.model.id} — ${status} · ${requests} req · ${tokens} tok ${verified}`;
+}
+
+function formatUsagePlainText(rows: UsageRow[]): string {
+  if (rows.length === 0) return "Auto: no models configured.";
+  const now = Date.now();
+  const byTier = new Map<AutoRouterEffortLevel, UsageRow[]>();
+  for (const row of rows) {
+    const list = byTier.get(row.tier) ?? [];
+    list.push(row);
+    byTier.set(row.tier, list);
+  }
+  const lines: string[] = [];
+  for (const [tier, tierRows] of byTier) {
+    lines.push(
+      `${tier}: ${tierRows.map((row) => rowLine(row, now)).join(" | ")}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatUsageMarkdown(rows: UsageRow[]): string {
+  if (rows.length === 0) return "No models configured.";
+  const now = Date.now();
+  const lines = [
+    "| Tier | Model | Status | Req | Tokens | Cost |",
+    "|---|---|---|---|---|---|",
+  ];
+  for (const row of rows) {
+    const entry = row.entry;
+    const cost = entry ? `$${entry.totals.cost.toFixed(3)}` : "$0.000";
+    const tokens = formatTokenCount(
+      (entry?.totals.input ?? 0) + (entry?.totals.output ?? 0),
+    );
+    const verified = entry?.verifiedAt ? " ✓" : "";
+    lines.push(
+      `| ${row.tier} | ${row.model.provider}/${row.model.id} | ${rowStatus(entry, now)}${verified} | ${entry?.totals.requests ?? 0} | ${tokens} | ${cost} |`,
+    );
+  }
+  return lines.join("\n");
+}
+
+async function showUsageDashboard(
+  rows: UsageRow[],
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+    const container = new Container();
+    const border = new DynamicBorder((s: string) => theme.fg("accent", s));
+    const mdTheme = getMarkdownTheme();
+
+    container.addChild(border);
+    container.addChild(
+      new Text(theme.fg("accent", theme.bold("Auto Router Usage")), 1, 0),
+    );
+    container.addChild(new Markdown(formatUsageMarkdown(rows), 1, 1, mdTheme));
+    container.addChild(
+      new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0),
+    );
+    container.addChild(border);
+
+    return {
+      render: (width: number) => container.render(width),
+      invalidate: () => container.invalidate(),
+      handleInput: (data: string) => {
+        if (matchesKey(data, "enter") || matchesKey(data, "escape"))
+          done(undefined);
+      },
+    };
+  });
+}
