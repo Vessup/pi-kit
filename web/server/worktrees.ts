@@ -200,6 +200,36 @@ async function ensureSupportedGitAsync(): Promise<void> {
 }
 
 export type WorktreeRef = { kind: "branch" | "detached"; value: string };
+
+export type RepositoryBranches = {
+  /** Short local branch names, e.g. "main" or "owner/topic". */
+  local: string[];
+  /** Remote-tracking branches including their remote prefix, e.g. "origin/main". */
+  remote: string[];
+};
+
+/** List local and remote-tracking branches for autocomplete in the browser. */
+export function listRepositoryBranches(cwd: string): RepositoryBranches {
+  const output = gitOutput(cwd, [
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/heads",
+    "refs/remotes",
+  ]);
+  const local: string[] = [];
+  const remote: string[] = [];
+  for (const ref of output.split("\n")) {
+    if (ref.startsWith("refs/heads/"))
+      local.push(ref.slice("refs/heads/".length));
+    else if (ref.startsWith("refs/remotes/")) {
+      const short = ref.slice("refs/remotes/".length);
+      // The symbolic remote HEAD is not a branch anyone can check out.
+      if (!short.endsWith("/HEAD")) remote.push(short);
+    }
+  }
+  return { local, remote };
+}
+
 export type ExistingWebWorktree = {
   path: string;
   repoRoot: string;

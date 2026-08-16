@@ -121,11 +121,14 @@ import {
 } from "./shutdown-policy.js";
 import { SlashCommandService } from "./slash-command-service.js";
 import { createStaticAssetResponder } from "./static-assets.js";
+import { listDirectorySuggestions } from "./suggestions.js";
 import {
   createWebWorktree,
   hasOtherSessionInWorktree,
   inheritManagedBranchOwnership,
+  listRepositoryBranches,
   managedWorktreeFromEntries,
+  type RepositoryBranches,
   removeManagedWorktree,
   removeManagedWorktreeAsync,
   WORKTREE_SESSION_ENTRY,
@@ -1400,7 +1403,9 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
           renameSync(staged.tombstone, staged.source);
         continue;
       }
-      const sourceQueue = persistedQueues.get(sourceId);
+      // replacement is only defined when sourceId is, but the find callback
+      // above loses that narrowing across the closure boundary.
+      const sourceQueue = sourceId ? persistedQueues.get(sourceId) : undefined;
       const replacementQueue = persistedQueues.get(replacement.session.id);
       if (sourceQueue?.length) {
         const ids = new Set<string>();
@@ -3149,9 +3154,46 @@ async function handleApi(request: Request): Promise<Response> {
         commandHello: true,
         queueSteer: true,
         worktreeRefs: true,
+        branchSuggestions: true,
       },
       tailscale: tailscaleStatus,
     });
+  }
+  if (request.method === "GET" && url.pathname === "/api/directories") {
+    return jsonResponse({
+      directories: listDirectorySuggestions(url.searchParams.get("q") ?? "", {
+        baseDir: rootDir,
+      }),
+    });
+  }
+  if (request.method === "GET" && url.pathname === "/api/branches") {
+    const requestedCwd = (url.searchParams.get("cwd") ?? "").trim();
+    if (!requestedCwd) return badRequest("Missing cwd");
+    let cwd: string;
+    try {
+      cwd = resolveWebCwd(requestedCwd, { baseDir: rootDir });
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+    try {
+      if (!statSync(cwd).isDirectory())
+        return badRequest(`cwd is not a directory: ${cwd}`);
+    } catch {
+      return badRequest(`cwd does not exist: ${cwd}`);
+    }
+    let branches: RepositoryBranches;
+    try {
+      branches = listRepositoryBranches(cwd);
+    } catch (error) {
+      // Not a Git repository (or Git is unavailable): the browser just shows
+      // no suggestions instead of surfacing an error mid-typing.
+      return jsonResponse({
+        local: [],
+        remote: [],
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return jsonResponse(branches);
   }
   if (request.method === "POST" && url.pathname === "/api/tailscale") {
     const body = (await request.json().catch(() => undefined)) as
