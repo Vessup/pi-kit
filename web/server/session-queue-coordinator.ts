@@ -203,7 +203,7 @@ export function createSessionQueueCoordinator(
     } satisfies ServerEventMessage);
   }
 
-  function broadcastReloadComplete(record: SessionRecord): void {
+  function broadcastControlComplete(record: SessionRecord, text: string): void {
     broadcast(record.id, {
       type: "server.event",
       sessionId: record.id,
@@ -212,10 +212,18 @@ export function createSessionQueueCoordinator(
         message: {
           role: "assistant",
           timestamp: Date.now(),
-          content: [{ type: "text", text: "Reload complete." }],
+          content: [{ type: "text", text }],
         },
       },
     } satisfies ServerEventMessage);
+  }
+
+  function broadcastReloadComplete(record: SessionRecord): void {
+    broadcastControlComplete(record, "Reload complete.");
+  }
+
+  function broadcastCompactionComplete(record: SessionRecord): void {
+    broadcastControlComplete(record, "Compaction complete.");
   }
 
   function sendSessionState(
@@ -732,6 +740,7 @@ export function createSessionQueueCoordinator(
     broadcastWebQueue,
     broadcastQueueDelivery,
     broadcastReloadComplete,
+    broadcastCompactionComplete,
     sendSessionState,
     flushWebQueue,
     routeQueueCommand,

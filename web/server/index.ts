@@ -776,6 +776,16 @@ async function hydrateGitMetadata(record: SessionRecord): Promise<void> {
   broadcastSessionToAll(record);
 }
 
+async function announceWebCompactionComplete(
+  record: SessionRecord,
+): Promise<void> {
+  // A managed bridge can replace compacted history right after the compact
+  // response resolves. Wait for that snapshot so the completion notice is not
+  // immediately wiped by the authoritative history replacement.
+  await record.compactionHistoryRefresh;
+  broadcastCompactionComplete(record);
+}
+
 async function runRpcSessionCommand(
   record: SessionRecord,
   command: RpcSessionCommand,
@@ -791,8 +801,11 @@ async function runRpcSessionCommand(
       case "set_session_name":
         await record.managed.setSessionName(command.name);
         return undefined;
-      case "compact":
-        return await record.managed.compact(command.customInstructions);
+      case "compact": {
+        const result = await record.managed.compact(command.customInstructions);
+        await announceWebCompactionComplete(record);
+        return result;
+      }
       case "bash":
         return await record.managed.bash(command.command);
       case "extension_ui_response":
@@ -831,8 +844,11 @@ async function runRpcSessionCommand(
           case "set_session_name":
             await temp.setSessionName(command.name);
             return undefined;
-          case "compact":
-            return await temp.compact(command.customInstructions);
+          case "compact": {
+            const result = await temp.compact(command.customInstructions);
+            await announceWebCompactionComplete(record);
+            return result;
+          }
           case "bash":
             return await temp.bash(command.command);
           case "extension_ui_response":
@@ -895,6 +911,7 @@ const {
   cancelWebQueueWork,
   broadcastQueueDelivery,
   broadcastReloadComplete,
+  broadcastCompactionComplete,
   sendSessionState,
   flushWebQueue,
   routeQueueCommand,
@@ -1619,7 +1636,10 @@ async function createManagedSessionUnlocked(
         } satisfies ServerHistoryMessage);
         const runtime = record.managed;
         if (runtime) {
-          void runtime
+          // Track the trailing authoritative snapshot so a web-initiated compact
+          // can wait for it before announcing completion; otherwise the notice
+          // would be wiped by this history replacement on subscribed clients.
+          const refresh: Promise<void> = runtime
             .getMessages()
             .then(({ messages }) => {
               if (
@@ -1639,7 +1659,12 @@ async function createManagedSessionUnlocked(
               console.error(
                 `Could not refresh compacted history for ${record.id}: ${error instanceof Error ? error.message : String(error)}`,
               ),
-            );
+            )
+            .finally(() => {
+              if (record.compactionHistoryRefresh === refresh)
+                record.compactionHistoryRefresh = undefined;
+            });
+          record.compactionHistoryRefresh = refresh;
         }
       }
       broadcast(record.id, {
@@ -2354,8 +2379,11 @@ async function routeCommandCore(
       case "set_session_name":
         await record.managed.setSessionName(command.name);
         return undefined;
-      case "compact":
-        return await record.managed.compact(command.customInstructions);
+      case "compact": {
+        const result = await record.managed.compact(command.customInstructions);
+        await announceWebCompactionComplete(record);
+        return result;
+      }
       case "extension_ui_response":
         return await record.managed.respondToExtensionUi(command);
     }
@@ -2459,6 +2487,7 @@ async function routeCommandCore(
         );
       }
     });
+    if (command.type === "compact") await announceWebCompactionComplete(record);
     if (command.type === "get_session_options") {
       const options = isRecord(data) ? data : {};
       if (Array.isArray(options.commands)) return options;
