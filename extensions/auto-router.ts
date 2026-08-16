@@ -23,6 +23,7 @@ import {
   type AutoRouterModelRef,
   type AutoRouterSettings,
   allConfiguredModels,
+  ensureAutoModelScopedInGlobalSettings,
   escalationTiers,
   readAutoRouterSettings,
   resolveEffortTier,
@@ -321,6 +322,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
     }
     const settings = await readAutoRouterSettings();
     void reconcileAllProviders(ctx.modelRegistry, settings);
+    void ensureAutoModelScopedInGlobalSettings().catch(() => undefined);
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

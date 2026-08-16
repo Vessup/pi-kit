@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   allConfiguredModels,
+  AUTO_MODEL_SCOPE_PATTERN,
   type AutoRouterSettings,
+  ensureAutoModelScoped,
   escalationTiers,
   parseAutoRouterSettings,
   resolveEffortTier,
@@ -168,4 +170,50 @@ test("malformed settings reject without leaking the cross-process lock", async (
   await writeFile(path, JSON.stringify({ recovered: true }));
   await writeAutoRouterSettingsFile(path, EXAMPLE);
   expect(await readSettings(path)).toEqual({ recovered: true, autoRouter: EXAMPLE });
+});
+
+test("ensureAutoModelScoped adds Auto's pattern when scoping is configured", async () => {
+  const path = await settingsPath();
+  await writeFile(path, JSON.stringify({ enabledModels: ["claude-*", "gpt-4o"] }));
+  await ensureAutoModelScoped(path);
+  expect(await readSettings(path)).toEqual({
+    enabledModels: ["claude-*", "gpt-4o", AUTO_MODEL_SCOPE_PATTERN],
+  });
+});
+
+test("ensureAutoModelScoped is a no-op when Auto's pattern is already present", async () => {
+  const path = await settingsPath();
+  await writeFile(path, JSON.stringify({ enabledModels: ["claude-*", AUTO_MODEL_SCOPE_PATTERN] }));
+  await ensureAutoModelScoped(path);
+  expect(await readSettings(path)).toEqual({
+    enabledModels: ["claude-*", AUTO_MODEL_SCOPE_PATTERN],
+  });
+});
+
+test("ensureAutoModelScoped is a no-op when no scoping is configured", async () => {
+  const path = await settingsPath();
+  await writeFile(path, JSON.stringify({ theme: "dark" }));
+  await ensureAutoModelScoped(path);
+  expect(await readSettings(path)).toEqual({ theme: "dark" });
+});
+
+test("ensureAutoModelScoped is a no-op when enabledModels is an empty array", async () => {
+  const path = await settingsPath();
+  await writeFile(path, JSON.stringify({ enabledModels: [] }));
+  await ensureAutoModelScoped(path);
+  expect(await readSettings(path)).toEqual({ enabledModels: [] });
+});
+
+test("ensureAutoModelScoped preserves unrelated keys", async () => {
+  const path = await settingsPath();
+  await writeFile(
+    path,
+    JSON.stringify({ theme: "dark", enabledModels: ["gpt-4o"], autoRouter: EXAMPLE }),
+  );
+  await ensureAutoModelScoped(path);
+  expect(await readSettings(path)).toEqual({
+    theme: "dark",
+    enabledModels: ["gpt-4o", AUTO_MODEL_SCOPE_PATTERN],
+    autoRouter: EXAMPLE,
+  });
 });

@@ -114,10 +114,14 @@ export async function readAutoRouterSettings(): Promise<AutoRouterSettings> {
   }
 }
 
-/** Persist the `autoRouter` setting without dropping keys owned by Pi or other extensions. */
-export async function writeAutoRouterSettingsFile(
+/**
+ * Lock, read, and rewrite the shared settings file. `mutate` receives the current parsed root
+ * (empty object on first write) and returns the new root to persist, or `undefined` to skip
+ * the write entirely (e.g. no change needed) while still safely releasing the lock.
+ */
+async function withLockedSettingsFile(
   settingsPath: string,
-  settings: AutoRouterSettings,
+  mutate: (root: Record<string, unknown>) => Record<string, unknown> | undefined,
   dependencies: Partial<SettingsWriteDependencies> = {},
 ): Promise<void> {
   const io = { ...defaultWriteDependencies, ...dependencies };
@@ -148,13 +152,14 @@ export async function writeAutoRouterSettingsFile(
         );
       }
     }
-    root[SETTINGS_KEY] = settings;
+    const next = mutate(root);
+    if (!next) return;
     const tempPath = join(
       settingsDir,
       `.settings.${process.pid}.${io.randomUUID()}.tmp`,
     );
     try {
-      await io.writeFile(tempPath, `${JSON.stringify(root, null, 2)}\n`, {
+      await io.writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, {
         mode: 0o600,
         flag: "wx",
       });
@@ -167,11 +172,55 @@ export async function writeAutoRouterSettingsFile(
   }
 }
 
+/** Persist the `autoRouter` setting without dropping keys owned by Pi or other extensions. */
+export async function writeAutoRouterSettingsFile(
+  settingsPath: string,
+  settings: AutoRouterSettings,
+  dependencies: Partial<SettingsWriteDependencies> = {},
+): Promise<void> {
+  await withLockedSettingsFile(
+    settingsPath,
+    (root) => ({ ...root, [SETTINGS_KEY]: settings }),
+    dependencies,
+  );
+}
+
 /** Persist the package-specific global `autoRouter` setting without dropping unknown keys. */
 export async function writeAutoRouterSettings(
   settings: AutoRouterSettings,
 ): Promise<void> {
   await writeAutoRouterSettingsFile(settingsPath(), settings);
+}
+
+/** Pattern that matches our registered virtual "Auto" model in `/model`'s scoping patterns. */
+export const AUTO_MODEL_SCOPE_PATTERN = "auto/auto";
+
+/**
+ * Best-effort: Pi's `/model` picker defaults to showing only `enabledModels`-scoped models
+ * when that setting is non-empty, hiding everything else (including our own registered "Auto"
+ * entry) behind a manual Tab toggle to "all". If the user has scoping configured, make sure it
+ * includes a pattern matching Auto so it's visible by default. No-op when scoping isn't
+ * configured at all (everything is already visible) or already includes a matching pattern.
+ */
+export async function ensureAutoModelScoped(
+  settingsPath: string,
+  dependencies: Partial<SettingsWriteDependencies> = {},
+): Promise<void> {
+  await withLockedSettingsFile(
+    settingsPath,
+    (root) => {
+      const current = root.enabledModels;
+      if (!Array.isArray(current) || current.length === 0) return undefined;
+      if (current.includes(AUTO_MODEL_SCOPE_PATTERN)) return undefined;
+      return { ...root, enabledModels: [...current, AUTO_MODEL_SCOPE_PATTERN] };
+    },
+    dependencies,
+  );
+}
+
+/** `ensureAutoModelScoped` against the real global settings file. */
+export async function ensureAutoModelScopedInGlobalSettings(): Promise<void> {
+  await ensureAutoModelScoped(settingsPath());
 }
 
 /**

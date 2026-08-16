@@ -68,6 +68,8 @@ Health is tracked from the router's own observed traffic (HTTP status codes, rat
 
 Run `/usage` to see health/usage for every configured model, grouped by tier, in a bordered dashboard in the TUI or a compact summary elsewhere (including Pi Web). The `/model` picker's effort/thinking control is inert while Auto is selected, since effort is chosen per turn internally; the footer (and Pi Web's model display) always shows the real underlying model and effort actually in use, plus a small `🔀` badge in the TUI footer while Auto is engaged. Manually picking a different model from `/model` turns Auto off; reselecting "Auto" turns it back on.
 
+If you've scoped `/model` with `enabledModels` (or `--models`), Pi's picker defaults to showing only that scoped list, hiding everything else — including Auto — behind a manual Tab to "all". At session start, Auto best-effort appends its own `auto/auto` pattern to `enabledModels` (only when scoping is already configured, and only if it isn't already present) so it shows up in the default scoped view too, without changing anything else about what's scoped.
+
 ### Requirements
 
 - Pi 0.84.1
