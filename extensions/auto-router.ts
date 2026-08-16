@@ -36,7 +36,6 @@ import {
 const AUTO_PROVIDER_ID = "auto";
 const AUTO_MODEL_ID = "auto";
 const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
-const AUTO_STATUS_KEY = "auto-router";
 const FOOTER_KEY = "auto-router";
 
 function numeric(value: unknown): number {
@@ -79,8 +78,8 @@ function formatTier(tier: AutoRouterEffortLevel): string {
   return tier;
 }
 
-function statusLine(tier: AutoRouterEffortLevel, model: ModelIdentity): string {
-  return `🔀 auto → ${formatTier(tier)} · ${model.id}`;
+function footerBadge(tier: AutoRouterEffortLevel | undefined): string {
+  return tier ? `🔀 Auto (${formatTier(tier)})` : "🔀 Auto";
 }
 
 export default function autoRouter(pi: ExtensionAPI): void {
@@ -108,16 +107,31 @@ export default function autoRouter(pi: ExtensionAPI): void {
   let autoActive = false;
   let routingInFlight = false;
   let currentInFlightModel: ModelIdentity | undefined;
+  let lastKnownTier: AutoRouterEffortLevel | undefined;
   let healthStore = new AutoRouterHealthStore();
 
-  function publishFooter(tier: AutoRouterEffortLevel): void {
+  function publishFooter(tier: AutoRouterEffortLevel | undefined): void {
     if (!currentSessionId) return;
     pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
       sessionId: currentSessionId,
       key: FOOTER_KEY,
-      identitySuffix: (theme: Theme) =>
-        theme.fg("accent", `🔀${formatTier(tier)}`),
+      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(tier)),
     } satisfies FooterContribution);
+  }
+
+  /** Swap `ctx.model` back to the inert "auto" placeholder once a turn is fully done, so `/model` keeps showing Auto selected (not whichever real model just handled the turn) between turns. */
+  async function revertToAutoPlaceholder(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    const placeholder = ctx.modelRegistry.find(AUTO_PROVIDER_ID, AUTO_MODEL_ID);
+    if (!placeholder) return;
+    routingInFlight = true;
+    try {
+      await pi.setModel(placeholder);
+    } finally {
+      routingInFlight = false;
+    }
   }
 
   function clearFooter(): void {
@@ -193,26 +207,8 @@ export default function autoRouter(pi: ExtensionAPI): void {
       routingInFlight = false;
     }
     currentInFlightModel = { provider: model.provider, id: model.id };
-    if (ctx.hasUI) ctx.ui.setStatus(AUTO_STATUS_KEY, statusLine(tier, model));
+    lastKnownTier = tier;
     publishFooter(tier);
-  }
-
-  async function activateDefault(
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-  ): Promise<void> {
-    const settings = await readAutoRouterSettings();
-    const picked = pickForTier(ctx, settings, "medium");
-    if (!picked) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          "Auto has no configured models yet. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
-          "warning",
-        );
-      }
-      return;
-    }
-    await applyRouting(pi, ctx, picked.model, picked.tier);
   }
 
   async function routeForPrompt(
@@ -282,19 +278,19 @@ export default function autoRouter(pi: ExtensionAPI): void {
     );
   }
 
-  pi.on("model_select", async (event, ctx) => {
+  pi.on("model_select", (event, _ctx) => {
     if (routingInFlight) return;
     if (event.model.provider === AUTO_PROVIDER_ID) {
       autoActive = true;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true });
-      await activateDefault(pi, ctx);
+      publishFooter(lastKnownTier);
       return;
     }
     if (event.source !== "restore" && autoActive) {
       autoActive = false;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: false });
       currentInFlightModel = undefined;
-      if (ctx.hasUI) ctx.ui.setStatus(AUTO_STATUS_KEY, undefined);
+      lastKnownTier = undefined;
       clearFooter();
     }
   });
@@ -303,26 +299,29 @@ export default function autoRouter(pi: ExtensionAPI): void {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
     currentInFlightModel = undefined;
+    lastKnownTier = undefined;
     healthStore = new AutoRouterHealthStore();
     await healthStore.load();
     autoActive = restoreAutoActive(ctx);
-    if (
-      autoActive &&
-      ctx.model &&
-      ctx.model.provider !== AUTO_PROVIDER_ID &&
-      ctx.thinkingLevel
-    ) {
-      if (ctx.hasUI)
-        ctx.ui.setStatus(
-          AUTO_STATUS_KEY,
-          statusLine(ctx.thinkingLevel, ctx.model),
-        );
-      currentInFlightModel = { provider: ctx.model.provider, id: ctx.model.id };
-      publishFooter(ctx.thinkingLevel);
+    if (autoActive) {
+      if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
+        // Restored mid-turn (e.g. an interrupted process, before agent_settled could
+        // revert it). Normalize back to the placeholder so /model shows Auto again.
+        currentInFlightModel = { provider: ctx.model.provider, id: ctx.model.id };
+        lastKnownTier = ctx.thinkingLevel;
+        await revertToAutoPlaceholder(pi, ctx);
+      }
+      publishFooter(lastKnownTier);
     }
     const settings = await readAutoRouterSettings();
     void reconcileAllProviders(ctx.modelRegistry, settings);
     void ensureAutoModelScopedInGlobalSettings().catch(() => undefined);
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!autoActive) return;
+    if (!ctx.model || ctx.model.provider === AUTO_PROVIDER_ID) return;
+    await revertToAutoPlaceholder(pi, ctx);
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

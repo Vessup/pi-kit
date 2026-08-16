@@ -7,6 +7,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import autoRouter from "../extensions/auto-router.ts";
 import type { AutoRouterSettings } from "../extensions/auto-router-settings.ts";
@@ -40,7 +41,10 @@ function model(provider: string, id: string): Model<Api> {
   return { provider, id } as unknown as Model<Api>;
 }
 
+const AUTO_PLACEHOLDER = model("auto", "auto");
+
 type FakeHandler = (event: unknown, ctx: unknown) => unknown;
+type ModelRef = { value: Model<Api> | undefined };
 
 type FakePi = {
   pi: ExtensionAPI;
@@ -49,6 +53,8 @@ type FakePi = {
   setModelCalls: Model<Api>[];
   thinkingLevelCalls: string[];
   appendedEntries: Array<{ type: string; data: unknown }>;
+  footerEvents: unknown[];
+  currentModel: ModelRef;
 };
 
 function createFakePi(): FakePi {
@@ -57,6 +63,8 @@ function createFakePi(): FakePi {
   const setModelCalls: Model<Api>[] = [];
   const thinkingLevelCalls: string[] = [];
   const appendedEntries: Array<{ type: string; data: unknown }> = [];
+  const footerEvents: unknown[] = [];
+  const currentModel: ModelRef = { value: undefined };
 
   const pi = {
     registerProvider: () => undefined,
@@ -70,9 +78,10 @@ function createFakePi(): FakePi {
     appendEntry: (type: string, data: unknown) => {
       appendedEntries.push({ type, data });
     },
-    events: { emit: () => undefined, on: () => () => undefined },
+    events: { emit: (_event: string, value: unknown) => footerEvents.push(value), on: () => () => undefined },
     setModel: async (m: Model<Api>) => {
       setModelCalls.push(m);
+      currentModel.value = m;
       return true;
     },
     setThinkingLevel: async (level: string) => {
@@ -95,7 +104,16 @@ function createFakePi(): FakePi {
     setModelCalls,
     thinkingLevelCalls,
     appendedEntries,
+    footerEvents,
+    currentModel,
   };
+}
+
+const FAKE_THEME = { fg: (_kind: string, text: string) => text } as unknown as Theme;
+
+function lastFooterBadge(footerEvents: unknown[]): string | undefined {
+  const last = footerEvents.at(-1) as { identitySuffix?: (theme: Theme) => string | undefined } | undefined;
+  return last?.identitySuffix?.(FAKE_THEME);
 }
 
 type FakeRegistryOptions = {
@@ -105,9 +123,11 @@ type FakeRegistryOptions = {
 };
 
 function fakeModelRegistry({ models, unavailable = [], classify }: FakeRegistryOptions) {
+  // Real Pi always has our registered "auto" placeholder findable, same as any other provider.
+  const allModels = [...models, AUTO_PLACEHOLDER];
   const unavailableKeys = new Set(unavailable.map((m) => `${m.provider}/${m.id}`));
   return {
-    find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+    find: (provider: string, id: string) => allModels.find((m) => m.provider === provider && m.id === id),
     hasConfiguredAuth: (m: Model<Api>) => !unavailableKeys.has(`${m.provider}/${m.id}`),
     getApiKeyForProvider: async () => undefined,
     complete: async (_model: Model<Api>, context: { messages: Array<{ content: Array<{ text?: string }> }> }) => {
@@ -120,16 +140,19 @@ function fakeModelRegistry({ models, unavailable = [], classify }: FakeRegistryO
 
 function fakeCtx(options: {
   modelRegistry: ReturnType<typeof fakeModelRegistry>;
+  currentModel?: ModelRef;
   model?: Model<Api>;
   thinkingLevel?: string;
   entries?: unknown[];
 }) {
   const notifications: Array<{ message: string; type?: string }> = [];
-  const statuses = new Map<string, string | undefined>();
+  const modelRef = options.currentModel ?? { value: options.model };
   return {
     hasUI: true,
     mode: "rpc",
-    model: options.model,
+    get model() {
+      return modelRef.value;
+    },
     thinkingLevel: options.thinkingLevel,
     modelRegistry: options.modelRegistry,
     sessionManager: {
@@ -138,35 +161,34 @@ function fakeCtx(options: {
     },
     ui: {
       notify: (message: string, type?: string) => notifications.push({ message, type }),
-      setStatus: (_key: string, text: string | undefined) => statuses.set(_key, text),
+      setStatus: () => undefined,
       custom: async () => undefined,
     },
     notifications,
-    statuses,
-  } as unknown as ExtensionContext & { notifications: typeof notifications; statuses: typeof statuses };
+  } as unknown as ExtensionContext & { notifications: typeof notifications };
 }
 
-test("selecting Auto immediately routes to the first available medium-tier model", async () => {
+function selectAuto(fake: FakePi, ctx: unknown): Promise<unknown> {
+  return fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
+}
+
+test("selecting Auto marks it active without eagerly routing, showing a neutral footer badge", async () => {
   const a = model("prov", "model-a");
-  const b = model("prov", "model-b");
-  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }, { provider: "prov", id: "model-b" }] } } });
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
   autoRouter(fake.pi);
-  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [a, b] }) });
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [a] }), currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
-  await fake.fire(
-    "model_select",
-    { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" },
-    ctx,
-  );
+  await selectAuto(fake, ctx);
 
-  expect(fake.setModelCalls).toEqual([a]);
-  expect(fake.thinkingLevelCalls).toEqual(["medium"]);
+  expect(fake.setModelCalls).toEqual([]);
+  expect(fake.thinkingLevelCalls).toEqual([]);
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto");
 });
 
-test("before_agent_start classifies the turn and routes to the matching tier", async () => {
+test("before_agent_start routes to the classified tier, and the picker shows Auto again once the turn settles", async () => {
   const medium = model("prov", "medium-model");
   const high = model("prov", "high-model");
   await writeConfig({
@@ -182,17 +204,25 @@ test("before_agent_start classifies the turn and routes to the matching tier", a
     models: [medium, high],
     classify: (prompt) => (prompt.includes("refactor") ? "high" : "medium"),
   });
-  const ctx = fakeCtx({ modelRegistry: registry });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
-  await fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
-  fake.setModelCalls.length = 0;
-  fake.thinkingLevelCalls.length = 0;
+  await selectAuto(fake, ctx);
 
   await fake.fire("before_agent_start", { prompt: "please refactor this multi-file module" }, ctx);
-
   expect(fake.setModelCalls).toEqual([high]);
   expect(fake.thinkingLevelCalls).toEqual(["high"]);
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
+  // Mid-turn, /model would show the real routed model, not "Auto".
+  expect(ctx.model).toEqual(high);
+
+  await fake.fire("agent_settled", {}, ctx);
+
+  // Once the turn settles, /model shows Auto selected again...
+  expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
+  expect(fake.setModelCalls.at(-1)).toEqual(AUTO_PLACEHOLDER);
+  // ...while the footer badge keeps reflecting the last real routing.
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
 });
 
 test("routing escalates to a higher tier when the classified tier is entirely unhealthy", async () => {
@@ -210,11 +240,10 @@ test("routing escalates to a higher tier when the classified tier is entirely un
   const fake = createFakePi();
   autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [medium, c, d], classify: () => "high" });
-  const ctx = fakeCtx({ modelRegistry: registry });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
-  await fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
-  fake.setModelCalls.length = 0;
+  await selectAuto(fake, ctx);
 
   // First turn classifies "high" and routes to the high-tier model, making it current.
   await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
@@ -239,13 +268,15 @@ test("routing falls back to the classified tier's model as a last resort when no
   const fake = createFakePi();
   autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [only] });
-  const ctx = fakeCtx({ modelRegistry: registry });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
-  await fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
+  await selectAuto(fake, ctx);
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  await fake.fire("after_provider_response", { status: 401, headers: {} }, ctx);
   fake.setModelCalls.length = 0;
 
-  await fake.fire("after_provider_response", { status: 401, headers: {} }, ctx);
   await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
 
   expect(fake.setModelCalls).toEqual([only]);
@@ -269,10 +300,12 @@ test("a recorded failure fails over to the next configured model in the same tie
   const fake = createFakePi();
   autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, b] });
-  const ctx = fakeCtx({ modelRegistry: registry });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
-  await fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
+  await selectAuto(fake, ctx);
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
   expect(fake.setModelCalls).toEqual([a]);
 
   // model-a gets rate limited.
@@ -291,15 +324,32 @@ test("manually picking a real model while Auto is active turns Auto off", async 
   const fake = createFakePi();
   autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, manual] });
-  const ctx = fakeCtx({ modelRegistry: registry });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
-  await fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
+  await selectAuto(fake, ctx);
   await fake.fire("model_select", { model: manual, previousModel: a, source: "set" }, ctx);
   fake.setModelCalls.length = 0;
 
   await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
   expect(fake.setModelCalls).toEqual([]);
+});
+
+test("deactivating Auto removes its footer badge", async () => {
+  const a = model("prov", "model-a");
+  const manual = model("prov", "manual-model");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [a, manual] }), currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto");
+
+  await fake.fire("model_select", { model: manual, previousModel: a, source: "set" }, ctx);
+  expect(fake.footerEvents.at(-1)).toMatchObject({ remove: true });
 });
 
 test("/usage with no configured models notifies instead of throwing", async () => {
@@ -311,22 +361,44 @@ test("/usage with no configured models notifies instead of throwing", async () =
   expect(ctx.notifications.some((n) => n.message.includes("no configured models"))).toBe(true);
 });
 
-test("session_start restores an active Auto session without re-routing", async () => {
+test("session_start on a cleanly-idle Auto session leaves the placeholder selected", async () => {
   const already = model("prov", "already-selected");
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "already-selected" }] } } });
 
   const fake = createFakePi();
   autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [already] });
+  fake.currentModel.value = AUTO_PLACEHOLDER;
   const ctx = fakeCtx({
     modelRegistry: registry,
-    model: already,
-    thinkingLevel: "medium",
+    currentModel: fake.currentModel,
     entries: [{ type: "custom", customType: "vessup:auto-router:active", data: { enabled: true } }],
   });
 
   await fake.fire("session_start", {}, ctx);
 
   expect(fake.setModelCalls).toEqual([]);
-  expect(ctx.statuses.get("auto-router")).toContain("already-selected");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto");
+});
+
+test("session_start restored mid-turn (e.g. after a crash) reverts back to the Auto placeholder", async () => {
+  const already = model("prov", "already-selected");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "already-selected" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [already] });
+  fake.currentModel.value = already;
+  const ctx = fakeCtx({
+    modelRegistry: registry,
+    currentModel: fake.currentModel,
+    thinkingLevel: "medium",
+    entries: [{ type: "custom", customType: "vessup:auto-router:active", data: { enabled: true } }],
+  });
+
+  await fake.fire("session_start", {}, ctx);
+
+  expect(fake.setModelCalls).toEqual([AUTO_PLACEHOLDER]);
+  expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (medium)");
 });
