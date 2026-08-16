@@ -58,6 +58,7 @@ import {
 } from "../protocol";
 import { includeWebReloadCommand, isWebReloadCommand } from "../reload-command";
 import {
+  type BranchSuggestions,
   cloneSessionViaCommand,
   compactSessionViaCommand,
   createSession,
@@ -65,6 +66,8 @@ import {
   type ForkMessageItem,
   forkSessionViaCommand,
   getForkMessages,
+  listBranchSuggestions,
+  listDirectorySuggestions,
   listSessions,
   openSessionSocket,
   renameSessionViaCommand,
@@ -90,10 +93,6 @@ import {
   localCommandEntryId,
   preserveLocalCommandEntries,
 } from "./local-command";
-import {
-  type RecentRepository,
-  recentRepositories,
-} from "./recent-repositories";
 import {
   mergeSemanticHistory,
   preserveSemanticEntryKeys,
@@ -391,79 +390,282 @@ function projectGroups(sessions: WebSession[]): ProjectSessionGroup[] {
   return Array.from(groups.values());
 }
 
+type Suggestion = { value: string; label?: string };
+
+function filterSuggestions(
+  suggestions: readonly Suggestion[],
+  query: string,
+): Suggestion[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) return [...suggestions];
+  return suggestions.filter(
+    (suggestion) =>
+      suggestion.value.toLowerCase().includes(trimmed) ||
+      (suggestion.value.split(/[\\/]/).pop() ?? "")
+        .toLowerCase()
+        .includes(trimmed),
+  );
+}
+
+/** Text input with an anchored autocomplete list driven by caller-provided suggestions. */
+function AutocompleteInput({
+  id,
+  label,
+  value,
+  onChange,
+  suggestions,
+  placeholder,
+  hint,
+  acceptSuffix,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  suggestions: readonly Suggestion[];
+  placeholder?: string;
+  hint?: string;
+  /** Appended to accepted values, e.g. "/" for directories so the menu keeps drilling down. */
+  acceptSuffix?: string;
+}) {
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  const [open, setOpen] = React.useState(false);
+  const [activeIndex, setActiveIndex] = React.useState(0);
+  const filtered = React.useMemo(
+    () => filterSuggestions(suggestions, value),
+    [suggestions, value],
+  );
+  React.useEffect(() => {
+    setActiveIndex((index) => Math.min(index, filtered.length - 1));
+  }, [filtered.length]);
+  const popoverOpen = open && filtered.length > 0;
+  const accept = (suggestion: Suggestion) => {
+    const completed = suggestion.value.endsWith(acceptSuffix ?? "")
+      ? suggestion.value
+      : suggestion.value + (acceptSuffix ?? "");
+    onChange(completed);
+    // With a completion suffix the next segment's suggestions load next; keep
+    // the menu up so repeated Tab presses drill down the path.
+    if (!acceptSuffix) setOpen(false);
+    inputRef.current?.focus();
+  };
+  return (
+    <div className="space-y-2">
+      <label
+        className="text-xs uppercase tracking-wider text-zinc-500"
+        htmlFor={id}
+      >
+        {label}
+      </label>
+      <Input
+        id={id}
+        ref={inputRef}
+        value={value}
+        placeholder={placeholder}
+        autoComplete="off"
+        onChange={(event) => {
+          onChange(event.target.value);
+          setOpen(true);
+          setActiveIndex(0);
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(event) => {
+          if (!popoverOpen) return;
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setActiveIndex((index) => Math.min(index + 1, filtered.length - 1));
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setActiveIndex((index) => Math.max(index - 1, 0));
+          } else if (event.key === "Enter" || event.key === "Tab") {
+            // Tab accepts the highlighted option instead of moving focus; the
+            // menu closes, so a second Tab advances to the next field as usual.
+            const suggestion = filtered[activeIndex];
+            if (suggestion) {
+              event.preventDefault();
+              accept(suggestion);
+            }
+          } else if (event.key === "Escape") {
+            // Consume Escape while the menu is up so it dismisses the menu
+            // instead of bubbling to the dialog and closing the whole modal.
+            event.stopPropagation();
+            setOpen(false);
+          }
+        }}
+      />
+      <AnchoredPopover
+        open={popoverOpen}
+        onOpenChange={setOpen}
+        anchorRef={inputRef}
+        placement="below"
+        matchAnchorWidth
+        className="max-h-64 overflow-y-auto text-sm"
+      >
+        <ul id={`${id}-listbox`}>
+          {filtered.map((suggestion, index) => (
+            <li key={suggestion.value}>
+              <button
+                type="button"
+                className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-1.5 text-left ${
+                  index === activeIndex
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-300"
+                }`}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => accept(suggestion)}
+              >
+                <span className="truncate">{suggestion.value}</span>
+                {suggestion.label ? (
+                  <span className="shrink-0 text-xs text-zinc-500">
+                    {suggestion.label}
+                  </span>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </AnchoredPopover>
+      {hint ? <p className="text-xs text-zinc-500">{hint}</p> : null}
+    </div>
+  );
+}
+
+/** Turn a branch name such as owner/topic into one safe worktree path segment. */
+function worktreeNameFromBranch(branch: string): string {
+  return branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 function NewSessionDialog({
   open,
-  baseSession,
-  repositories,
   onOpenChange,
   onCreate,
 }: {
   open: boolean;
-  baseSession: WebSession | null;
-  repositories: RecentRepository[];
   onOpenChange: (open: boolean) => void;
   onCreate: (value: CreateSessionRequest) => Promise<void>;
 }) {
   const [repository, setRepository] = React.useState("");
-  const [name, setName] = React.useState("");
+  const [repositorySuggestions, setRepositorySuggestions] = React.useState<
+    Suggestion[]
+  >([]);
+  const [branch, setBranch] = React.useState("");
+  const [branchSuggestions, setBranchSuggestions] =
+    React.useState<BranchSuggestions>({ local: [], remote: [] });
   const [worktreeName, setWorktreeName] = React.useState("");
-  const [worktreeBranch, setWorktreeBranch] = React.useState("");
-  const [worktreeStartPoint, setWorktreeStartPoint] = React.useState("");
+  const [worktreeNameEdited, setWorktreeNameEdited] = React.useState(false);
+  const [name, setName] = React.useState("");
+  const [nameEdited, setNameEdited] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [createError, setCreateError] = React.useState<string | null>(null);
   const repositoryListId = React.useId();
   React.useEffect(() => {
     if (!open) return;
-    setRepository(baseSession?.repositoryRoot ?? baseSession?.cwd ?? "");
-    setName("");
+    setRepository("~/");
+    setRepositorySuggestions([]);
+    setBranch("");
+    setBranchSuggestions({ local: [], remote: [] });
     setWorktreeName("");
-    setWorktreeBranch("");
-    setWorktreeStartPoint("");
+    setWorktreeNameEdited(false);
+    setName("");
+    setNameEdited(false);
     setBusy(false);
     setCreateError(null);
-  }, [baseSession?.cwd, baseSession?.repositoryRoot, open]);
+  }, [open]);
+  React.useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      void listDirectorySuggestions(repository).then((directories) => {
+        if (!cancelled)
+          setRepositorySuggestions(
+            directories.map((directory) => ({ value: directory })),
+          );
+      });
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [open, repository]);
+  const repositoryQuery = repository.trim();
+  React.useEffect(() => {
+    if (!open || !repositoryQuery) return;
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      void listBranchSuggestions(repositoryQuery).then((branches) => {
+        if (!cancelled) setBranchSuggestions(branches);
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [open, repositoryQuery]);
+  const branchSuggestionsForInput = React.useMemo<Suggestion[]>(
+    () => [
+      ...branchSuggestions.local.map((value) => ({ value, label: "local" })),
+      ...branchSuggestions.remote.map((value) => ({ value, label: "remote" })),
+    ],
+    [branchSuggestions],
+  );
+  const trimmedBranch = branch.trim();
+  // A branch that matches a remote-tracking ref selects it: the local branch
+  // is derived by stripping the remote prefix, and the remote ref becomes the
+  // start point so the new branch tracks it.
+  const remoteBranch = branchSuggestions.remote.find(
+    (candidate) => candidate === trimmedBranch,
+  );
+  const localBranch = remoteBranch
+    ? remoteBranch.slice(remoteBranch.indexOf("/") + 1)
+    : trimmedBranch;
+  const startPoint =
+    remoteBranch && !branchSuggestions.local.includes(localBranch)
+      ? remoteBranch
+      : undefined;
+  React.useEffect(() => {
+    if (worktreeNameEdited) return;
+    setWorktreeName(worktreeNameFromBranch(localBranch));
+  }, [localBranch, worktreeNameEdited]);
+  React.useEffect(() => {
+    if (nameEdited) return;
+    setName(worktreeName.trim());
+  }, [nameEdited, worktreeName]);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New session</DialogTitle>
           <DialogDescription>
-            Choose a repository or directory. Add a worktree name to create or
-            reuse a linked checkout.
+            Choose a repository directory. Pick a branch to open it in a linked
+            worktree.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
-          <div className="space-y-2">
-            <label
-              className="text-xs uppercase tracking-wider text-zinc-500"
-              htmlFor={`${repositoryListId}-input`}
-            >
-              repository
-            </label>
-            <Input
-              id={`${repositoryListId}-input`}
-              list={repositoryListId}
-              autoComplete="off"
-              value={repository}
-              onChange={(event) => {
-                setRepository(event.target.value);
-                setCreateError(null);
-              }}
-              placeholder="~/path/to/repository"
-              role="combobox"
-              aria-autocomplete="list"
-            />
-            <datalist id={repositoryListId}>
-              {repositories.map((item) => (
-                <option key={item.id} value={item.path}>
-                  {item.name}
-                </option>
-              ))}
-            </datalist>
-            <p className="text-xs text-zinc-500">
-              Recently used repositories appear as you type.
-            </p>
-          </div>
+          <AutocompleteInput
+            id={`${repositoryListId}-input`}
+            label="repository"
+            value={repository}
+            onChange={(value) => {
+              setRepository(value);
+              setCreateError(null);
+            }}
+            suggestions={repositorySuggestions}
+            placeholder="~/path/to/repository"
+            acceptSuffix="/"
+            hint="Suggestions list directories under ~ and stop once a Git repository is selected."
+          />
+          <AutocompleteInput
+            id={`${repositoryListId}-branch`}
+            label="worktree branch"
+            value={branch}
+            onChange={(value) => {
+              setBranch(value);
+              setCreateError(null);
+            }}
+            suggestions={branchSuggestionsForInput}
+            placeholder="Optional, e.g. main or origin/owner/topic"
+            hint="Local and remote branches of the repository. Choosing a remote branch creates a local branch that tracks it."
+          />
           <div className="space-y-2">
             <label
               className="text-xs uppercase tracking-wider text-zinc-500"
@@ -476,58 +678,16 @@ function NewSessionDialog({
               value={worktreeName}
               onChange={(event) => {
                 setWorktreeName(event.target.value);
+                setWorktreeNameEdited(true);
                 setCreateError(null);
               }}
               placeholder="Optional managed directory name"
             />
             <p className="text-xs text-zinc-500">
-              Creates or reuses{" "}
-              <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>. The
-              branch can have a different, namespaced name.
+              Generated from the branch; edit to override. Creates or reuses{" "}
+              <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>.
             </p>
           </div>
-          {worktreeName.trim() && (
-            <>
-              <div className="space-y-2">
-                <label
-                  className="text-xs uppercase tracking-wider text-zinc-500"
-                  htmlFor={`${repositoryListId}-branch`}
-                >
-                  local branch
-                </label>
-                <Input
-                  id={`${repositoryListId}-branch`}
-                  value={worktreeBranch}
-                  onChange={(event) => {
-                    setWorktreeBranch(event.target.value);
-                    setCreateError(null);
-                  }}
-                  placeholder={`Defaults to ${worktreeName.trim()}`}
-                />
-              </div>
-              <div className="space-y-2">
-                <label
-                  className="text-xs uppercase tracking-wider text-zinc-500"
-                  htmlFor={`${repositoryListId}-start-point`}
-                >
-                  start point
-                </label>
-                <Input
-                  id={`${repositoryListId}-start-point`}
-                  value={worktreeStartPoint}
-                  onChange={(event) => {
-                    setWorktreeStartPoint(event.target.value);
-                    setCreateError(null);
-                  }}
-                  placeholder="Optional, e.g. origin/owner/topic"
-                />
-                <p className="text-xs text-zinc-500">
-                  Used only when creating a missing local branch. A
-                  remote-tracking ref configures its upstream.
-                </p>
-              </div>
-            </>
-          )}
           <div className="space-y-2">
             <label
               className="text-xs uppercase tracking-wider text-zinc-500"
@@ -538,9 +698,15 @@ function NewSessionDialog({
             <Input
               id={`${repositoryListId}-session-name`}
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setName(event.target.value);
+                setNameEdited(true);
+              }}
               placeholder="Optional display name"
             />
+            <p className="text-xs text-zinc-500">
+              Generated from the worktree name; edit to override.
+            </p>
           </div>
           {createError && (
             <p
@@ -558,18 +724,16 @@ function NewSessionDialog({
               setBusy(true);
               setCreateError(null);
               try {
+                const resolvedWorktreeName =
+                  worktreeName.trim() || worktreeNameFromBranch(localBranch);
                 await onCreate({
                   cwd: repository.trim(),
                   name: name.trim() || undefined,
-                  worktreeName: worktreeName.trim() || undefined,
-                  worktreeBranch:
-                    worktreeName.trim() && worktreeBranch.trim()
-                      ? worktreeBranch.trim()
-                      : undefined,
-                  worktreeStartPoint:
-                    worktreeName.trim() && worktreeStartPoint.trim()
-                      ? worktreeStartPoint.trim()
-                      : undefined,
+                  worktreeName: localBranch
+                    ? resolvedWorktreeName || undefined
+                    : undefined,
+                  worktreeBranch: localBranch || undefined,
+                  worktreeStartPoint: localBranch ? startPoint : undefined,
                 });
                 onOpenChange(false);
               } catch (cause) {
@@ -1166,10 +1330,12 @@ function SessionListItem({
     <div
       ref={overlay ? undefined : sortable.setNodeRef}
       style={style}
-      role="button"
-      tabIndex={0}
       {...(overlay ? {} : sortable.attributes)}
       {...(overlay ? {} : sortable.listeners)}
+      // Explicit role/tabIndex after the spread so an overlay row (no dnd
+      // attributes) is still keyboard reachable.
+      role="button"
+      tabIndex={0}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -2066,10 +2232,6 @@ export function App() {
       orderedSessions.filter((session) => sessionMatches(session, filterQuery)),
     [filterQuery, orderedSessions],
   );
-  const repositorySuggestions = React.useMemo(
-    () => recentRepositories(sessions),
-    [sessions],
-  );
 
   const sendSemanticPrompt = React.useCallback(
     async (
@@ -2506,8 +2668,6 @@ export function App() {
     <div className="pi-web-shell bg-[#09090b] text-zinc-100">
       <NewSessionDialog
         open={newSessionOpen}
-        baseSession={selectedSession}
-        repositories={repositorySuggestions}
         onOpenChange={setNewSessionOpen}
         onCreate={handleCreate}
       />

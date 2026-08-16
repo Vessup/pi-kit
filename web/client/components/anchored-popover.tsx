@@ -10,7 +10,22 @@ type AnchoredPopoverProps = {
   children: React.ReactNode;
   className?: string;
   align?: "start" | "end";
+  /** "auto" flips above the anchor when there is no room below; "below" stays under it. */
+  placement?: "auto" | "below";
+  /** Size the panel to the anchor's width instead of its content. */
+  matchAnchorWidth?: boolean;
 };
+
+const MIN_PANEL_HEIGHT = 96;
+const POPUP_GAP = 6;
+const POPUP_MARGIN = 8;
+
+function panelMaxHeightCap(panel: HTMLElement | null): number | undefined {
+  if (!panel) return undefined;
+  const css = window.getComputedStyle(panel).maxHeight;
+  const parsed = css ? Number.parseFloat(css) : Number.NaN;
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
 
 export function AnchoredPopover({
   open,
@@ -19,9 +34,21 @@ export function AnchoredPopover({
   children,
   className,
   align = "end",
+  placement = "auto",
+  matchAnchorWidth = false,
 }: AnchoredPopoverProps) {
   const panelRef = React.useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = React.useState({ left: 8, top: 8 });
+  const [anchorWidth, setAnchorWidth] = React.useState<number | undefined>(
+    undefined,
+  );
+  const [maxHeight, setMaxHeight] = React.useState<number | undefined>(
+    undefined,
+  );
+  // Computed maxHeight reflects our inline override once applied, so remember
+  // the stylesheet cap (e.g. max-h-64) separately to avoid ratcheting down.
+  const classMaxHeightRef = React.useRef<number | undefined>(undefined);
+  const appliedMaxHeightRef = React.useRef<number | undefined>(undefined);
 
   React.useLayoutEffect(() => {
     if (!open) return;
@@ -31,17 +58,76 @@ export function AnchoredPopover({
       const panel = panelRef.current;
       if (!anchor) return;
       const rect = anchor.getBoundingClientRect();
+      setAnchorWidth((current) =>
+        current === rect.width ? current : rect.width,
+      );
       const viewport = window.visualViewport;
+      const viewportBox = {
+        offsetLeft: viewport?.offsetLeft ?? 0,
+        offsetTop: viewport?.offsetTop ?? 0,
+        width: viewport?.width ?? window.innerWidth,
+        height: viewport?.height ?? window.innerHeight,
+      };
+      const panelWidth = matchAnchorWidth
+        ? rect.width
+        : (panel?.offsetWidth ?? 240);
+      if (placement === "below") {
+        // Prefer the conventional position under the field, but with the
+        // mobile keyboard open there may be no room: cap the panel height to
+        // the available space and flip above rather than covering the input.
+        const viewportBottom = viewportBox.offsetTop + viewportBox.height;
+        const roomBelow =
+          viewportBottom - POPUP_MARGIN - (rect.bottom + POPUP_GAP);
+        const roomAbove =
+          rect.top - POPUP_GAP - (viewportBox.offsetTop + POPUP_MARGIN);
+        const below = roomBelow >= MIN_PANEL_HEIGHT || roomBelow >= roomAbove;
+        const room = below ? roomBelow : roomAbove;
+        const computedCap = panelMaxHeightCap(panel);
+        if (
+          computedCap !== undefined &&
+          computedCap !== appliedMaxHeightRef.current
+        ) {
+          classMaxHeightRef.current = computedCap;
+        }
+        const cssCap = classMaxHeightRef.current;
+        const capped = Math.max(
+          Math.min(MIN_PANEL_HEIGHT, room),
+          Math.min(room, cssCap ?? Number.POSITIVE_INFINITY),
+        );
+        appliedMaxHeightRef.current = capped;
+        setMaxHeight((current) => (current === capped ? current : capped));
+        const desiredLeft =
+          align === "start" ? rect.left : rect.right - panelWidth;
+        const next = {
+          left: Math.max(
+            viewportBox.offsetLeft + POPUP_MARGIN,
+            Math.min(
+              viewportBox.offsetLeft +
+                viewportBox.width -
+                panelWidth -
+                POPUP_MARGIN,
+              desiredLeft,
+            ),
+          ),
+          top: below
+            ? rect.bottom + POPUP_GAP
+            : Math.max(
+                viewportBox.offsetTop + POPUP_MARGIN,
+                rect.top - POPUP_GAP - capped,
+              ),
+        };
+        setPosition((current) =>
+          current.left === next.left && current.top === next.top
+            ? current
+            : next,
+        );
+        return;
+      }
       const next = anchoredPopoverPosition({
         anchor: rect,
-        panelWidth: panel?.offsetWidth ?? 240,
+        panelWidth,
         panelHeight: panel?.offsetHeight ?? 200,
-        viewport: {
-          offsetLeft: viewport?.offsetLeft ?? 0,
-          offsetTop: viewport?.offsetTop ?? 0,
-          width: viewport?.width ?? window.innerWidth,
-          height: viewport?.height ?? window.innerHeight,
-        },
+        viewport: viewportBox,
         align,
       });
       setPosition((current) =>
@@ -74,7 +160,7 @@ export function AnchoredPopover({
       viewport?.removeEventListener("resize", scheduleUpdate);
       viewport?.removeEventListener("scroll", scheduleUpdate);
     };
-  }, [align, anchorRef, open]);
+  }, [align, anchorRef, matchAnchorWidth, open, placement]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -106,7 +192,15 @@ export function AnchoredPopover({
         "fixed z-[70] rounded-lg border border-zinc-700 bg-zinc-950 p-1 shadow-2xl shadow-black/60",
         className,
       )}
-      style={position}
+      style={{
+        ...position,
+        ...(matchAnchorWidth && anchorWidth !== undefined
+          ? { width: anchorWidth }
+          : {}),
+        ...(placement === "below" && maxHeight !== undefined
+          ? { maxHeight }
+          : {}),
+      }}
     >
       {children}
     </div>,
