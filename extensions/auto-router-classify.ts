@@ -5,19 +5,23 @@ import type { AutoRouterEffortLevel } from "./auto-router-settings.js";
 
 const CLASSIFY_TIMEOUT_MS = 15_000;
 const VALID_LEVELS: readonly AutoRouterEffortLevel[] = [
+  "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
+  "max",
 ];
 const DEFAULT_LEVEL: AutoRouterEffortLevel = "medium";
 
-const SYSTEM_PROMPT = `You triage the complexity of a single upcoming coding-agent turn so it can be routed to an appropriately capable model. Reply with exactly one word, lowercase, no punctuation: low, medium, high, or xhigh.
+const SYSTEM_PROMPT = `You triage the complexity of a single upcoming coding-agent turn so it can be routed to an appropriately capable model. Reply with exactly one word, lowercase, no punctuation: minimal, low, medium, high, xhigh, or max.
 
-- low: trivial, mechanical, or purely informational. One-line edits, formatting, simple lookups, answering a quick factual question about the codebase.
+- minimal: rote, no real reasoning needed. A one-word answer, a pure formatting pass, a trivial rename, echoing back something already known.
+- low: simple and mechanical, but not entirely rote. One-line edits, small lookups, answering a quick factual question about the codebase.
 - medium: a typical coding task. Implementing a small-to-moderate feature, fixing a well-understood bug, writing straightforward tests. This is the default for ordinary work.
 - high: meaningfully harder. Multi-file refactors, tricky or intermittent bugs, non-obvious architectural changes, tasks that require holding a lot of context at once.
 - xhigh: very hard, high-stakes, or open-ended. Large-scope redesigns, subtle correctness/security-critical work, or reasoning-heavy problems where getting it wrong is costly.
+- max: the hardest, rarest cases. Deep multi-step reasoning under real stakes — major system redesigns, subtle distributed-systems or security bugs, decisions with significant real-world consequences.
 
 Reply with only the single word.`;
 
@@ -81,8 +85,10 @@ export async function classifyTurnComplexity(
       .join("")
       .trim()
       .toLowerCase();
+    // Word-boundary match, not plain substring: "high" is a substring of "xhigh",
+    // so a naive `.includes()` would mis-parse an "xhigh" reply as "high".
     const level =
-      VALID_LEVELS.find((candidate) => reply.includes(candidate)) ??
+      VALID_LEVELS.find((candidate) => new RegExp(`\\b${candidate}\\b`).test(reply)) ??
       DEFAULT_LEVEL;
     const usage = response.usage
       ? {

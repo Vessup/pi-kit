@@ -101,12 +101,6 @@ test("reconcileProviderQuota(kimi-coding) reports exhaustion when used reaches t
   expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z") });
 });
 
-test("reconcileProviderQuota(openrouter) reports exhaustion when no budget remains", async () => {
-  const deps = fakeDeps(() => jsonResponse({ data: { limit: 50, limit_remaining: 0 } }));
-  const result = await reconcileProviderQuota("openrouter", fakeRegistry("key"), deps);
-  expect(result).toEqual({ exhausted: true });
-});
-
 test("reconcileProviderQuota degrades gracefully on network/HTTP failure", async () => {
   const deps = fakeDeps(() => jsonResponse({}, 500));
   const result = await reconcileProviderQuota("anthropic", fakeRegistry("oauth-token"), deps);

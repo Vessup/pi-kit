@@ -199,29 +199,6 @@ async function fetchKimiCodingQuota(
   return { exhausted: false };
 }
 
-async function fetchOpenRouterQuota(
-  modelRegistry: ModelRegistry,
-  deps: QuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
-  const apiKey = await modelRegistry.getApiKeyForProvider("openrouter");
-  if (!apiKey) return undefined;
-  const result = await fetchJson(
-    "https://openrouter.ai/api/v1/key",
-    { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-    deps.fetchImpl,
-  );
-  if (!result.ok || !isRecord(result.data)) return undefined;
-
-  const keyData = isRecord(result.data.data) ? result.data.data : undefined;
-  if (!keyData) return { exhausted: false };
-  const limit = numeric(keyData.limit);
-  const limitRemaining = numeric(keyData.limit_remaining);
-  if (limit !== undefined && limit > 0 && limitRemaining !== undefined && limitRemaining <= 0) {
-    return { exhausted: true };
-  }
-  return { exhausted: false };
-}
-
 /**
  * Best-effort real quota reconciliation, keyed by Pi provider id. Providers without a known
  * fetcher (e.g. Minimax, arbitrary OpenAI-compatible custom providers) simply have no entry
@@ -238,7 +215,6 @@ export const QUOTA_FETCHERS: Record<
   "openai-codex": fetchCodexQuota,
   zai: fetchZaiQuota,
   "kimi-coding": fetchKimiCodingQuota,
-  openrouter: fetchOpenRouterQuota,
 };
 
 /** Reconcile one provider's real quota state. Never throws; returns `undefined` when there's no known fetcher, no credentials, or the request failed. */
