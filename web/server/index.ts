@@ -181,7 +181,7 @@ const sessionsByFile = new Map<string, SessionRecord>();
 const connectedClientSockets = new Set<Bun.ServerWebSocket<ClientSocketData>>();
 const managedSessionStarts = new Map<string, Promise<SessionRecord>>();
 const missingSessionReconciliations = new Set<SessionRecord>();
-let server: Bun.Server<any> | undefined;
+let server: Bun.Server<unknown> | undefined;
 let missingSessionReconcileTimer: ReturnType<typeof setInterval> | undefined;
 let shutdownStarted = false;
 let webState: ServerStateFile;
@@ -1343,7 +1343,8 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
   const tombstones: Array<{ tombstone: string; source: string }> = [];
   const stack = [sessionsDir];
   while (stack.length > 0) {
-    const directory = stack.pop()!;
+    const directory = stack.pop();
+    if (!directory) break;
     let entries: Array<{
       name: string;
       isDirectory(): boolean;
@@ -1399,7 +1400,7 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
           renameSync(staged.tombstone, staged.source);
         continue;
       }
-      const sourceQueue = persistedQueues.get(sourceId!);
+      const sourceQueue = persistedQueues.get(sourceId);
       const replacementQueue = persistedQueues.get(replacement.session.id);
       if (sourceQueue?.length) {
         const ids = new Set<string>();
@@ -1412,7 +1413,7 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
           return true;
         });
         await queueStoreWriter.mutate(persistedQueues, (queues) => {
-          queues.delete(sourceId!);
+          if (sourceId) queues.delete(sourceId);
           queues.set(replacement.session.id, queue);
         });
       }
@@ -1930,7 +1931,7 @@ async function handleClientMessage(
             ? { type: "create_worktree", existing: worktree.existing }
             : {
                 type: "create_worktree",
-                name: worktree.name!,
+                name: worktree.name ?? "",
                 repository: worktree.repository ?? record.cwd,
                 branch: worktree.branch,
                 startPoint: worktree.startPoint,
@@ -3555,7 +3556,7 @@ async function cleanupAndExit(code = 0): Promise<void> {
 async function buildWebClientAssets(): Promise<void> {
   console.log("Building web client assets...");
   const build = Bun.spawn({
-    cmd: ["bun", "run", "web:build"],
+    cmd: ["bun", "run", "webBuild"],
     cwd: rootDir,
     stdout: "inherit",
     stderr: "inherit",
@@ -3563,7 +3564,7 @@ async function buildWebClientAssets(): Promise<void> {
   const code = await build.exited;
   if (code !== 0)
     console.error(
-      `web:build exited with code ${code}; serving whatever assets already exist in ${distDir}.`,
+      `webBuild exited with code ${code}; serving whatever assets already exist in ${distDir}.`,
     );
 }
 
@@ -3571,7 +3572,7 @@ async function main(): Promise<void> {
   await buildWebClientAssets();
   await recoverStagedSourceSessionDeletions();
   webState = getOrCreateWebState();
-  server = Bun.serve<any>({
+  server = Bun.serve<unknown>({
     hostname: host,
     port,
     async fetch(request, serverInstance) {
@@ -3589,7 +3590,11 @@ async function main(): Promise<void> {
         )
           return new Response("Forbidden WebSocket origin", { status: 403 });
         const upgraded = serverInstance.upgrade(request, {
-          data: { kind: "client", id: randomUUID(), authed: false } as any,
+          data: {
+            kind: "client",
+            id: randomUUID(),
+            authed: false,
+          } as SocketData,
         });
         return upgraded
           ? undefined
@@ -3608,7 +3613,11 @@ async function main(): Promise<void> {
         if (request.headers.has("origin") || forwarded)
           return new Response("Forbidden agent WebSocket", { status: 403 });
         const upgraded = serverInstance.upgrade(request, {
-          data: { kind: "agent", id: randomUUID(), authed: false } as any,
+          data: {
+            kind: "agent",
+            id: randomUUID(),
+            authed: false,
+          } as SocketData,
         });
         return upgraded
           ? undefined
@@ -3626,13 +3635,16 @@ async function main(): Promise<void> {
     websocket: {
       maxPayloadLength: MAX_WEBSOCKET_PAYLOAD_BYTES,
       open(socket) {
-        handleWebSocketOpen(socket as any);
+        handleWebSocketOpen(socket as Bun.ServerWebSocket<SocketData>);
       },
       message(socket, data) {
-        void handleWebSocketMessage(socket as any, data as string | Uint8Array);
+        void handleWebSocketMessage(
+          socket as Bun.ServerWebSocket<SocketData>,
+          data as string | Uint8Array,
+        );
       },
       close(socket) {
-        handleWebSocketClose(socket as any);
+        handleWebSocketClose(socket as Bun.ServerWebSocket<SocketData>);
       },
     },
   });

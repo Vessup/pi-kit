@@ -53,7 +53,7 @@ function registeredWorktreeTool() {
         name: string;
         promptSnippet?: string;
         promptGuidelines?: string[];
-        execute: (...args: any[]) => Promise<any>;
+        execute: (...args: unknown[]) => Promise<unknown>;
       }
     | undefined;
   const sent: Array<{ message: string; options: unknown }> = [];
@@ -146,7 +146,7 @@ test("worktree tool queues a correlated create command and terminates the old ru
   expect(sent).toHaveLength(1);
   expect(sent[0]?.options).toEqual({ deliverAs: "followUp" });
   expect(sent[0]?.message).toMatch(/^\/worktree --tool-request [0-9a-f-]+$/);
-  const token = sent[0]?.message.split(" ").at(-1)!;
+  const token = sent[0]?.message.split(" ").at(-1) ?? "";
   expect(takeWorktreeToolRequest(token, "source-session")).toMatchObject({
     commandArgs:
       '"feature-one" --repo "~/Source/my repo" --branch "tembo/cancel-builds" --start-point "origin/tembo/cancel-builds"',
@@ -168,7 +168,7 @@ test("worktree tool queues the existing-worktree form without shell interpolatio
       sessionManager: { getSessionId: () => "source-session" },
     },
   );
-  const token = sent[0]?.message.split(" ").at(-1)!;
+  const token = sent[0]?.message.split(" ").at(-1) ?? "";
   expect(takeWorktreeToolRequest(token, "source-session").commandArgs).toBe(
     '--existing "../linked checkout; echo \\"unsafe\\""',
   );
@@ -443,7 +443,9 @@ test("branched replacements are self-contained before the source is deleted", as
       timestamp: Date.now(),
     });
     source.branch(selectedLeaf);
-    const sourceFile = source.getSessionFile()!;
+    const sourceFile = source.getSessionFile();
+    if (!sourceFile)
+      throw new Error("source.getSessionFile() returned undefined");
     const replacement = createReplacementSession(
       { sessionManager: source } as unknown as ExtensionCommandContext,
       {
@@ -562,7 +564,10 @@ test("existing worktree migration activates the replacement and rollback restore
           target.path,
           join(directory, "sessions"),
         );
-        latestReplacementFile = replacement.getSessionFile()!;
+        const replacementFile = replacement.getSessionFile();
+        if (!replacementFile)
+          throw new Error("replacement.getSessionFile() returned undefined");
+        latestReplacementFile = replacementFile;
         return {
           sessionId: replacementIdOverride ?? replacement.getSessionId(),
           sessionFile: latestReplacementFile,
@@ -607,7 +612,9 @@ test("existing worktree migration activates the replacement and rollback restore
     expect(mismatchedIdentity.cancelled).toBe(true);
     expect(rollbackRequested).toBe(true);
     expect(existsSync(sourceFile)).toBe(true);
-    expect(existsSync(latestReplacementFile!)).toBe(false);
+    if (!latestReplacementFile)
+      throw new Error("latestReplacementFile not set");
+    expect(existsSync(latestReplacementFile)).toBe(false);
     replacementIdOverride = undefined;
     rollbackRequested = false;
 
@@ -623,7 +630,9 @@ test("existing worktree migration activates the replacement and rollback restore
     expect(activeFile).toBe(sourceFile);
     expect(rollbackRequested).toBe(true);
     expect(notifications.at(-1)).toContain("Returning to the original session");
-    expect(existsSync(latestReplacementFile!)).toBe(false);
+    if (!latestReplacementFile)
+      throw new Error("latestReplacementFile not set");
+    expect(existsSync(latestReplacementFile)).toBe(false);
     expect(continuations).toEqual(["Resume in the verified replacement."]);
 
     rollbackRequested = false;
@@ -640,7 +649,9 @@ test("existing worktree migration activates the replacement and rollback restore
     expect(notifications.at(-1)).toContain(
       "Replacement CWD verification failed",
     );
-    expect(existsSync(latestReplacementFile!)).toBe(false);
+    if (!latestReplacementFile)
+      throw new Error("latestReplacementFile not set");
+    expect(existsSync(latestReplacementFile)).toBe(false);
     expect(continuations).toEqual(["Resume in the verified replacement."]);
 
     removeTargetBeforeVerification = false;
@@ -778,7 +789,10 @@ test("verified replacement deletes its source session and records a durable tomb
             target.path,
             join(directory, "replacement-sessions"),
           );
-          replacementFile = replacement.getSessionFile()!;
+          const replacementFileValue = replacement.getSessionFile();
+          if (!replacementFileValue)
+            throw new Error("replacement.getSessionFile() returned undefined");
+          replacementFile = replacementFileValue;
           return {
             sessionId: replacement.getSessionId(),
             sessionFile: replacementFile,
@@ -794,15 +808,15 @@ test("verified replacement deletes its source session and records a durable tomb
       ),
     ).toBe(true);
     expect(existsSync(sourceFile)).toBe(false);
-    expect(existsSync(replacementFile!)).toBe(true);
+    if (!replacementFile) throw new Error("replacementFile not set");
+    expect(existsSync(replacementFile)).toBe(true);
     expect(result.replacedSession).toEqual({
       previousSessionId: source.getSessionId(),
       previousSessionFile: sourceFile,
       replacementSessionId: result.sessionId,
     });
-    const replacementEntries = SessionManager.open(
-      replacementFile!,
-    ).getEntries();
+    const replacementEntries =
+      SessionManager.open(replacementFile).getEntries();
     expect(replacementFromEntries(replacementEntries)).toEqual(
       result.replacedSession,
     );
@@ -886,7 +900,12 @@ test("verified replacement deletes its source session and records a durable tomb
               target.path,
               join(directory, "replacement-sessions"),
             );
-            replacementFile = replacement.getSessionFile()!;
+            const replacementSessionFile = replacement.getSessionFile();
+            if (!replacementSessionFile)
+              throw new Error(
+                "replacement.getSessionFile() returned undefined",
+              );
+            replacementFile = replacementSessionFile;
             return {
               sessionId: replacement.getSessionId(),
               sessionFile: replacementFile,
@@ -902,7 +921,8 @@ test("verified replacement deletes its source session and records a durable tomb
         ),
       ).toBe(true);
       expect(existsSync(sourceFile)).toBe(true);
-      expect(existsSync(replacementFile!)).toBe(false);
+      if (!replacementFile) throw new Error("replacementFile not set");
+      expect(existsSync(replacementFile)).toBe(false);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

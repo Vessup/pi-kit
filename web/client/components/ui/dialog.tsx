@@ -38,9 +38,29 @@ export function DialogTrigger({
   if (asChild && React.isValidElement(children)) {
     return React.cloneElement(children, {
       onClick: () => ctx.setOpen(true),
+      onKeyDown: (event: React.KeyboardEvent) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          ctx.setOpen(true);
+        }
+      },
     } as Record<string, unknown>);
   }
-  return <span onClick={() => ctx.setOpen(true)}>{children}</span>;
+  return (
+    <button
+      type="button"
+      className="appearance-none bg-transparent p-0 text-inherit"
+      onClick={() => ctx.setOpen(true)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          ctx.setOpen(true);
+        }
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
 export function DialogContent({
@@ -63,9 +83,17 @@ export function DialogContent({
   if (!mounted || !ctx?.open) return null;
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+      <button
+        type="button"
+        aria-label="Close dialog"
+        className="absolute inset-0 cursor-default bg-black/70 backdrop-blur-sm"
         onClick={() => ctx.setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            ctx.setOpen(false);
+          }
+        }}
       />
       <div
         className={cn(

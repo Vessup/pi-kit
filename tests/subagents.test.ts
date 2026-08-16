@@ -101,7 +101,7 @@ test("compact formatting handles non-JSON values and preserves Unicode code poin
 test("subagent tool output truncates at a valid UTF-8 byte boundary", () => {
   const source = `a${"🙂".repeat(Math.ceil(MAX_TOOL_OUTPUT_BYTES / 4) + 10)}`;
   const result = truncateToolOutput(source);
-  const output = result.split("\n\n[Output truncated:", 1)[0]!;
+  const output = result.split("\n\n[Output truncated:", 1)[0] ?? "";
   assert.ok(Buffer.byteLength(output, "utf8") <= MAX_TOOL_OUTPUT_BYTES);
   assert.equal(output.endsWith("�"), false);
   assert.match(

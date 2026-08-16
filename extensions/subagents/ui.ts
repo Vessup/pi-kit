@@ -239,8 +239,10 @@ class AgentListDialog implements Component {
 
   handleInput(data: string): void {
     const agents = this.manager.list();
-    if (this.keybindings.matches(data, "tui.select.cancel"))
-      return this.done({ action: "close" });
+    if (this.keybindings.matches(data, "tui.select.cancel")) {
+      this.done({ action: "close" });
+      return;
+    }
     if (this.keybindings.matches(data, "tui.select.up")) {
       this.selected = Math.max(0, this.selected - 1);
       this.tui.requestRender();
@@ -256,11 +258,22 @@ class AgentListDialog implements Component {
     }
     const agent = agents[this.selected];
     if (!agent) return;
-    if (this.keybindings.matches(data, "tui.select.confirm"))
-      return this.done({ action: "view", id: agent.id });
-    if (data === "m") return this.done({ action: "model", id: agent.id });
-    if (data === "e") return this.done({ action: "effort", id: agent.id });
-    if (data === "x") return this.done({ action: "terminate", id: agent.id });
+    if (this.keybindings.matches(data, "tui.select.confirm")) {
+      this.done({ action: "view", id: agent.id });
+      return;
+    }
+    if (data === "m") {
+      this.done({ action: "model", id: agent.id });
+      return;
+    }
+    if (data === "e") {
+      this.done({ action: "effort", id: agent.id });
+      return;
+    }
+    if (data === "x") {
+      this.done({ action: "terminate", id: agent.id });
+      return;
+    }
   }
 
   render(width: number): string[] {
@@ -327,8 +340,10 @@ export class AgentDetailDialog implements Component {
   }
 
   handleInput(data: string): void {
-    if (this.keybindings.matches(data, "tui.select.cancel") || data === "b")
-      return this.done({ action: "back" });
+    if (this.keybindings.matches(data, "tui.select.cancel") || data === "b") {
+      this.done({ action: "back" });
+      return;
+    }
     if (
       this.keybindings.matches(data, "tui.select.up") ||
       this.keybindings.matches(data, "tui.select.pageUp")
@@ -353,12 +368,26 @@ export class AgentDetailDialog implements Component {
       this.tui.requestRender();
       return;
     }
-    if (data === "m") return this.done({ action: "model", id: this.agent.id });
-    if (data === "e") return this.done({ action: "effort", id: this.agent.id });
-    if (data === "u") return this.done({ action: "urgent", id: this.agent.id });
-    if (data === "q") return this.done({ action: "queue", id: this.agent.id });
-    if (data === "x")
-      return this.done({ action: "terminate", id: this.agent.id });
+    if (data === "m") {
+      this.done({ action: "model", id: this.agent.id });
+      return;
+    }
+    if (data === "e") {
+      this.done({ action: "effort", id: this.agent.id });
+      return;
+    }
+    if (data === "u") {
+      this.done({ action: "urgent", id: this.agent.id });
+      return;
+    }
+    if (data === "q") {
+      this.done({ action: "queue", id: this.agent.id });
+      return;
+    }
+    if (data === "x") {
+      this.done({ action: "terminate", id: this.agent.id });
+      return;
+    }
   }
 
   private transcriptLines(width: number): string[] {

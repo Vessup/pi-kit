@@ -255,11 +255,15 @@ export class ManagedRpcSession {
       const responseId =
         typeof response.id === "string" ? response.id : undefined;
       if (responseId && this.pending.has(responseId)) {
-        const pending = this.pending.get(responseId)!;
-        this.pending.delete(responseId);
-        if (response.success)
-          pending.resolve((response as RpcResponse & { data?: unknown }).data);
-        else pending.reject(new CommandRejectedError(response.error));
+        const pending = this.pending.get(responseId);
+        if (pending) {
+          this.pending.delete(responseId);
+          if (response.success)
+            pending.resolve(
+              (response as RpcResponse & { data?: unknown }).data,
+            );
+          else pending.reject(new CommandRejectedError(response.error));
+        }
       }
       return;
     }

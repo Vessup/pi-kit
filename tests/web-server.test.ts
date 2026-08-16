@@ -3588,7 +3588,7 @@ test("daemon restart completes a staged managed worktree source deletion", async
     stdout: "ignore",
     stderr: "ignore",
   });
-  const { port } = await waitForState(statePath);
+  await waitForState(statePath);
   expect(await Bun.file(tombstone).exists()).toBe(false);
   expect(await Bun.file(sourceFile).exists()).toBe(false);
   expect(await Bun.file(uncommittedTombstone).exists()).toBe(false);
@@ -4741,8 +4741,10 @@ test("browser sessions stay managed and idle across daemon restarts", async () =
   };
   expect(payload.session.source).toBe("web");
   expect(payload.session.file).toBeString();
+  const sessionFile = payload.session.file;
+  if (!sessionFile) throw new Error("payload.session.file not set");
   expect(await Bun.file(join(tempDir, "managed-sessions.json")).json()).toEqual(
-    { version: 1, files: [await realpath(payload.session.file!)] },
+    { version: 1, files: [await realpath(sessionFile)] },
   );
   const socketUrl = `ws://127.0.0.1:${port}/ws/client`;
   const semanticHistory = await waitForSemanticHistory(
@@ -4751,7 +4753,7 @@ test("browser sessions stay managed and idle across daemon restarts", async () =
   );
   expect(Array.isArray(semanticHistory)).toBe(true);
   await writeFile(
-    payload.session.file!,
+    sessionFile,
     `${JSON.stringify({ id: crypto.randomUUID(), type: "message", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", timestamp: Date.now(), content: [{ type: "text", text: "persist me" }] } })}\n`,
     { flag: "a" },
   );

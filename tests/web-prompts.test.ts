@@ -33,8 +33,8 @@ test("native web prompts expand Pi prompt templates with quoted arguments and de
       "---",
       "Target: $1",
       "All: $@",
-      "Second: ${2:-fallback}",
-      "Tail: ${@:2}",
+      `Second: \${2:-fallback}`,
+      `Tail: \${@:2}`,
     ].join("\n"),
   );
   const commands = [

@@ -157,11 +157,12 @@ export default function prFooter(pi: ExtensionAPI): void {
 
   const publish = () => {
     if (!currentSessionId) return;
+    const current = pullRequest;
     const contribution: FooterContribution = {
       sessionId: currentSessionId,
       key: "pull-request",
-      topRight: pullRequest
-        ? (theme) => renderPullRequest(pullRequest!, theme)
+      topRight: current
+        ? (theme) => renderPullRequest(current, theme)
         : undefined,
       onBranchChange: () => {
         pullRequest = null;
@@ -199,7 +200,8 @@ export default function prFooter(pi: ExtensionAPI): void {
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = undefined;
       const generation = ++refreshGeneration;
-      const next = await findPullRequest(pi, currentCwd!);
+      if (!currentCwd) return null;
+      const next = await findPullRequest(pi, currentCwd);
       if (generation !== refreshGeneration || !currentSessionId) return next;
       pullRequest = next;
       publish();

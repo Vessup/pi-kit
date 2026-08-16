@@ -106,8 +106,9 @@ test("write and rename failures clean temporary files and always release the loc
     ),
   ).rejects.toThrow("write failed");
   expect(releases).toBe(1);
+  if (!directory) throw new Error("directory not initialized");
   expect(
-    (await readdir(directory!)).filter((name) => name.endsWith(".tmp")),
+    (await readdir(directory)).filter((name) => name.endsWith(".tmp")),
   ).toEqual([]);
 
   await expect(
@@ -124,7 +125,8 @@ test("write and rename failures clean temporary files and always release the loc
     ),
   ).rejects.toThrow("rename failed");
   expect(releases).toBe(2);
+  if (!directory) throw new Error("directory not initialized");
   expect(
-    (await readdir(directory!)).filter((name) => name.endsWith(".tmp")),
+    (await readdir(directory)).filter((name) => name.endsWith(".tmp")),
   ).toEqual([]);
 });

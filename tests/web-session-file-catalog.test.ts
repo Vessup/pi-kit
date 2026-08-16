@@ -28,11 +28,13 @@ test("metadata cache results have fresh arrays and current ownership", async () 
     managedSessionStore: store,
   });
 
-  const first = catalog.parseSessionMetadataFile(file)!;
+  const first = catalog.parseSessionMetadataFile(file);
+  if (!first) throw new Error("parseSessionMetadataFile returned undefined");
   first.history.push("pollution");
   first.entries.push("pollution");
   store.add(file);
-  const second = catalog.parseSessionMetadataFile(file)!;
+  const second = catalog.parseSessionMetadataFile(file);
+  if (!second) throw new Error("parseSessionMetadataFile returned undefined");
   expect(second.history).toEqual([]);
   expect(second.entries).toEqual([]);
   expect(second.session.source).toBe("web");

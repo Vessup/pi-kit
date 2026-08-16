@@ -497,7 +497,11 @@ function DataValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
     return (
       <div className="semantic-data-list">
         {value.map((item, index) => (
-          <DataValue key={index} value={item} depth={depth + 1} />
+          <DataValue
+            key={`${index}-${JSON.stringify(item)}`}
+            value={item}
+            depth={depth + 1}
+          />
         ))}
       </div>
     );
@@ -523,11 +527,17 @@ function HighlightedCode({
   text: string;
   language?: string;
 }) {
+  const codeRef = React.useRef<HTMLElement>(null);
+  React.useEffect(() => {
+    if (codeRef.current) {
+      codeRef.current.innerHTML = highlightedHtml(text, language);
+    }
+  }, [text, language]);
   return (
     <pre className="semantic-highlighted-code">
       <code
+        ref={codeRef}
         className={language ? `language-${language}` : undefined}
-        dangerouslySetInnerHTML={{ __html: highlightedHtml(text, language) }}
       />
     </pre>
   );
@@ -557,7 +567,10 @@ function FormattedOutput({
     return (
       <div className="semantic-data-documents">
         {documents.map((document, index) => (
-          <DataValue key={index} value={document} />
+          <DataValue
+            key={`${index}-${JSON.stringify(document)}`}
+            value={document}
+          />
         ))}
       </div>
     );
@@ -686,11 +699,7 @@ function CompactionStatus({ session }: { session: WebSession }) {
         ? "Context limit reached — compacting…"
         : "Compacting context…";
   return (
-    <div
-      className="semantic-compaction-status"
-      role="status"
-      aria-live="polite"
-    >
+    <output className="semantic-compaction-status">
       <LoaderCircle className="h-4 w-4 animate-spin" />
       <div>
         <strong>{title}</strong>
@@ -698,7 +707,7 @@ function CompactionStatus({ session }: { session: WebSession }) {
           Summarizing older messages to free context. This may take a moment.
         </small>
       </div>
-    </div>
+    </output>
   );
 }
 
@@ -860,6 +869,7 @@ function SubagentRows({
         <div key={agent.id} className="semantic-subagent-row">
           <span
             className={cn("semantic-subagent-status", `is-${agent.status}`)}
+            role="img"
             aria-label={agent.status}
           />
           <div className="semantic-subagent-main">
@@ -1230,17 +1240,39 @@ function ChangedLine({ row, language }: { row: DiffRow; language?: string }) {
                 ? piece.added
                 : false;
           return hidden ? null : (
-            <mark
-              key={index}
-              className={highlighted ? "semantic-diff-changed" : undefined}
-              dangerouslySetInnerHTML={{
-                __html: highlightedHtml(piece.value, language),
-              }}
+            <HighlightedPiece
+              key={`${index}-${piece.added ? "add" : "del"}-${piece.value.slice(0, 32)}`}
+              highlighted={highlighted}
+              text={piece.value}
+              language={language}
             />
           );
         })}
       </code>
     </div>
+  );
+}
+
+function HighlightedPiece({
+  highlighted,
+  text,
+  language,
+}: {
+  highlighted: boolean;
+  text: string;
+  language?: string;
+}) {
+  const ref = React.useRef<HTMLElement>(null);
+  React.useEffect(() => {
+    if (ref.current) {
+      ref.current.innerHTML = highlightedHtml(text, language);
+    }
+  }, [text, language]);
+  return (
+    <mark
+      ref={ref}
+      className={highlighted ? "semantic-diff-changed" : undefined}
+    />
   );
 }
 
@@ -1256,6 +1288,7 @@ function EditDiff({
   return (
     <div className="semantic-edit-diff">
       {editDiffRows(oldText, newText).map((row, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: diff rows are recomputed on every render and never reordered; index is stable here.
         <ChangedLine key={index} row={row} language={language} />
       ))}
     </div>
@@ -1291,6 +1324,7 @@ function ArgumentDetails({
           const item = asRecord(edit);
           return (
             <EditDiff
+              // biome-ignore lint/suspicious/noArrayIndexKey: edits come from tool args in submission order and never reorder within a single call.
               key={index}
               oldText={String(item.oldText ?? "")}
               newText={String(item.newText ?? "")}
@@ -1381,10 +1415,17 @@ function ToolCallCard({
           2;
       }}
     >
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: <summary> is already a button-like disclosure; the rule fires anyway because onClick is used to coordinate controlled open state. */}
       <summary
         onClick={(event) => {
           event.preventDefault();
           onExpansionChange(expansionKey, !expanded, true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onExpansionChange(expansionKey, !expanded, true);
+          }
         }}
       >
         <Icon
@@ -1416,7 +1457,6 @@ function ToolCallCard({
 
 const MessageCard = React.memo(function MessageCard({
   message,
-  streaming = false,
   active = false,
   messageKey,
   expandedItems,
@@ -1424,10 +1464,8 @@ const MessageCard = React.memo(function MessageCard({
   onExpansionChange,
   toolResults,
   runningToolIds,
-  endedAt,
 }: {
   message: Record<string, unknown>;
-  streaming?: boolean;
   active?: boolean;
   messageKey: string;
   expandedItems: ReadonlySet<string>;
@@ -1435,7 +1473,6 @@ const MessageCard = React.memo(function MessageCard({
   onExpansionChange: (key: string, open: boolean, manual?: boolean) => void;
   toolResults: ReadonlyMap<string, ToolResultView>;
   runningToolIds: ReadonlySet<string>;
-  endedAt?: number;
 }) {
   const role = typeof message.role === "string" ? message.role : "assistant";
   const parts = displayContentParts(message);
@@ -1447,6 +1484,7 @@ const MessageCard = React.memo(function MessageCard({
     const expansionKey = `bash:${messageKey}`;
     return (
       <details className="semantic-tool" open={expandedItems.has(expansionKey)}>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: <summary> is already a button-like disclosure; the rule fires anyway because onClick is used to coordinate controlled open state. */}
         <summary
           onClick={(event) => {
             event.preventDefault();
@@ -1455,6 +1493,16 @@ const MessageCard = React.memo(function MessageCard({
               !expandedItems.has(expansionKey),
               true,
             );
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onExpansionChange(
+                expansionKey,
+                !expandedItems.has(expansionKey),
+                true,
+              );
+            }
           }}
         >
           <Wrench className="h-4 w-4" />
@@ -1480,7 +1528,6 @@ const MessageCard = React.memo(function MessageCard({
             className="semantic-message-time"
             dateTime={messageDate(message.timestamp)?.toISOString()}
             title={fullTimestamp ?? undefined}
-            aria-label={fullTimestamp ?? undefined}
           >
             {messageTime}
           </time>
@@ -1497,13 +1544,20 @@ const MessageCard = React.memo(function MessageCard({
       >
         <div className="space-y-3">
           {parts.map((part, index) => {
-            if (part.type === "text" && typeof part.text === "string")
-              return <Markdown key={index}>{part.text}</Markdown>;
+            if (part.type === "text" && typeof part.text === "string") {
+              const key = `${index}-text-${part.text.length}`;
+              return <Markdown key={key}>{part.text}</Markdown>;
+            }
             if (part.type === "thinking" && typeof part.thinking === "string") {
               return (
-                <div key={index} className="semantic-thinking-flat">
+                <div
+                  key={`${index}-thinking-${part.thinking.length}`}
+                  className="semantic-thinking-flat"
+                >
                   {thinkingLines(part.thinking).map((line, lineIndex) => (
-                    <span key={lineIndex}>{line}</span>
+                    <span key={`${lineIndex}-${line.slice(0, 32)}`}>
+                      {line}
+                    </span>
                   ))}
                 </div>
               );
@@ -1513,6 +1567,7 @@ const MessageCard = React.memo(function MessageCard({
               const expansionKey = `call:${callId}`;
               return (
                 <ToolCallCard
+                  // biome-ignore lint/suspicious/noArrayIndexKey: tool calls use callId as the stable id; index is only used because the surrounding map needs a key.
                   key={index}
                   name={String(part.name ?? "tool")}
                   args={part.arguments}
@@ -1528,6 +1583,7 @@ const MessageCard = React.memo(function MessageCard({
             if (part.type === "image" && typeof part.data === "string") {
               return (
                 <img
+                  // biome-ignore lint/suspicious/noArrayIndexKey: image parts are appended in order from the model stream and never reordered; index is stable within a single message.
                   key={index}
                   className="max-h-80 rounded-xl border border-zinc-700"
                   src={`data:${String(part.mimeType ?? "image/png")};base64,${part.data}`}
@@ -2476,16 +2532,18 @@ export function SemanticSession({
   const availableModels =
     sessionOptions.models.length > 0
       ? sessionOptions.models
-      : session?.model?.includes("/")
-        ? [
+      : (() => {
+          const slashIndex = session?.model?.indexOf("/") ?? -1;
+          if (!session?.model || slashIndex < 0) return [];
+          return [
             {
-              provider: session.model.split("/")[0]!,
-              id: session.model.split("/").slice(1).join("/"),
+              provider: session.model.slice(0, slashIndex),
+              id: session.model.slice(slashIndex + 1),
               name: modelLabel,
               reasoning: true,
             },
-          ]
-        : [];
+          ];
+        })();
   const availableEfforts =
     sessionOptions.thinkingLevels.length > 0
       ? sessionOptions.thinkingLevels
@@ -2650,6 +2708,7 @@ export function SemanticSession({
           if (!open) setSelectedSubagentId(null);
         }}
       />
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: this is a custom scroll container with wheel/touch tracking, not a clickable element; role="region" would force an aria-label and tabIndex that don't fit the layout. */}
       <div
         ref={scrollRef}
         data-testid="transcript-scroll"
@@ -2746,14 +2805,14 @@ export function SemanticSession({
       >
         <div className="flex w-full flex-col gap-4 px-4 pb-8 pt-16 sm:px-6 xl:pt-8">
           {transcriptLoading && messages.length === 0 && !streamingMessage && (
-            <div
+            <output
               className="semantic-transcript-loading"
               aria-label="Loading transcript"
             >
               <div />
               <div />
               <div />
-            </div>
+            </output>
           )}
           {!transcriptLoading &&
             messages.length === 0 &&
@@ -2775,7 +2834,6 @@ export function SemanticSession({
                   index === latestAssistantIndex
                 }
                 messageKey={view.key}
-                endedAt={view.endedAt}
                 expandedItems={expandedItems}
                 autoFollowExpansionKey={autoFollowExpansionKey}
                 onExpansionChange={handleExpansionChange}
@@ -2788,7 +2846,6 @@ export function SemanticSession({
             <div data-transcript-anchor={streamingMessageKey}>
               <MessageCard
                 message={streamingMessage}
-                streaming
                 active={isWorking}
                 messageKey={streamingMessageKey}
                 expandedItems={expandedItems}
@@ -3037,6 +3094,7 @@ export function SemanticSession({
             {images.length > 0 && (
               <div className="flex gap-2 overflow-x-auto px-3 pt-3">
                 {images.map((image, index) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: image attachments are appended in order and never reordered; index is stable.
                   <div key={index} className="relative shrink-0">
                     <img
                       className="h-16 w-16 rounded-lg border border-zinc-700 object-cover"
@@ -3161,6 +3219,7 @@ export function SemanticSession({
                 slashMenuOpen ? "semantic-slash-command-menu" : undefined
               }
               aria-expanded={slashMenuOpen}
+              role="combobox"
               aria-activedescendant={
                 slashMenuOpen
                   ? `semantic-slash-command-${selectedSlashCommand}`
@@ -3371,13 +3430,7 @@ export function SemanticSession({
             <p className="mt-2 text-sm text-red-300">{sendError ?? error}</p>
           )}
           {!sendError && !error && sendNotice && (
-            <p
-              className="mt-2 text-sm text-zinc-400"
-              role="status"
-              aria-live="polite"
-            >
-              {sendNotice}
-            </p>
+            <output className="mt-2 text-sm text-zinc-400">{sendNotice}</output>
           )}
         </div>
       </div>

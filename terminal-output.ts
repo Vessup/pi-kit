@@ -19,7 +19,7 @@ export function renderTerminalOutput(source: string): string {
   let renderedCells = 0;
   const currentRow = () => {
     while (rows.length <= row) rows.push([]);
-    return rows[row]!;
+    return rows[row] ?? [];
   };
   const moveToRow = (next: number) => {
     row = Math.max(0, Math.min(MAX_RENDERED_ROWS - 1, next));
@@ -73,7 +73,7 @@ export function renderTerminalOutput(source: string): string {
   };
 
   rendering: for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]!;
+    const character = source.charAt(index);
     if (character === "\u001b") {
       const introducer = source[index + 1];
       if (introducer === "]") {
@@ -98,7 +98,7 @@ export function renderTerminalOutput(source: string): string {
         end += 1;
       }
       if (end >= source.length) break;
-      const final = source[end]!;
+      const final = source.charAt(end);
       const rawParameters = source.slice(index + 2, end).replace(/^[?>]/, "");
       const parameters = rawParameters
         .split(";")

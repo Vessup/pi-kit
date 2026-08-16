@@ -329,7 +329,6 @@ function SessionLocation({ session }: { session: WebSession }) {
       className="session-location text-left text-xs text-zinc-500"
       dir="ltr"
       title={text}
-      aria-label={text}
     >
       {visibleText}
     </div>
@@ -1009,32 +1008,56 @@ function SessionActionItems({
     "flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white";
   return (
     <div
+      role="menu"
+      tabIndex={-1}
       onClick={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
+      onKeyDown={(event) => event.stopPropagation()}
     >
       {inactive && (
-        <button className={itemClass} onClick={() => action(actions.onResume)}>
+        <button
+          type="button"
+          className={itemClass}
+          onClick={() => action(actions.onResume)}
+        >
           <Play className="h-4 w-4" /> Resume
         </button>
       )}
       {!inactive && (
-        <button className={itemClass} onClick={() => action(actions.onClone)}>
+        <button
+          type="button"
+          className={itemClass}
+          onClick={() => action(actions.onClone)}
+        >
           <Copy className="h-4 w-4" /> Clone
         </button>
       )}
       {!inactive && (
-        <button className={itemClass} onClick={() => action(actions.onFork)}>
+        <button
+          type="button"
+          className={itemClass}
+          onClick={() => action(actions.onFork)}
+        >
           <GitFork className="h-4 w-4" /> Fork
         </button>
       )}
-      <button className={itemClass} onClick={() => action(actions.onRename)}>
+      <button
+        type="button"
+        className={itemClass}
+        onClick={() => action(actions.onRename)}
+      >
         <Pencil className="h-4 w-4" /> Rename
       </button>
-      <button className={itemClass} onClick={() => action(actions.onCompact)}>
+      <button
+        type="button"
+        className={itemClass}
+        onClick={() => action(actions.onCompact)}
+      >
         <WandSparkles className="h-4 w-4" /> Compact
       </button>
       <div className="my-1 border-t border-zinc-800" />
       <button
+        type="button"
         className={cn(
           itemClass,
           "text-red-300 hover:bg-red-500/10 hover:text-red-200",
@@ -1139,9 +1162,12 @@ function SessionListItem({
     onDelete,
   };
   return (
+    // biome-ignore lint/a11y/useSemanticElements: a <button> would conflict with dnd-kit's drag listeners and need default-style resets; role="button" + tabIndex is the established pattern.
     <div
       ref={overlay ? undefined : sortable.setNodeRef}
       style={style}
+      role="button"
+      tabIndex={0}
       {...(overlay ? {} : sortable.attributes)}
       {...(overlay ? {} : sortable.listeners)}
       onContextMenu={(event) => {
@@ -1431,13 +1457,12 @@ export function App() {
         const type = String((message as { type?: unknown }).type);
         if (type === "server.snapshot") {
           const snapshot = message as { sessions?: WebSession[] };
-          if (snapshot.sessions)
+          if (snapshot.sessions) {
+            const sessions = snapshot.sessions;
             setSessions((previous) =>
-              preserveSessionsTelemetry(
-                previous,
-                sortSessions(snapshot.sessions!),
-              ),
+              preserveSessionsTelemetry(previous, sortSessions(sessions)),
             );
+          }
           return;
         }
         if (type === "server.session") {
@@ -1749,13 +1774,15 @@ export function App() {
               );
             if (optimisticIndex >= 0) {
               next = [...entriesRef.current];
-              next[optimisticIndex] = {
-                ...entry,
-                message: preserveOptimisticAttachments(
-                  finalized,
-                  entriesRef.current[optimisticIndex]!,
-                ),
-              };
+              const previous = entriesRef.current[optimisticIndex];
+              if (previous) {
+                next[optimisticIndex] = {
+                  ...entry,
+                  message: preserveOptimisticAttachments(finalized, previous),
+                };
+              } else {
+                next = [...entriesRef.current, entry];
+              }
             } else {
               next = [...entriesRef.current, entry];
             }
@@ -2446,6 +2473,7 @@ export function App() {
           return (
             <div key={group.id}>
               <button
+                type="button"
                 className="flex w-full min-w-0 items-center gap-2 rounded-full bg-zinc-900/90 px-3 py-2 text-sm text-zinc-300 transition hover:bg-zinc-800/90"
                 aria-expanded={!collapsed}
                 onClick={() => toggleProject(collapseKey)}
@@ -2514,6 +2542,7 @@ export function App() {
         <div className="flex h-full overflow-hidden">
           {sidebarOpen && (
             <button
+              type="button"
               aria-label="Close sessions sidebar"
               className="fixed inset-0 z-20 bg-black/60 xl:hidden"
               onClick={() => setSidebarOpen(false)}

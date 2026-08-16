@@ -279,7 +279,7 @@ export function createSessionQueueCoordinator(
           set: (queue) => setWebQueueState(record, queue),
           clone: cloneWebQueue,
           mutate: (queue) => {
-            queue[0]!.deliveryState = "delivering";
+            if (queue[0]) queue[0].deliveryState = "delivering";
           },
           persist: () => persistWebQueue(record),
         }),
@@ -312,12 +312,14 @@ export function createSessionQueueCoordinator(
           broadcast(record.id, webQueueEvent(record));
           markWebQueueSnapshotDirty(record);
         } else {
-          broadcastQueueDelivery(
-            record,
-            item!,
-            "failed",
-            `Could not persist delivery transition: ${message} (attempt ${attempts}; retrying)`,
-          );
+          if (item) {
+            broadcastQueueDelivery(
+              record,
+              item,
+              "failed",
+              `Could not persist delivery transition: ${message} (attempt ${attempts}; retrying)`,
+            );
+          }
         }
       },
       scheduleRetry: (delayMs) => {
@@ -335,7 +337,8 @@ export function createSessionQueueCoordinator(
     });
     if (!transitioned) return;
     record.queueTransitionAttempts = undefined;
-    item = record.queue[0]!;
+    item = record.queue[0];
+    if (!item) return;
     record.queueDeliveryActive = item.id;
     let retryDelayMs: number | undefined;
     let persistenceError: unknown;
@@ -412,7 +415,7 @@ export function createSessionQueueCoordinator(
         record.queue = record.queue.filter((queued) => queued.id !== item.id);
         record.queueDeliveryAttempts = undefined;
       } else if (!record.queueRetryTimer) {
-        retryDelayMs = disposition.retryDelayMs!;
+        retryDelayMs = disposition.retryDelayMs ?? 0;
       }
       try {
         await broadcastWebQueue(record);
@@ -524,7 +527,10 @@ export function createSessionQueueCoordinator(
         });
         const item = record.queue.find(
           (candidate) => candidate.id === command.itemId,
-        )!;
+        );
+        if (!item) {
+          throw new Error(`Unknown queue item ${command.itemId}`);
+        }
         record.queueDeliveryActive = item.id;
         broadcast(record.id, webQueueEvent(record));
         broadcastQueueDelivery(record, item, "started");

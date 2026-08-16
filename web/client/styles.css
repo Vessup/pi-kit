@@ -665,6 +665,7 @@ details[open] > summary .semantic-tool-chevron {
   color: rgb(228 228 231);
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: base styles intentionally come after the reset inside .semantic-tool-call; the more specific reset wins for shared properties anyway. */
 .semantic-data-documents {
   display: grid;
   gap: 0.75rem;
@@ -673,6 +674,7 @@ details[open] > summary .semantic-tool-chevron {
   border-top: 1px solid rgb(63 63 70 / 0.65);
   padding-top: 0.75rem;
 }
+/* biome-ignore lint/style/noDescendingSpecificity: base styles intentionally come after the reset inside .semantic-tool-call; the more specific reset wins for shared properties anyway. */
 .semantic-data-grid {
   display: grid;
   grid-template-columns: minmax(6.5rem, auto) minmax(0, 1fr);
@@ -722,6 +724,7 @@ details[open] > summary .semantic-tool-chevron {
   font-variant-numeric: tabular-nums;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: base styles intentionally come after the reset inside .semantic-tool-call; the more specific reset wins for shared properties anyway. */
 .semantic-edits {
   display: grid;
   gap: 0.65rem;
@@ -1129,6 +1132,7 @@ details[open] > summary .semantic-tool-chevron {
   display: grid;
   margin-bottom: 0.5rem;
 }
+/* biome-ignore lint/style/noDescendingSpecificity: base queue-label styles come before the more specific override inside .semantic-live-subagents-header, but they don't conflict. */
 .semantic-queue-label {
   margin-bottom: 0.15rem;
   color: rgb(113 113 122);
@@ -1255,6 +1259,7 @@ details[open] > summary .semantic-tool-chevron {
     max-width: 100%;
     justify-content: flex-start;
   }
+  /* biome-ignore lint/style/noDescendingSpecificity: responsive override; the more specific .semantic-tool-call > .semantic-data-grid rule still wins for nested elements. */
   .semantic-data-grid {
     grid-template-columns: minmax(5.5rem, auto) minmax(0, 1fr);
   }

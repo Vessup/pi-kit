@@ -143,17 +143,26 @@ type ReplacementGlobal = typeof globalThis & {
 
 function replacements(): Map<string, WorktreeReplacement> {
   const scope = globalThis as ReplacementGlobal;
-  return (scope[REPLACEMENTS_KEY] ??= new Map());
+  if (!scope[REPLACEMENTS_KEY]) {
+    scope[REPLACEMENTS_KEY] = new Map();
+  }
+  return scope[REPLACEMENTS_KEY];
 }
 
 function toolRequests(): Map<string, PendingWorktreeToolRequest> {
   const scope = globalThis as ReplacementGlobal;
-  return (scope[TOOL_REQUESTS_KEY] ??= new Map());
+  if (!scope[TOOL_REQUESTS_KEY]) {
+    scope[TOOL_REQUESTS_KEY] = new Map();
+  }
+  return scope[TOOL_REQUESTS_KEY];
 }
 
 function operations(): Map<string, Promise<unknown>> {
   const scope = globalThis as ReplacementGlobal;
-  return (scope[OPERATIONS_KEY] ??= new Map());
+  if (!scope[OPERATIONS_KEY]) {
+    scope[OPERATIONS_KEY] = new Map();
+  }
+  return scope[OPERATIONS_KEY];
 }
 
 export async function withWorktreeOperation<T>(

@@ -172,7 +172,9 @@ export function validateGitVersion(versionOutput: string): void {
       `Could not determine Git version from: ${versionOutput.trim() || "empty output"}`,
     );
   const version = match.slice(1, 4).map(Number);
-  if (version[0]! < 2 || (version[0] === 2 && version[1]! < 36)) {
+  const major = version[0] ?? 0;
+  const minor = version[1] ?? 0;
+  if (major < 2 || (major === 2 && minor < 36)) {
     throw new Error(
       `Git 2.36.0 or newer is required (found ${version.slice(0, 3).join(".")})`,
     );
@@ -1089,7 +1091,8 @@ export async function createWebWorktree(
         // A mode bit alone is insufficient when this process lacks that group.
       }
       const [command, ...args] = executable ? [setup] : ["sh", setup];
-      await runWorktreeSetup(command!, args, path);
+      if (!command) throw new Error("setup command unexpectedly empty");
+      await runWorktreeSetup(command, args, path);
       worktree.setupRan = true;
     } catch (error) {
       throw new Error(

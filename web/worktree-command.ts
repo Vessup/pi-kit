@@ -16,7 +16,7 @@ function parseWords(input: string): string[] {
   let escaped = false;
   const source = input.trim();
   for (let index = 0; index < source.length; index += 1) {
-    const char = source[index]!;
+    const char = source.charAt(index);
     if (escaped) {
       const startsRootRelativeWindowsPath =
         quote === '"' && !current && /^[A-Za-z.]$/.test(char);
@@ -97,7 +97,7 @@ export function parseWorktreeCommandArgs(input: string): WorktreeCommandArgs {
   let startPoint: string | undefined;
   let existing: string | undefined;
   for (let index = 0; index < words.length; index += 1) {
-    const word = words[index]!;
+    const word = words[index] ?? "";
     if (word === "--repo" || word === "-C") {
       if (repository !== undefined)
         throw new Error("Duplicate /worktree repository option");

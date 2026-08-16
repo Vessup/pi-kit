@@ -211,15 +211,20 @@ const PENDING_FORKS_KEY = Symbol.for("@vessup/pi-kit/web-pending-forks");
 type PendingForkGlobal = typeof globalThis & {
   [PENDING_FORKS_KEY]?: Map<string, PendingFork>;
 };
-const pendingForks = ((globalThis as PendingForkGlobal)[PENDING_FORKS_KEY] ??=
-  new Map<string, PendingFork>());
+const pendingForksGlobal = globalThis as PendingForkGlobal;
+if (!pendingForksGlobal[PENDING_FORKS_KEY]) {
+  pendingForksGlobal[PENDING_FORKS_KEY] = new Map<string, PendingFork>();
+}
+const pendingForks = pendingForksGlobal[PENDING_FORKS_KEY];
 const PENDING_RELOADS_KEY = Symbol.for("@vessup/pi-kit/web-pending-reloads");
 type PendingReloadGlobal = typeof globalThis & {
   [PENDING_RELOADS_KEY]?: Set<string>;
 };
-const pendingReloads = ((globalThis as PendingReloadGlobal)[
-  PENDING_RELOADS_KEY
-] ??= new Set<string>());
+const pendingReloadsGlobal = globalThis as PendingReloadGlobal;
+if (!pendingReloadsGlobal[PENDING_RELOADS_KEY]) {
+  pendingReloadsGlobal[PENDING_RELOADS_KEY] = new Set<string>();
+}
+const pendingReloads = pendingReloadsGlobal[PENDING_RELOADS_KEY];
 const WEB_RELOAD_GENERATION = crypto.randomUUID();
 
 type SocketLike = WebSocket;

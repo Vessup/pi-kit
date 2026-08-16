@@ -385,7 +385,7 @@ test("executable worktree setup scripts run through their shebang", async () => 
   await mkdir(join(repository, ".pi", "worktrees"), { recursive: true });
   await Bun.write(
     setup,
-    "#!/usr/bin/env bash\nvalues=(bash-shebang)\nprintf '%s' \"${values[0]}\" > setup-runtime.txt\n",
+    `#!/usr/bin/env bash\nvalues=(bash-shebang)\nprintf '%s' "\${values[0]}" > setup-runtime.txt\n`,
   );
   await chmod(setup, 0o755);
 
@@ -566,7 +566,7 @@ test("managed worktree metadata is parsed and cleanup removes its checkout and b
       },
     ]),
   ).toBeUndefined();
-  removeManagedWorktree(marker!);
+  removeManagedWorktree(marker);
   await expect(stat(created.path)).rejects.toThrow();
   expect(
     (await Bun.$`git -C ${repository} branch --list cleanup-me`.text()).trim(),

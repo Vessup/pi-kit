@@ -241,7 +241,8 @@ export class CoalescedQueueStoreWriter {
 
   private async flush(): Promise<void> {
     while (this.pending.length > 0) {
-      const target = this.pending[this.pending.length - 1]!;
+      const target = this.pending[this.pending.length - 1];
+      if (!target) break;
       try {
         await this.persist(target.snapshot);
         const completed = this.pending.filter(

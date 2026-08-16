@@ -34,7 +34,9 @@ export async function persistPreDeliveryTransition(options: {
       options.previousAttempts,
     );
     options.publishError(error, disposition.attempts, disposition.discard);
-    if (!disposition.discard) options.scheduleRetry(disposition.retryDelayMs!);
+    if (!disposition.discard) {
+      options.scheduleRetry(disposition.retryDelayMs ?? 0);
+    }
     return false;
   }
 }
