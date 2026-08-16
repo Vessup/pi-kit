@@ -19,7 +19,7 @@
 }
 
 html, body, #root {
-  height: 100%;
+  height: var(--pi-app-height, 100dvh);
   overflow: hidden;
 }
 
@@ -35,15 +35,18 @@ body {
 }
 
 /*
- * viewport-fit=cover is required for edge-to-edge standalone mode, but iOS then
- * includes the status bar and home indicator in the CSS viewport. Keep all
- * interactive content inside the device's safe rectangle. The env() values are
- * zero in ordinary desktop browsers.
+ * viewport-fit=cover is required for edge-to-edge standalone mode. The runtime
+ * viewport measurement compensates when iOS reports only the safe rectangle;
+ * ordinary browsers retain the dynamic-viewport fallback.
  */
 .pi-web-shell {
+  position: fixed;
+  top: var(--pi-app-top, 0px);
+  right: 0;
+  bottom: auto;
+  left: 0;
   width: 100%;
-  height: 100vh;
-  height: 100dvh;
+  height: var(--pi-app-height, 100dvh);
   padding:
     env(safe-area-inset-top, 0px)
     env(safe-area-inset-right, 0px)
@@ -305,6 +308,10 @@ details[open] > summary .semantic-tool-chevron { transform: rotate(90deg); }
 .semantic-skill-invocation > code { color: rgb(228 228 231); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .semantic-skill-invocation > small { color: rgb(113 113 122); }
 .semantic-session-composer { border-top: 0 !important; }
+@media (max-width: 639.9px) {
+  .semantic-session-composer { padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.75rem); }
+  html.pi-keyboard-open .semantic-session-composer { padding-bottom: 0.75rem; }
+}
 .semantic-token-inline { display: inline-block; width: clamp(12rem, 35vw, 25rem); margin-left: 0.3rem; overflow: hidden; text-overflow: ellipsis; color: rgb(82 82 91); font: 0.68rem ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .semantic-token-mobile { display: none; }
 .semantic-token-mobile > button { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; border-radius: 0.5rem; color: rgb(113 113 122); }
