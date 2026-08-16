@@ -1058,6 +1058,13 @@ async function connect(pi: ExtensionAPI, state: BridgeState): Promise<void> {
         entries: boundedWebHistory(
           state.ctx.sessionManager.buildContextEntries(),
         ),
+        // Forward the session's --models scope so the daemon's model picker
+        // shows the same list the TUI would.
+        scopedModels: state.ctx.scopedModels.map((item) => ({
+          provider: item.model.provider,
+          id: item.model.id,
+          thinkingLevel: item.thinkingLevel,
+        })),
       };
       socket.send(JSON.stringify(hello));
       if (state.sourceReplacement) {

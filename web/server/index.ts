@@ -33,6 +33,7 @@ import type {
   AgentHelloMessage,
   AgentHistoryMessage,
   AgentResponseMessage,
+  AgentScopeMessage,
   AgentSessionReplacedMessage,
   AgentSubagentsMessage,
   AgentToServerMessage,
@@ -2311,14 +2312,27 @@ async function routeCommandCore(
             location: "temporary",
           });
         }
+        const scoped = record.scopedModels ?? [];
+        const scopedByKey = new Map(
+          scoped.map((s) => [`${s.provider}/${s.id}`, s]),
+        );
+        const filterByScope = scopedByKey.size > 0;
         return {
-          models: models.map((model) => ({
-            provider: String(model.provider ?? ""),
-            id: String(model.id ?? ""),
-            name: String(model.name ?? model.id ?? ""),
-            reasoning: model.reasoning === true,
-            thinkingLevels: levels,
-          })),
+          models: models
+            .filter((model) =>
+              filterByScope
+                ? scopedByKey.has(
+                    `${String(model.provider ?? "")}/${String(model.id ?? "")}`,
+                  )
+                : true,
+            )
+            .map((model) => ({
+              provider: String(model.provider ?? ""),
+              id: String(model.id ?? ""),
+              name: String(model.name ?? model.id ?? ""),
+              reasoning: model.reasoning === true,
+              thinkingLevels: levels,
+            })),
           thinkingLevels: levels,
           commands: webCommands,
         };
@@ -2524,6 +2538,11 @@ async function handleAgentMessage(
     record.preview =
       extractPreviewFromHistory(record.history) ?? record.preview;
     record.managedWorktree = helloManagedWorktree ?? record.managedWorktree;
+    // Carry the agent's --models scope onto the record so the model picker
+    // mirrors what the TUI would show. Empty array means no scope.
+    record.scopedModels = Array.isArray(hello.scopedModels)
+      ? hello.scopedModels
+      : undefined;
     record.agentSockets.add(socket);
     record.active = true;
     record.status = hello.session.status;
@@ -2554,6 +2573,13 @@ async function handleAgentMessage(
     return;
   }
   if (!socket.data.authed) throw new Error("Agent must send agent.hello first");
+  if (message.type === "agent.scope") {
+    const update = message as AgentScopeMessage;
+    const record = sessions.get(update.sessionId);
+    if (!record || !record.agentSockets.has(socket)) return;
+    record.scopedModels = update.scopedModels;
+    return;
+  }
   if (message.type === "agent.history") {
     const update = message as AgentHistoryMessage;
     const record = sessions.get(update.sessionId);
