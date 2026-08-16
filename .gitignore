@@ -2,5 +2,9 @@ node_modules/
 .tmp/
 web/.pi-web-state.json
 web/dist/
+.staffreview/diffs/
+.staffreview/attachments/
+.staffreview/active.json
+.staffreview/section-cache.json
 .DS_Store
 *.log
