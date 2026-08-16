@@ -255,6 +255,14 @@ export type AgentHelloMessage = {
   session: WebSession;
   entries: unknown[];
   historyMode?: "replace";
+  /** Models the agent's session is scoped to. Empty array means no scope. */
+  scopedModels?: WebScopedModel[];
+};
+
+export type AgentScopeMessage = {
+  type: "agent.scope";
+  sessionId: string;
+  scopedModels: WebScopedModel[];
 };
 
 export type AgentSessionReplacedMessage = {
@@ -303,6 +311,7 @@ export type AgentToServerMessage =
   | AgentHistoryMessage
   | AgentUpdateMessage
   | AgentSubagentsMessage
+  | AgentScopeMessage
   | AgentResponseMessage;
 
 export type SemanticImage = {
@@ -317,6 +326,13 @@ export type WebModelOption = {
   name: string;
   reasoning: boolean;
   thinkingLevels?: string[];
+};
+
+/** A model the agent's session is scoped to via --models. Forwarded by the agent on hello (and on scope changes) so the daemon can filter the model picker the same way the TUI does. Server-internal; never reaches the browser. */
+export type WebScopedModel = {
+  provider: string;
+  id: string;
+  thinkingLevel?: string;
 };
 export type WebSlashCommand = {
   name: string;
