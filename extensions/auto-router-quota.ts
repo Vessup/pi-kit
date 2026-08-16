@@ -13,6 +13,18 @@ const EXHAUSTED_UTILIZATION_PERCENT = 99.5;
 
 type FetchResult = { ok: true; data: unknown } | { ok: false };
 
+/**
+ * A provider's reconciliation result. `default` applies to every configured model under the
+ * provider; `perModel` (keyed by `normalizeModelId(modelId)`) overrides it for models the
+ * provider reports on individually — e.g. Codex's per-model usage alongside its account-wide
+ * limit. Falling back to `default` for anything not in `perModel` keeps this correct even for
+ * models the provider doesn't break out individually.
+ */
+export type ProviderQuotaResult = {
+  default: QuotaReconciliationResult;
+  perModel?: Record<string, QuotaReconciliationResult>;
+};
+
 /** Injectable for tests; defaults to the real network/filesystem/CLI. */
 export type QuotaFetchDependencies = {
   fetchImpl: typeof fetch;
@@ -23,6 +35,11 @@ export type QuotaFetchDependencies = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/** Loosely matches a provider's own model label (e.g. "GPT-5.3-Codex-Spark") to a configured model id (e.g. "gpt-5.3-codex-spark"). */
+export function normalizeModelId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 async function defaultReadCodexAccountId(): Promise<string | undefined> {
@@ -80,6 +97,10 @@ function numeric(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function roundPercent(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
 /** Accepts epoch seconds, epoch milliseconds, or an ISO date string. */
 function parseDateish(value: unknown): number | undefined {
   if (typeof value === "number") return value > 10 ** 11 ? value : value * 1000;
@@ -101,7 +122,7 @@ function isDirectAnthropicApiKey(token: string): boolean {
 async function fetchAnthropicQuota(
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
+): Promise<ProviderQuotaResult | undefined> {
   const token = await modelRegistry.getApiKeyForProvider("anthropic");
   if (!token || isDirectAnthropicApiKey(token)) return undefined;
   const result = await fetchJson(
@@ -115,21 +136,39 @@ async function fetchAnthropicQuota(
   );
   if (!result.ok || !isRecord(result.data)) return undefined;
 
-  for (const key of ["five_hour", "seven_day"] as const) {
+  let mostUsed: { label: string; percent: number; window: Record<string, unknown> } | undefined;
+  for (const [key, label] of [["five_hour", "5h"], ["seven_day", "7d"]] as const) {
     const window = result.data[key];
     if (!isRecord(window)) continue;
     const utilization = numeric(window.utilization);
-    if (utilization !== undefined && utilization >= EXHAUSTED_UTILIZATION_PERCENT) {
-      return { exhausted: true, resetsAt: parseDateish(window.resets_at) };
-    }
+    if (utilization === undefined) continue;
+    if (!mostUsed || utilization > mostUsed.percent) mostUsed = { label, percent: utilization, window };
   }
-  return { exhausted: false };
+  if (!mostUsed) return { default: { exhausted: false } };
+  const detail = `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used`;
+  if (mostUsed.percent >= EXHAUSTED_UTILIZATION_PERCENT) {
+    return { default: { exhausted: true, resetsAt: parseDateish(mostUsed.window.resets_at), detail } };
+  }
+  return { default: { exhausted: false, detail } };
+}
+
+/**
+ * The API has been observed reporting a window's usage three different ways: "percent left"
+ * fields (converted to used%) or a direct "used%" field. Check all three rather than assuming one.
+ */
+function windowUsedPercent(window: Record<string, unknown>): number | undefined {
+  const percentLeft = numeric(window.percent_left) ?? numeric(window.remaining_percent);
+  return percentLeft !== undefined ? 100 - percentLeft : numeric(window.used_percent);
+}
+
+function windowResetsAt(window: Record<string, unknown>): number | undefined {
+  return parseDateish(window.reset_at ?? window.reset_time_ms);
 }
 
 async function fetchCodexQuota(
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
+): Promise<ProviderQuotaResult | undefined> {
   const token = await modelRegistry.getApiKeyForProvider("openai-codex");
   const accountId = await deps.readCodexAccountId();
   if (!token || !accountId) return undefined;
@@ -148,49 +187,63 @@ async function fetchCodexQuota(
 
   const spendControl = result.data.spend_control;
   if (isRecord(spendControl) && spendControl.reached === true) {
-    return { exhausted: true };
+    return { default: { exhausted: true, detail: "spend cap reached" } };
   }
 
   const rateLimit = result.data.rate_limit ?? result.data.rate_limits;
-  if (!isRecord(rateLimit)) return { exhausted: false };
+  if (!isRecord(rateLimit)) return { default: { exhausted: false } };
 
-  // Codex reports this account-wide, authoritatively, right on the rate_limit object itself -
-  // check it before falling back to inferring exhaustion from individual window percentages.
+  const accountWindow = isRecord(rateLimit.primary_window ?? rateLimit.primary)
+    ? ((rateLimit.primary_window ?? rateLimit.primary) as Record<string, unknown>)
+    : undefined;
+  const accountUsedPercent = accountWindow ? windowUsedPercent(accountWindow) : undefined;
+  const accountDetail = accountUsedPercent !== undefined ? `account ${roundPercent(accountUsedPercent)}% used` : undefined;
+  const accountResetsAt = accountWindow ? windowResetsAt(accountWindow) : undefined;
+
+  // Codex reports exhaustion account-wide, authoritatively, right on the rate_limit object
+  // itself - check it before falling back to inferring exhaustion from window percentages.
   // (Verified directly against a real exhausted account: `{"allowed":false,"limit_reached":true,
   // "primary_window":{"used_percent":100,...}}` at the top level, alongside a *healthy*
   // per-model entry under `additional_rate_limits` for the specific model in use - the
   // account-wide flag is the one that actually blocks every model under this provider.)
-  if (rateLimit.limit_reached === true || rateLimit.allowed === false) {
-    const window = rateLimit.primary_window ?? rateLimit.primary;
-    return {
-      exhausted: true,
-      resetsAt: isRecord(window) ? parseDateish(window.reset_at ?? window.reset_time_ms) : undefined,
+  const accountExhausted =
+    rateLimit.limit_reached === true ||
+    rateLimit.allowed === false ||
+    (accountUsedPercent !== undefined && accountUsedPercent >= EXHAUSTED_UTILIZATION_PERCENT);
+
+  const defaultResult: QuotaReconciliationResult = accountExhausted
+    ? { exhausted: true, resetsAt: accountResetsAt, detail: accountDetail }
+    : { exhausted: false, detail: accountDetail };
+
+  // Per-model detail (and, when the account itself isn't blocking, per-model exhaustion) from
+  // additional_rate_limits, matched to configured model ids by normalized label.
+  const perModel: Record<string, QuotaReconciliationResult> = {};
+  const additional = Array.isArray(result.data.additional_rate_limits) ? result.data.additional_rate_limits : [];
+  for (const entry of additional) {
+    if (!isRecord(entry) || typeof entry.limit_name !== "string") continue;
+    const entryRateLimit = entry.rate_limit;
+    if (!isRecord(entryRateLimit)) continue;
+    const window = isRecord(entryRateLimit.primary_window) ? entryRateLimit.primary_window : undefined;
+    const usedPercent = window ? windowUsedPercent(window) : undefined;
+    const modelExhausted =
+      accountExhausted ||
+      entryRateLimit.limit_reached === true ||
+      entryRateLimit.allowed === false ||
+      (usedPercent !== undefined && usedPercent >= EXHAUSTED_UTILIZATION_PERCENT);
+    perModel[normalizeModelId(entry.limit_name)] = {
+      exhausted: modelExhausted,
+      resetsAt: modelExhausted ? (accountResetsAt ?? (window ? windowResetsAt(window) : undefined)) : undefined,
+      detail: usedPercent !== undefined ? `${roundPercent(usedPercent)}% used` : accountDetail,
     };
   }
 
-  for (const window of [
-    rateLimit.primary_window ?? rateLimit.primary ?? rateLimit.five_hour_limit ?? rateLimit.five_hour,
-    rateLimit.secondary_window ?? rateLimit.secondary ?? rateLimit.weekly_limit ?? rateLimit.weekly,
-  ]) {
-    if (!isRecord(window)) continue;
-    // The API has been observed reporting this three different ways: "percent left" fields
-    // (convert to used%) or a direct "used%" field. Check all three rather than assuming one.
-    const percentLeft = numeric(window.percent_left) ?? numeric(window.remaining_percent);
-    const usedPercent = percentLeft !== undefined ? 100 - percentLeft : numeric(window.used_percent);
-    if (usedPercent !== undefined && usedPercent >= EXHAUSTED_UTILIZATION_PERCENT) {
-      return {
-        exhausted: true,
-        resetsAt: parseDateish(window.reset_at ?? window.reset_time_ms),
-      };
-    }
-  }
-  return { exhausted: false };
+  return { default: defaultResult, perModel: Object.keys(perModel).length > 0 ? perModel : undefined };
 }
 
 async function fetchZaiQuota(
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
+): Promise<ProviderQuotaResult | undefined> {
   const apiKey = await modelRegistry.getApiKeyForProvider("zai");
   if (!apiKey) return undefined;
   const result = await fetchJson(
@@ -202,20 +255,26 @@ async function fetchZaiQuota(
 
   const nested = isRecord(result.data.data) ? result.data.data : result.data;
   const limits = Array.isArray(nested.limits) ? nested.limits : [];
+  let mostUsed: { label: string; percent: number; entry: Record<string, unknown> } | undefined;
   for (const entry of limits) {
     if (!isRecord(entry) || entry.type !== "TOKENS_LIMIT") continue;
     const percentage = numeric(entry.percentage);
-    if (percentage !== undefined && percentage >= EXHAUSTED_UTILIZATION_PERCENT) {
-      return { exhausted: true, resetsAt: parseDateish(entry.nextResetTime) };
-    }
+    if (percentage === undefined) continue;
+    const label = entry.unit === 3 ? "hourly" : entry.unit === 6 ? "weekly" : "token";
+    if (!mostUsed || percentage > mostUsed.percent) mostUsed = { label, percent: percentage, entry };
   }
-  return { exhausted: false };
+  if (!mostUsed) return { default: { exhausted: false } };
+  const detail = `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used`;
+  if (mostUsed.percent >= EXHAUSTED_UTILIZATION_PERCENT) {
+    return { default: { exhausted: true, resetsAt: parseDateish(mostUsed.entry.nextResetTime), detail } };
+  }
+  return { default: { exhausted: false, detail } };
 }
 
 async function fetchKimiCodingQuota(
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
+): Promise<ProviderQuotaResult | undefined> {
   const apiKey = await modelRegistry.getApiKeyForProvider("kimi-coding");
   if (!apiKey) return undefined;
   const result = await fetchJson(
@@ -226,14 +285,14 @@ async function fetchKimiCodingQuota(
   if (!result.ok || !isRecord(result.data)) return undefined;
 
   const weekly = result.data.usage;
-  if (isRecord(weekly)) {
-    const limit = numeric(weekly.limit);
-    const used = numeric(weekly.used);
-    if (limit !== undefined && used !== undefined && limit > 0 && used >= limit) {
-      return { exhausted: true, resetsAt: parseDateish(weekly.resetTime) };
-    }
+  if (!isRecord(weekly)) return { default: { exhausted: false } };
+  const limit = numeric(weekly.limit);
+  const used = numeric(weekly.used);
+  const detail = limit !== undefined && used !== undefined ? `${used}/${limit} this week` : undefined;
+  if (limit !== undefined && used !== undefined && limit > 0 && used >= limit) {
+    return { default: { exhausted: true, resetsAt: parseDateish(weekly.resetTime), detail } };
   }
-  return { exhausted: false };
+  return { default: { exhausted: false, detail } };
 }
 
 /**
@@ -247,7 +306,7 @@ async function fetchKimiCodingQuota(
 async function fetchMinimaxQuota(
   _modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
+): Promise<ProviderQuotaResult | undefined> {
   const stdout = await deps.runMinimaxCli(["quota", "show", "--output", "json"]);
   if (!stdout) return undefined;
   let data: unknown;
@@ -259,21 +318,24 @@ async function fetchMinimaxQuota(
   if (!isRecord(data) || !Array.isArray(data.model_remains)) return undefined;
 
   const general = data.model_remains.find((entry) => isRecord(entry) && entry.model_name === "general");
-  const entries = isRecord(general) ? [general] : data.model_remains;
-  for (const entry of entries) {
-    if (!isRecord(entry)) continue;
-    // The API reports *remaining* percent (opposite convention from the other providers'
-    // *used* percent), and tracks a short rolling interval plus a weekly window separately.
-    const intervalRemaining = numeric(entry.current_interval_remaining_percent);
-    if (intervalRemaining !== undefined && intervalRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
-      return { exhausted: true, resetsAt: numeric(entry.end_time) };
-    }
-    const weeklyRemaining = numeric(entry.current_weekly_remaining_percent);
-    if (weeklyRemaining !== undefined && weeklyRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
-      return { exhausted: true, resetsAt: numeric(entry.weekly_end_time) };
-    }
+  if (!isRecord(general)) return { default: { exhausted: false } };
+
+  // The API reports *remaining* percent (opposite convention from the other providers' *used*
+  // percent), and tracks a short rolling interval plus a weekly window separately.
+  const intervalRemaining = numeric(general.current_interval_remaining_percent);
+  const weeklyRemaining = numeric(general.current_weekly_remaining_percent);
+  const detailParts: string[] = [];
+  if (intervalRemaining !== undefined) detailParts.push(`interval ${roundPercent(intervalRemaining)}% left`);
+  if (weeklyRemaining !== undefined) detailParts.push(`weekly ${roundPercent(weeklyRemaining)}% left`);
+  const detail = detailParts.length > 0 ? detailParts.join(", ") : undefined;
+
+  if (intervalRemaining !== undefined && intervalRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
+    return { default: { exhausted: true, resetsAt: numeric(general.end_time), detail } };
   }
-  return { exhausted: false };
+  if (weeklyRemaining !== undefined && weeklyRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
+    return { default: { exhausted: true, resetsAt: numeric(general.weekly_end_time), detail } };
+  }
+  return { default: { exhausted: false, detail } };
 }
 
 /**
@@ -286,7 +348,7 @@ export const QUOTA_FETCHERS: Record<
   (
     modelRegistry: ModelRegistry,
     deps: QuotaFetchDependencies,
-  ) => Promise<QuotaReconciliationResult | undefined>
+  ) => Promise<ProviderQuotaResult | undefined>
 > = {
   anthropic: fetchAnthropicQuota,
   "openai-codex": fetchCodexQuota,
@@ -300,7 +362,7 @@ export async function reconcileProviderQuota(
   provider: string,
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies = defaultQuotaFetchDependencies,
-): Promise<QuotaReconciliationResult | undefined> {
+): Promise<ProviderQuotaResult | undefined> {
   const fetcher = QUOTA_FETCHERS[provider];
   if (!fetcher) return undefined;
   try {

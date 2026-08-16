@@ -28,6 +28,8 @@ export type ModelHealthEntry = {
   totals: { requests: number; input: number; output: number; cost: number };
   /** epoch ms of the last successful real quota-API reconciliation, if any. */
   verifiedAt?: number;
+  /** Human-readable real usage from the last quota-API reconciliation, e.g. "62% used (7d)". */
+  verifiedDetail?: string;
 };
 
 export type AutoRouterHealthState = Record<string, ModelHealthEntry>;
@@ -38,6 +40,8 @@ export type QuotaReconciliationResult = {
   exhausted: boolean;
   /** epoch ms the exhausted window resets, if known. */
   resetsAt?: number;
+  /** Human-readable real usage summary from the provider, e.g. "62% used (7d)". Shown in /usage when present. */
+  detail?: string;
 };
 
 export function modelKey(model: ModelIdentity): string {
@@ -160,12 +164,14 @@ export function applyQuotaResult(
             ? result.resetsAt
             : now + GENERIC_COOLDOWN_MS,
         verifiedAt: now,
+        verifiedDetail: result.detail,
       }
     : {
         ...previous,
         consecutiveFailures: 0,
         cooldownUntil: undefined,
         verifiedAt: now,
+        verifiedDetail: result.detail,
       };
   return { ...state, [key]: entry };
 }
@@ -197,6 +203,8 @@ function parseState(value: unknown): AutoRouterHealthState {
       },
       verifiedAt:
         typeof raw.verifiedAt === "number" ? raw.verifiedAt : undefined,
+      verifiedDetail:
+        typeof raw.verifiedDetail === "string" ? raw.verifiedDetail : undefined,
     };
   }
   return state;

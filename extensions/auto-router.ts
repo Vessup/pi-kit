@@ -16,7 +16,7 @@ import {
   type ModelIdentity,
   modelKey,
 } from "./auto-router-health.js";
-import { reconcileProviderQuota } from "./auto-router-quota.js";
+import { normalizeModelId, reconcileProviderQuota } from "./auto-router-quota.js";
 import {
   AUTO_ROUTER_EFFORT_ORDER,
   type AutoRouterEffortLevel,
@@ -285,7 +285,8 @@ export default function autoRouter(pi: ExtensionAPI): void {
         if (!result) return;
         for (const model of models) {
           if (model.provider !== provider) continue;
-          healthStore.applyQuotaResult(modelKey(model), result);
+          const specific = result.perModel?.[normalizeModelId(model.id)];
+          healthStore.applyQuotaResult(modelKey(model), specific ?? result.default);
         }
       }),
     );
@@ -431,17 +432,28 @@ function formatTokenCount(count: number): string {
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
+/** `4557m` is meaningless at a glance; scale to hours/days once a cooldown is that long. */
+function formatDuration(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
 function rowStatus(entry: ModelHealthEntry | undefined, now: number): string {
   if (!entry) return "unused";
   if (entry.cooldownUntil && entry.cooldownUntil > now) {
-    const minutes = Math.max(
-      1,
-      Math.round((entry.cooldownUntil - now) / 60_000),
-    );
     const cause = entry.lastError ? ` (${entry.lastError.status})` : "";
-    return `cooldown${cause} ~${minutes}m`;
+    return `cooldown${cause} ~${formatDuration(entry.cooldownUntil - now)}`;
   }
   return "healthy";
+}
+
+/** Real usage from the provider's own quota API, when reconciliation has run for this model — separate from (and often more accurate than) this router's own request/token counters, which only see traffic Auto itself routed. */
+function verifiedUsageText(entry: ModelHealthEntry | undefined): string {
+  if (!entry?.verifiedAt) return "—";
+  return entry.verifiedDetail ?? "verified, no detail";
 }
 
 function rowLine(row: UsageRow, now: number): string {
@@ -451,8 +463,7 @@ function rowLine(row: UsageRow, now: number): string {
   const tokens = formatTokenCount(
     (entry?.totals.input ?? 0) + (entry?.totals.output ?? 0),
   );
-  const verified = entry?.verifiedAt ? "✓" : "~";
-  return `${row.model.provider}/${row.model.id} — ${status} · ${requests} req · ${tokens} tok ${verified}`;
+  return `${row.model.provider}/${row.model.id} — ${status} · ${verifiedUsageText(entry)} · ${requests} routed req · ${tokens} tok`;
 }
 
 function formatUsagePlainText(rows: UsageRow[]): string {
@@ -477,8 +488,8 @@ function formatUsageMarkdown(rows: UsageRow[]): string {
   if (rows.length === 0) return "No models configured.";
   const now = Date.now();
   const lines = [
-    "| Tier | Model | Status | Req | Tokens | Cost |",
-    "|---|---|---|---|---|---|",
+    "| Tier | Model | Status | Verified usage | Routed req | Routed tokens | Routed cost |",
+    "|---|---|---|---|---|---|---|",
   ];
   for (const row of rows) {
     const entry = row.entry;
@@ -486,11 +497,14 @@ function formatUsageMarkdown(rows: UsageRow[]): string {
     const tokens = formatTokenCount(
       (entry?.totals.input ?? 0) + (entry?.totals.output ?? 0),
     );
-    const verified = entry?.verifiedAt ? " ✓" : "";
     lines.push(
-      `| ${row.tier} | ${row.model.provider}/${row.model.id} | ${rowStatus(entry, now)}${verified} | ${entry?.totals.requests ?? 0} | ${tokens} | ${cost} |`,
+      `| ${row.tier} | ${row.model.provider}/${row.model.id} | ${rowStatus(entry, now)} | ${verifiedUsageText(entry)} | ${entry?.totals.requests ?? 0} | ${tokens} | ${cost} |`,
     );
   }
+  lines.push(
+    "",
+    "_Verified usage comes from the provider's own quota API, where available. Routed req/tokens/cost only count turns Auto itself routed to that model — usage from other sessions, manual `/model` picks, or other tools isn't reflected there._",
+  );
   return lines.join("\n");
 }
 

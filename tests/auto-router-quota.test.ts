@@ -68,13 +68,15 @@ test("reconcileProviderQuota(anthropic) reports exhaustion from an OAuth token's
     jsonResponse({ five_hour: { utilization: 100, resets_at: resetsAt } }),
   );
   const result = await reconcileProviderQuota("anthropic", fakeRegistry("oauth-token"), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: Date.parse(resetsAt) });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse(resetsAt), detail: "5h 100% used" },
+  });
 });
 
-test("reconcileProviderQuota(anthropic) reports headroom when utilization is low", async () => {
+test("reconcileProviderQuota(anthropic) reports headroom, with the most-used window as detail", async () => {
   const deps = fakeDeps(() => jsonResponse({ five_hour: { utilization: 10 }, seven_day: { utilization: 20 } }));
   const result = await reconcileProviderQuota("anthropic", fakeRegistry("oauth-token"), deps);
-  expect(result).toEqual({ exhausted: false });
+  expect(result).toEqual({ default: { exhausted: false, detail: "7d 20% used" } });
 });
 
 test("reconcileProviderQuota(openai-codex) returns undefined without a discoverable account id", async () => {
@@ -86,7 +88,7 @@ test("reconcileProviderQuota(openai-codex) returns undefined without a discovera
 test("reconcileProviderQuota(openai-codex) reports exhaustion when the spend cap is reached", async () => {
   const deps = fakeDeps(() => jsonResponse({ spend_control: { reached: true } }));
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
-  expect(result).toEqual({ exhausted: true });
+  expect(result).toEqual({ default: { exhausted: true, detail: "spend cap reached" } });
 });
 
 test("reconcileProviderQuota(openai-codex) reports exhaustion from the account-wide rate_limit.limit_reached flag", async () => {
@@ -111,7 +113,12 @@ test("reconcileProviderQuota(openai-codex) reports exhaustion from the account-w
     }),
   );
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: 1787197007 * 1000 });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: 1787197007 * 1000, detail: "account 100% used" },
+    // The per-model entry is *also* exhausted, since the account-wide flag blocks it too -
+    // but its detail reflects the model's own (much lower) usage, not the account's.
+    perModel: { gpt53codexspark: { exhausted: true, resetsAt: 1787197007 * 1000, detail: "5% used" } },
+  });
 });
 
 test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit window is depleted (percent_left)", async () => {
@@ -119,7 +126,9 @@ test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit 
     jsonResponse({ rate_limit: { primary_window: { percent_left: 0, reset_at: "2030-06-01T00:00:00Z" } } }),
   );
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-06-01T00:00:00Z") });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse("2030-06-01T00:00:00Z"), detail: "account 100% used" },
+  });
 });
 
 test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit window is depleted (used_percent)", async () => {
@@ -127,13 +136,36 @@ test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit 
     jsonResponse({ rate_limit: { primary_window: { used_percent: 100, reset_at: "2030-06-01T00:00:00Z" } } }),
   );
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-06-01T00:00:00Z") });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse("2030-06-01T00:00:00Z"), detail: "account 100% used" },
+  });
 });
 
 test("reconcileProviderQuota(openai-codex) reports headroom when used_percent is low", async () => {
   const deps = fakeDeps(() => jsonResponse({ rate_limit: { primary_window: { used_percent: 12 } } }));
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
-  expect(result).toEqual({ exhausted: false });
+  expect(result).toEqual({ default: { exhausted: false, detail: "account 12% used" } });
+});
+
+test("reconcileProviderQuota(openai-codex) can report a model exhausted independently of a healthy account", async () => {
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 10 } },
+      additional_rate_limits: [
+        {
+          limit_name: "GPT-5.6-Sol",
+          rate_limit: { allowed: false, limit_reached: true, primary_window: { used_percent: 100, reset_at: "2030-06-01T00:00:00Z" } },
+        },
+      ],
+    }),
+  );
+  const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
+  expect(result?.default).toEqual({ exhausted: false, detail: "account 10% used" });
+  expect(result?.perModel?.gpt56sol).toEqual({
+    exhausted: true,
+    resetsAt: Date.parse("2030-06-01T00:00:00Z"),
+    detail: "100% used",
+  });
 });
 
 test("reconcileProviderQuota(zai) reports exhaustion from a TOKENS_LIMIT entry", async () => {
@@ -141,13 +173,17 @@ test("reconcileProviderQuota(zai) reports exhaustion from a TOKENS_LIMIT entry",
     jsonResponse({ data: { limits: [{ type: "TOKENS_LIMIT", percentage: 100, nextResetTime: 4_102_444_800_000 }] } }),
   );
   const result = await reconcileProviderQuota("zai", fakeRegistry("key"), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: 4_102_444_800_000 });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "token 100% used" },
+  });
 });
 
 test("reconcileProviderQuota(kimi-coding) reports exhaustion when used reaches the weekly limit", async () => {
   const deps = fakeDeps(() => jsonResponse({ usage: { limit: 100, used: 100, resetTime: "2030-01-01T00:00:00Z" } }));
   const result = await reconcileProviderQuota("kimi-coding", fakeRegistry("key"), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z") });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z"), detail: "100/100 this week" },
+  });
 });
 
 test("reconcileProviderQuota(minimax) reports headroom from the mmx CLI's general bucket", async () => {
@@ -161,7 +197,9 @@ test("reconcileProviderQuota(minimax) reports headroom from the mmx CLI's genera
       }),
   });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
-  expect(result).toEqual({ exhausted: false });
+  expect(result).toEqual({
+    default: { exhausted: false, detail: "interval 84% left, weekly 89% left" },
+  });
 });
 
 test("reconcileProviderQuota(minimax) reports exhaustion when the interval bucket is depleted", async () => {
@@ -179,7 +217,9 @@ test("reconcileProviderQuota(minimax) reports exhaustion when the interval bucke
       }),
   });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: 4_102_444_800_000 });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "interval 0% left, weekly 50% left" },
+  });
 });
 
 test("reconcileProviderQuota(minimax) reports exhaustion when only the weekly bucket is depleted", async () => {
@@ -197,7 +237,9 @@ test("reconcileProviderQuota(minimax) reports exhaustion when only the weekly bu
       }),
   });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
-  expect(result).toEqual({ exhausted: true, resetsAt: 4_102_444_800_000 });
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "interval 60% left, weekly 0.2% left" },
+  });
 });
 
 test("reconcileProviderQuota(minimax) degrades gracefully when the CLI is missing or not logged in", async () => {
