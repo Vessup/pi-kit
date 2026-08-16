@@ -316,6 +316,80 @@ test("a recorded failure fails over to the next configured model in the same tie
   expect(fake.setModelCalls).toEqual([b]);
 });
 
+test("a message-level provider error (no distinct HTTP failure status) still fails over on the next turn", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [a, b] });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  expect(fake.setModelCalls).toEqual([a]);
+
+  // The HTTP response came back 200, so after_provider_response never fires as a failure -
+  // the error only shows up once Pi finalizes the assistant message.
+  await fake.fire(
+    "message_end",
+    {
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "Codex error: The usage limit has been reached",
+      },
+    },
+    ctx,
+  );
+  fake.setModelCalls.length = 0;
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  expect(fake.setModelCalls).toEqual([b]);
+});
+
+test("an aborted (user-cancelled) message does not count as a provider failure", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [a, b] });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  await fake.fire("message_end", { message: { role: "assistant", stopReason: "aborted" } }, ctx);
+  fake.setModelCalls.length = 0;
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  expect(fake.setModelCalls).toEqual([a]);
+});
+
 test("manually picking a real model while Auto is active turns Auto off", async () => {
   const a = model("prov", "model-a");
   const manual = model("prov", "manual-model");

@@ -153,13 +153,31 @@ async function fetchCodexQuota(
 
   const rateLimit = result.data.rate_limit ?? result.data.rate_limits;
   if (!isRecord(rateLimit)) return { exhausted: false };
+
+  // Codex reports this account-wide, authoritatively, right on the rate_limit object itself -
+  // check it before falling back to inferring exhaustion from individual window percentages.
+  // (Verified directly against a real exhausted account: `{"allowed":false,"limit_reached":true,
+  // "primary_window":{"used_percent":100,...}}` at the top level, alongside a *healthy*
+  // per-model entry under `additional_rate_limits` for the specific model in use - the
+  // account-wide flag is the one that actually blocks every model under this provider.)
+  if (rateLimit.limit_reached === true || rateLimit.allowed === false) {
+    const window = rateLimit.primary_window ?? rateLimit.primary;
+    return {
+      exhausted: true,
+      resetsAt: isRecord(window) ? parseDateish(window.reset_at ?? window.reset_time_ms) : undefined,
+    };
+  }
+
   for (const window of [
     rateLimit.primary_window ?? rateLimit.primary ?? rateLimit.five_hour_limit ?? rateLimit.five_hour,
     rateLimit.secondary_window ?? rateLimit.secondary ?? rateLimit.weekly_limit ?? rateLimit.weekly,
   ]) {
     if (!isRecord(window)) continue;
+    // The API has been observed reporting this three different ways: "percent left" fields
+    // (convert to used%) or a direct "used%" field. Check all three rather than assuming one.
     const percentLeft = numeric(window.percent_left) ?? numeric(window.remaining_percent);
-    if (percentLeft !== undefined && percentLeft <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
+    const usedPercent = percentLeft !== undefined ? 100 - percentLeft : numeric(window.used_percent);
+    if (usedPercent !== undefined && usedPercent >= EXHAUSTED_UTILIZATION_PERCENT) {
       return {
         exhausted: true,
         resetsAt: parseDateish(window.reset_at ?? window.reset_time_ms),

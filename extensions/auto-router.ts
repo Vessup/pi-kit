@@ -46,6 +46,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/**
+ * A `stopReason: "error"` assistant message carries no HTTP status — only a human-readable
+ * `errorMessage` (Pi's own normalized wording, e.g. "Codex error: The usage limit has been
+ * reached"). By the time an extension sees this, Pi's own agent-level retry has already given
+ * up against this exact model/provider, so any such error is treated as at least as serious as
+ * a rate limit (immediate cooldown) rather than requiring several occurrences first.
+ */
+function inferFailureStatus(errorMessage: string | undefined): number {
+  const text = (errorMessage ?? "").toLowerCase();
+  if (/unauthoriz|authentication|invalid api key|forbidden/.test(text)) return 401;
+  return 429;
+}
+
 /** Resolve config model refs to real, currently-usable `Model` objects (auth configured), preserving order. */
 function resolveAvailableModels(
   modelRegistry: ModelRegistry,
@@ -342,7 +355,17 @@ export default function autoRouter(pi: ExtensionAPI): void {
   pi.on("message_end", (event) => {
     if (!autoActive || !currentInFlightModel) return;
     if (event.message.role !== "assistant") return;
-    const usage = isRecord(event.message) ? event.message.usage : undefined;
+    const message = event.message;
+    if (message.stopReason === "aborted") return; // user-cancelled, not a provider health signal
+    if (message.stopReason === "error") {
+      healthStore.recordFailure(
+        modelKey(currentInFlightModel),
+        inferFailureStatus(message.errorMessage),
+        undefined,
+      );
+      return;
+    }
+    const usage = isRecord(message) ? message.usage : undefined;
     healthStore.recordSuccess(modelKey(currentInFlightModel), {
       input: numeric(isRecord(usage) ? usage.input : undefined),
       output: numeric(isRecord(usage) ? usage.output : undefined),

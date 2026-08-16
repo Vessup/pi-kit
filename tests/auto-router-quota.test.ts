@@ -89,12 +89,51 @@ test("reconcileProviderQuota(openai-codex) reports exhaustion when the spend cap
   expect(result).toEqual({ exhausted: true });
 });
 
-test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit window is depleted", async () => {
+test("reconcileProviderQuota(openai-codex) reports exhaustion from the account-wide rate_limit.limit_reached flag", async () => {
+  // Shape verified against a real exhausted account: the account-wide flag was true while a
+  // per-model entry under additional_rate_limits for the model in active use was still healthy -
+  // the account-wide flag is what actually blocks every model under this provider.
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      rate_limit: {
+        allowed: false,
+        limit_reached: true,
+        primary_window: { used_percent: 100, reset_at: 1787197007 },
+        secondary_window: null,
+      },
+      additional_rate_limits: [
+        {
+          limit_name: "GPT-5.3-Codex-Spark",
+          rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 5 } },
+        },
+      ],
+      spend_control: { reached: false },
+    }),
+  );
+  const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
+  expect(result).toEqual({ exhausted: true, resetsAt: 1787197007 * 1000 });
+});
+
+test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit window is depleted (percent_left)", async () => {
   const deps = fakeDeps(() =>
     jsonResponse({ rate_limit: { primary_window: { percent_left: 0, reset_at: "2030-06-01T00:00:00Z" } } }),
   );
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
   expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-06-01T00:00:00Z") });
+});
+
+test("reconcileProviderQuota(openai-codex) reports exhaustion when a rate-limit window is depleted (used_percent)", async () => {
+  const deps = fakeDeps(() =>
+    jsonResponse({ rate_limit: { primary_window: { used_percent: 100, reset_at: "2030-06-01T00:00:00Z" } } }),
+  );
+  const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
+  expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-06-01T00:00:00Z") });
+});
+
+test("reconcileProviderQuota(openai-codex) reports headroom when used_percent is low", async () => {
+  const deps = fakeDeps(() => jsonResponse({ rate_limit: { primary_window: { used_percent: 12 } } }));
+  const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
+  expect(result).toEqual({ exhausted: false });
 });
 
 test("reconcileProviderQuota(zai) reports exhaustion from a TOKENS_LIMIT entry", async () => {
