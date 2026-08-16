@@ -64,7 +64,7 @@ Each tier key is a Pi thinking level (`off`, `minimal`, `low`, `medium`, `high`,
 
 On every turn, Auto asks the `medium` tier's first healthy model (the "default model") to classify the turn as `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, then routes to the resolved tier: if the classified level has no configured models, it steps toward `medium` until it finds one (a classified `low` with nothing configured there falls back to `medium`). Within that tier it picks the first model that isn't in a failure/rate-limit cooldown; if every model in the tier is unhealthy, it escalates to the next *higher* configured tier; if nothing anywhere is healthy, it uses the first configured model anyway rather than blocking the turn, with a warning.
 
-Health is tracked from the router's own observed traffic (HTTP status codes, rate-limit headers) and, best-effort, reconciled against real provider usage at session start and on `/usage` for providers with a known quota API (currently Anthropic, OpenAI Codex, Z.ai, and Kimi Coding) — this lets the router self-correct for usage consumed outside the current session (a different session, a manual `/model` pick, another tool) instead of only reacting to its own failures. Providers without a known quota API (Minimax included — it doesn't currently expose one) simply stay on router-observed data.
+Health is tracked from the router's own observed traffic (HTTP status codes, rate-limit headers) and, best-effort, reconciled against real provider usage at session start and on `/usage` for providers with a known quota source (currently Anthropic, OpenAI Codex, Z.ai, and Kimi Coding via their HTTP APIs, plus Minimax via its `mmx` CLI (`mmx auth login`) since MiniMax has no documented HTTP quota endpoint) — this lets the router self-correct for usage consumed outside the current session (a different session, a manual `/model` pick, another tool) instead of only reacting to its own failures. Providers without a known quota source simply stay on router-observed data.
 
 Run `/usage` to see health/usage for every configured model, grouped by tier, in a bordered dashboard in the TUI or a compact summary elsewhere (including Pi Web). The `/model` picker's effort/thinking control is inert while Auto is selected, since effort is chosen per turn internally; the footer (and Pi Web's model display) always shows the real underlying model and effort actually in use, plus a small `🔀` badge in the TUI footer while Auto is engaged. Manually picking a different model from `/model` turns Auto off; reselecting "Auto" turns it back on.
 
@@ -72,6 +72,7 @@ Run `/usage` to see health/usage for every configured model, grouped by tier, in
 
 - Pi 0.84.1
 - Network access from the machine running Pi, for the optional quota reconciliation calls (never required — routing and `/usage` work fully offline from router-observed data alone)
+- For Minimax quota reconciliation specifically: MiniMax's own `mmx` CLI on `PATH`, logged in via `mmx auth login`. Without it, Minimax models just stay on router-observed data like any other unsupported provider.
 
 ## Worktrees
 

@@ -13,11 +13,17 @@ function fakeRegistry(apiKey: string | undefined): ModelRegistry {
 
 function fakeDeps(
   handler: (url: string) => Response,
-  { accountId }: { accountId?: string } = { accountId: "acct-1" },
+  {
+    accountId,
+    minimaxCli,
+  }: { accountId?: string; minimaxCli?: (args: string[]) => Promise<string | undefined> } = {
+    accountId: "acct-1",
+  },
 ): QuotaFetchDependencies {
   return {
     fetchImpl: (async (url: string | URL) => handler(url.toString())) as typeof fetch,
     readCodexAccountId: async () => accountId,
+    runMinimaxCli: minimaxCli ?? (async () => undefined),
   };
 }
 
@@ -26,7 +32,11 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 test("reconcileProviderQuota returns undefined for providers without a known fetcher", async () => {
-  const result = await reconcileProviderQuota("minimax", fakeRegistry("key"), fakeDeps(() => jsonResponse({})));
+  const result = await reconcileProviderQuota(
+    "totally-unsupported-provider",
+    fakeRegistry("key"),
+    fakeDeps(() => jsonResponse({})),
+  );
   expect(result).toBeUndefined();
 });
 
@@ -101,6 +111,68 @@ test("reconcileProviderQuota(kimi-coding) reports exhaustion when used reaches t
   expect(result).toEqual({ exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z") });
 });
 
+test("reconcileProviderQuota(minimax) reports headroom from the mmx CLI's general bucket", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), {
+    minimaxCli: async () =>
+      JSON.stringify({
+        model_remains: [
+          { model_name: "general", current_interval_remaining_percent: 84, current_weekly_remaining_percent: 89 },
+          { model_name: "video", current_interval_remaining_percent: 100, current_weekly_remaining_percent: 100 },
+        ],
+      }),
+  });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toEqual({ exhausted: false });
+});
+
+test("reconcileProviderQuota(minimax) reports exhaustion when the interval bucket is depleted", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), {
+    minimaxCli: async () =>
+      JSON.stringify({
+        model_remains: [
+          {
+            model_name: "general",
+            current_interval_remaining_percent: 0,
+            current_weekly_remaining_percent: 50,
+            end_time: 4_102_444_800_000,
+          },
+        ],
+      }),
+  });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toEqual({ exhausted: true, resetsAt: 4_102_444_800_000 });
+});
+
+test("reconcileProviderQuota(minimax) reports exhaustion when only the weekly bucket is depleted", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), {
+    minimaxCli: async () =>
+      JSON.stringify({
+        model_remains: [
+          {
+            model_name: "general",
+            current_interval_remaining_percent: 60,
+            current_weekly_remaining_percent: 0.2,
+            weekly_end_time: 4_102_444_800_000,
+          },
+        ],
+      }),
+  });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toEqual({ exhausted: true, resetsAt: 4_102_444_800_000 });
+});
+
+test("reconcileProviderQuota(minimax) degrades gracefully when the CLI is missing or not logged in", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), { minimaxCli: async () => undefined });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toBeUndefined();
+});
+
+test("reconcileProviderQuota(minimax) degrades gracefully on unparseable CLI output", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), { minimaxCli: async () => "not json" });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toBeUndefined();
+});
+
 test("reconcileProviderQuota degrades gracefully on network/HTTP failure", async () => {
   const deps = fakeDeps(() => jsonResponse({}, 500));
   const result = await reconcileProviderQuota("anthropic", fakeRegistry("oauth-token"), deps);
@@ -113,6 +185,7 @@ test("reconcileProviderQuota degrades gracefully when the fetcher throws", async
       throw new Error("network down");
     }) as typeof fetch,
     readCodexAccountId: async () => "acct-1",
+    runMinimaxCli: async () => undefined,
   };
   const result = await reconcileProviderQuota("anthropic", fakeRegistry("oauth-token"), deps);
   expect(result).toBeUndefined();

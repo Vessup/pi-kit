@@ -1,18 +1,24 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { QuotaReconciliationResult } from "./auto-router-health.js";
+
+const execFileAsync = promisify(execFile);
 
 const FETCH_TIMEOUT_MS = 15_000;
 const EXHAUSTED_UTILIZATION_PERCENT = 99.5;
 
 type FetchResult = { ok: true; data: unknown } | { ok: false };
 
-/** Injectable for tests; defaults to the real network/filesystem. */
+/** Injectable for tests; defaults to the real network/filesystem/CLI. */
 export type QuotaFetchDependencies = {
   fetchImpl: typeof fetch;
   readCodexAccountId: () => Promise<string | undefined>;
+  /** Runs the `mmx` CLI (MiniMax's own tool) and returns stdout, or `undefined` if it's missing, not logged in, or fails. */
+  runMinimaxCli: (args: string[]) => Promise<string | undefined>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -35,9 +41,22 @@ async function defaultReadCodexAccountId(): Promise<string | undefined> {
   }
 }
 
+async function defaultRunMinimaxCli(args: string[]): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("mmx", args, {
+      timeout: FETCH_TIMEOUT_MS,
+      encoding: "utf8",
+    });
+    return stdout;
+  } catch {
+    return undefined;
+  }
+}
+
 export const defaultQuotaFetchDependencies: QuotaFetchDependencies = {
   fetchImpl: fetch,
   readCodexAccountId: defaultReadCodexAccountId,
+  runMinimaxCli: defaultRunMinimaxCli,
 };
 
 async function fetchJson(
@@ -200,9 +219,49 @@ async function fetchKimiCodingQuota(
 }
 
 /**
+ * MiniMax has no documented HTTP quota endpoint, but its own `mmx` CLI does — `mmx --verbose`
+ * shows it calling `GET https://api.minimax.io/v1/token_plan/remains` with its own OAuth
+ * session (`mmx auth login`), separate from whatever credential Pi itself uses for inference.
+ * Shelling out to the CLI (rather than reading its private token cache directly) lets `mmx`
+ * own token refresh/expiry, and only degrades — never breaks — when `mmx` isn't installed or
+ * isn't logged in.
+ */
+async function fetchMinimaxQuota(
+  _modelRegistry: ModelRegistry,
+  deps: QuotaFetchDependencies,
+): Promise<QuotaReconciliationResult | undefined> {
+  const stdout = await deps.runMinimaxCli(["quota", "show", "--output", "json"]);
+  if (!stdout) return undefined;
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(data) || !Array.isArray(data.model_remains)) return undefined;
+
+  const general = data.model_remains.find((entry) => isRecord(entry) && entry.model_name === "general");
+  const entries = isRecord(general) ? [general] : data.model_remains;
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    // The API reports *remaining* percent (opposite convention from the other providers'
+    // *used* percent), and tracks a short rolling interval plus a weekly window separately.
+    const intervalRemaining = numeric(entry.current_interval_remaining_percent);
+    if (intervalRemaining !== undefined && intervalRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
+      return { exhausted: true, resetsAt: numeric(entry.end_time) };
+    }
+    const weeklyRemaining = numeric(entry.current_weekly_remaining_percent);
+    if (weeklyRemaining !== undefined && weeklyRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
+      return { exhausted: true, resetsAt: numeric(entry.weekly_end_time) };
+    }
+  }
+  return { exhausted: false };
+}
+
+/**
  * Best-effort real quota reconciliation, keyed by Pi provider id. Providers without a known
- * fetcher (e.g. Minimax, arbitrary OpenAI-compatible custom providers) simply have no entry
- * here — callers treat a missing/failed fetch as "no correction available", never as failure.
+ * fetcher (arbitrary OpenAI-compatible custom providers, mostly) simply have no entry here —
+ * callers treat a missing/failed fetch as "no correction available", never as failure.
  */
 export const QUOTA_FETCHERS: Record<
   string,
@@ -215,6 +274,7 @@ export const QUOTA_FETCHERS: Record<
   "openai-codex": fetchCodexQuota,
   zai: fetchZaiQuota,
   "kimi-coding": fetchKimiCodingQuota,
+  minimax: fetchMinimaxQuota,
 };
 
 /** Reconcile one provider's real quota state. Never throws; returns `undefined` when there's no known fetcher, no credentials, or the request failed. */
