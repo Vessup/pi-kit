@@ -755,11 +755,13 @@ async function executeAgentCommand(
         respond(state, requestId, true);
         return;
       case "get_session_options": {
-        const models = (
-          state.ctx.scopedModels.length > 0
-            ? state.ctx.scopedModels.map((item) => item.model)
-            : state.ctx.modelRegistry.getAvailable()
-        ).map((model) => ({
+        // Always advertise every model with configured credentials so the picker
+        // reflects what the user could realistically choose. Scope is still
+        // enforced by set_model's isScopedModelAllowed check; a user picking
+        // an out-of-scope model gets a clear error and learns the scope is
+        // the constraint, rather than seeing only the current model and not
+        // knowing alternatives exist.
+        const models = state.ctx.modelRegistry.getAvailable().map((model) => ({
           provider: model.provider,
           id: model.id,
           name: model.name,
