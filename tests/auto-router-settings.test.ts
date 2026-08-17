@@ -76,6 +76,26 @@ test("parseAutoRouterSettings drops malformed model refs and empty tiers", () =>
   expect(parsed.efforts.xhigh).toBeUndefined();
 });
 
+test("parseAutoRouterSettings accepts a per-model effort override, independent of the tier it's listed under", () => {
+  const parsed = parseAutoRouterSettings({
+    efforts: {
+      high: { models: [{ provider: "opencode-go", id: "kimi-k3", effort: "max" }] },
+    },
+  });
+  expect(parsed.efforts.high?.models).toEqual([
+    { provider: "opencode-go", id: "kimi-k3", effort: "max" },
+  ]);
+});
+
+test("parseAutoRouterSettings drops an invalid effort override rather than the whole model entry", () => {
+  const parsed = parseAutoRouterSettings({
+    efforts: {
+      high: { models: [{ provider: "a", id: "b", effort: "turbo" }] },
+    },
+  });
+  expect(parsed.efforts.high?.models).toEqual([{ provider: "a", id: "b" }]);
+});
+
 test("parseAutoRouterSettings tolerates garbage input", () => {
   expect(parseAutoRouterSettings(null)).toEqual({ efforts: {} });
   expect(parseAutoRouterSettings("nope")).toEqual({ efforts: {} });

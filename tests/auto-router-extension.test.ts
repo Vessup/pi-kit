@@ -225,6 +225,37 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
 });
 
+test("a model's `effort` override sets its own thinking level, independent of the tier that routed to it", async () => {
+  const high = model("opencode-go", "kimi-k3");
+  await writeConfig({
+    efforts: {
+      high: {
+        models: [{ provider: "opencode-go", id: "kimi-k3", effort: "max" }],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [high], classify: () => "high" });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([high]);
+  // Routed via the "high" tier (that's what got classified and what /usage groups it under),
+  // but dispatched at "max" thinking level per the model's own override.
+  expect(fake.thinkingLevelCalls).toEqual(["max"]);
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (max)");
+
+  await fake.runCommand("usage", "", ctx);
+  const notified = ctx.notifications.at(-1)?.message ?? "";
+  expect(notified).toContain("high"); // still grouped under its configured tier
+  expect(notified).toContain("at max effort"); // classification log shows the real applied effort
+});
+
 test("a routed turn's classification is logged and shows up in /usage, so a routing decision can be checked against what the classifier actually said", async () => {
   const medium = model("prov", "medium-model");
   const high = model("prov", "high-model");

@@ -171,7 +171,7 @@ test("AutoRouterHealthStore round-trips model health and classification log thro
   const model = { provider: "prov", id: "a" };
   store.recordSuccess(modelKey(model), { input: 10, output: 20, cost: 0.01 });
   store.recordClassification(
-    { prompt: "do the thing", reply: "high complexity", level: "high", tier: "high", model },
+    { prompt: "do the thing", reply: "high complexity", level: "high", tier: "high", effort: "high", model },
     NOW,
   );
   await store.flush();
@@ -185,7 +185,15 @@ test("AutoRouterHealthStore round-trips model health and classification log thro
     cost: 0.01,
   });
   expect(reloaded.getClassifications()).toEqual([
-    { timestamp: NOW, prompt: "do the thing", reply: "high complexity", level: "high", tier: "high", model },
+    {
+      timestamp: NOW,
+      prompt: "do the thing",
+      reply: "high complexity",
+      level: "high",
+      tier: "high",
+      effort: "high",
+      model,
+    },
   ]);
 });
 
@@ -212,7 +220,14 @@ test("AutoRouterHealthStore.recordClassification truncates long text and caps th
   const longReply = "x".repeat(500);
   for (let i = 0; i < 25; i++) {
     store.recordClassification(
-      { prompt: `turn ${i}`, reply: i === 24 ? longReply : `reply ${i}`, level: "medium", tier: "medium", model },
+      {
+        prompt: `turn ${i}`,
+        reply: i === 24 ? longReply : `reply ${i}`,
+        level: "medium",
+        tier: "medium",
+        effort: "medium",
+        model,
+      },
       NOW + i,
     );
   }

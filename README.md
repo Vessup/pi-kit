@@ -62,6 +62,16 @@ Configure it under a new `autoRouter` key in `~/.pi/agent/settings.json` (or `.p
 
 Each tier key is a Pi thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); `medium` is the default/anchor tier. Each tier holds an ordered list of `{ provider, id }` model references — the first is preferred, later entries are failover within that tier.
 
+Which tier a model is listed under only decides *when it's used* (which classified-complexity bucket routes to it, and where it sits in the escalation order) — it doesn't have to be the reasoning effort that model is actually dispatched at. Add `"effort"` to a model reference to pin its own thinking level independent of its tier, e.g. a model that only performs well at its own maximum setting can still live under `high` (so moderately-hard tasks reach it and it takes part in escalation normally) while always running at `max`:
+
+```json
+"high": {
+  "models": [{ "provider": "opencode-go", "id": "kimi-k3", "effort": "max" }]
+}
+```
+
+Omit `effort` and a model just uses its tier's own name, as before.
+
 On every turn, Auto asks the `medium` tier's first healthy model (the "default model") to classify the turn as `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, then routes to the resolved tier: if the classified level has no configured models, it steps toward `medium` until it finds one (a classified `low` with nothing configured there falls back to `medium`). Within that tier it picks the first model that isn't in a failure/rate-limit cooldown; if every model in the tier is unhealthy, it escalates to the next *higher* configured tier; if nothing anywhere is healthy, it uses the first configured model anyway rather than blocking the turn, with a warning.
 
 Health is tracked from two sources. Router-observed traffic (HTTP status codes, rate-limit headers, and message-level provider errors that never surface as a bad HTTP status) sets an immediate cooldown the moment any turn against a configured model fails — whether Auto routed there itself or you picked it manually from `/model`; a model configured in `autoRouter` is tracked the same way either way. Separately, best-effort real quota reconciliation runs at session start and on `/usage`, for providers with a known quota source: Anthropic, OpenAI Codex, Z.ai, Kimi Coding, and OpenCode Go via their HTTP APIs (using the same credentials Pi already has for each), plus Minimax via its `mmx` CLI (`mmx auth login`) since MiniMax has no HTTP quota endpoint of its own. This is what lets the router self-correct for usage consumed truly outside its view (a different session or machine, another tool, or before Auto was set up) instead of only reacting to its own observations. Codex specifically reports quota per-model for models it meters individually (its own `additional_rate_limits` entries) — those are independent of its account-wide limit in both directions, so a model with its own entry is neither blocked by, nor shielded by, the account-wide state; only models without one fall back to it. Providers without a known quota source simply stay on router-observed data.

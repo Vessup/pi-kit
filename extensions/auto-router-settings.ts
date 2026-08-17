@@ -59,6 +59,16 @@ export type AutoRouterEffortLevel = (typeof AUTO_ROUTER_EFFORT_ORDER)[number];
 export type AutoRouterModelRef = {
   provider: string;
   id: string;
+  /**
+   * Thinking level to actually apply when this model is used, if different from the tier it's
+   * listed under. The tier a model is configured in only controls which classified-complexity
+   * bucket routes to it and where it sits in the escalation order - it's a routing decision, not
+   * a claim about what reasoning effort suits that specific model. A model that only performs
+   * well at its own max setting, for instance, can be listed under `high` (so moderately-hard
+   * tasks reach it and it participates in escalation the same way) while still always being
+   * dispatched at `max` effort. Defaults to the tier's own name when omitted.
+   */
+  effort?: AutoRouterEffortLevel;
 };
 
 export type AutoRouterTierConfig = {
@@ -82,10 +92,12 @@ function isEffortLevel(value: string): value is AutoRouterEffortLevel {
 
 function parseModelRef(value: unknown): AutoRouterModelRef | undefined {
   if (!isRecord(value)) return undefined;
-  const { provider, id } = value;
+  const { provider, id, effort } = value;
   if (typeof provider !== "string" || !provider.trim()) return undefined;
   if (typeof id !== "string" || !id.trim()) return undefined;
-  return { provider: provider.trim(), id: id.trim() };
+  const ref: AutoRouterModelRef = { provider: provider.trim(), id: id.trim() };
+  if (typeof effort === "string" && isEffortLevel(effort)) ref.effort = effort;
+  return ref;
 }
 
 /** Parse the raw `autoRouter` settings value, silently dropping malformed entries rather than throwing on hand-edited config. */

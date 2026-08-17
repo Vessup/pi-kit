@@ -120,15 +120,17 @@ export default function autoRouter(pi: ExtensionAPI): void {
   let currentSessionId: string | undefined;
   let autoActive = false;
   let routingInFlight = false;
-  let lastKnownTier: AutoRouterEffortLevel | undefined;
+  /** The last thinking level actually applied to a routed model - not necessarily the tier
+   * name it's classified under, since a model's `effort` override can differ from its tier. */
+  let lastKnownEffort: AutoRouterEffortLevel | undefined;
   const healthStore = new AutoRouterHealthStore();
 
-  function publishFooter(tier: AutoRouterEffortLevel | undefined): void {
+  function publishFooter(effort: AutoRouterEffortLevel | undefined): void {
     if (!currentSessionId) return;
     pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
       sessionId: currentSessionId,
       key: FOOTER_KEY,
-      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(tier)),
+      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(effort)),
     } satisfies FooterContribution);
   }
 
@@ -156,12 +158,31 @@ export default function autoRouter(pi: ExtensionAPI): void {
     } satisfies FooterContribution);
   }
 
+  /**
+   * The thinking level to actually dispatch a model at: its own configured `effort` override,
+   * or the tier name itself when it doesn't have one. `refs` is whichever tier's config list
+   * `model` was resolved from, so the matching entry (and its override, if any) can be found.
+   */
+  function resolveEffort(
+    refs: AutoRouterModelRef[],
+    model: ModelIdentity,
+    tier: AutoRouterEffortLevel,
+  ): AutoRouterEffortLevel {
+    const ref = refs.find(
+      (candidate) =>
+        candidate.provider === model.provider && candidate.id === model.id,
+    );
+    return ref?.effort ?? tier;
+  }
+
   /** Pick the best available (resolved + healthy) model for `tier`, escalating to higher configured tiers when everything in `tier` is unhealthy, then falling back to the first available model anywhere as a last resort. */
   function pickForTier(
     ctx: ExtensionContext,
     settings: AutoRouterSettings,
     tier: AutoRouterEffortLevel,
-  ): { model: Model<Api>; tier: AutoRouterEffortLevel } | undefined {
+  ):
+    | { model: Model<Api>; tier: AutoRouterEffortLevel; effort: AutoRouterEffortLevel }
+    | undefined {
     for (const candidateTier of [tier, ...escalationTiers(settings, tier)]) {
       const refs = settings.efforts[candidateTier]?.models ?? [];
       const available = resolveAvailableModels(ctx.modelRegistry, refs);
@@ -172,7 +193,13 @@ export default function autoRouter(pi: ExtensionAPI): void {
             candidate.id === healthy.id &&
             candidate.provider === healthy.provider,
         );
-        if (model) return { model, tier: candidateTier };
+        if (model) {
+          return {
+            model,
+            tier: candidateTier,
+            effort: resolveEffort(refs, model, candidateTier),
+          };
+        }
       }
     }
     // Last resort: nothing healthy anywhere. Use the first resolvable model still configured
@@ -184,6 +211,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
       ? resolveAvailableModels(ctx.modelRegistry, ownRefs)[0]
       : undefined;
     let fallbackTier = tier;
+    let fallbackRefs = ownRefs ?? [];
     if (!fallback) {
       for (const candidateTier of AUTO_ROUTER_EFFORT_ORDER) {
         const refs = settings.efforts[candidateTier]?.models;
@@ -192,6 +220,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
         if (candidate) {
           fallback = candidate;
           fallbackTier = candidateTier;
+          fallbackRefs = refs;
           break;
         }
       }
@@ -203,7 +232,11 @@ export default function autoRouter(pi: ExtensionAPI): void {
           "warning",
         );
       }
-      return { model: fallback, tier: fallbackTier };
+      return {
+        model: fallback,
+        tier: fallbackTier,
+        effort: resolveEffort(fallbackRefs, fallback, fallbackTier),
+      };
     }
     // Nothing configured for Auto at all (or resolvable) - the "auto" placeholder has no real
     // backend, so leaving it selected here would send the actual request to it and fail with a
@@ -219,7 +252,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
           "warning",
         );
       }
-      return { model: anyModel, tier };
+      return { model: anyModel, tier, effort: tier };
     }
     return undefined;
   }
@@ -228,7 +261,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     model: Model<Api>,
-    tier: AutoRouterEffortLevel,
+    effort: AutoRouterEffortLevel,
   ): Promise<void> {
     routingInFlight = true;
     try {
@@ -242,12 +275,12 @@ export default function autoRouter(pi: ExtensionAPI): void {
         }
         return;
       }
-      await pi.setThinkingLevel(tier);
+      await pi.setThinkingLevel(effort);
     } finally {
       routingInFlight = false;
     }
-    lastKnownTier = tier;
-    publishFooter(tier);
+    lastKnownEffort = effort;
+    publishFooter(effort);
   }
 
   async function routeForPrompt(
@@ -304,9 +337,10 @@ export default function autoRouter(pi: ExtensionAPI): void {
       reply: classifierReply,
       level,
       tier: picked.tier,
+      effort: picked.effort,
       model: picked.model,
     });
-    await applyRouting(pi, ctx, picked.model, picked.tier);
+    await applyRouting(pi, ctx, picked.model, picked.effort);
   }
 
   async function reconcileAllProviders(
@@ -335,13 +369,13 @@ export default function autoRouter(pi: ExtensionAPI): void {
     if (event.model.provider === AUTO_PROVIDER_ID) {
       autoActive = true;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true });
-      publishFooter(lastKnownTier);
+      publishFooter(lastKnownEffort);
       return;
     }
     if (event.source !== "restore" && autoActive) {
       autoActive = false;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: false });
-      lastKnownTier = undefined;
+      lastKnownEffort = undefined;
       clearFooter();
     }
   });
@@ -349,7 +383,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
-    lastKnownTier = undefined;
+    lastKnownEffort = undefined;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -364,10 +398,10 @@ export default function autoRouter(pi: ExtensionAPI): void {
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could
         // revert it). Normalize back to the placeholder so /model shows Auto again.
-        lastKnownTier = ctx.thinkingLevel;
+        lastKnownEffort = ctx.thinkingLevel;
         await revertToAutoPlaceholder(pi, ctx);
       }
-      publishFooter(lastKnownTier);
+      publishFooter(lastKnownEffort);
     }
     const settings = await readAutoRouterSettings();
     void reconcileAllProviders(ctx.modelRegistry, settings);
@@ -567,8 +601,10 @@ function formatUsagePlainText(
   if (recent.length > 0) {
     lines.push("", "Recent classifications:");
     for (const entry of recent) {
+      const effortSuffix =
+        entry.effort !== entry.tier ? ` at ${entry.effort} effort` : "";
       lines.push(
-        `  ${formatRelativeTime(entry.timestamp, now)}: said "${entry.reply}" → ${entry.level}, routed to ${entry.tier} (${entry.model.provider}/${entry.model.id})`,
+        `  ${formatRelativeTime(entry.timestamp, now)}: said "${entry.reply}" → ${entry.level}, routed to ${entry.tier}${effortSuffix} (${entry.model.provider}/${entry.model.id})`,
       );
     }
   }
@@ -606,12 +642,12 @@ function formatUsageMarkdown(
       "### Recent classifications",
       "_What the classifier actually said, so a routing decision that looks wrong can be checked against real evidence instead of guessed at._",
       "",
-      "| When | Said | Level | Tier used | Model |",
-      "|---|---|---|---|---|",
+      "| When | Said | Level | Tier used | Effort applied | Model |",
+      "|---|---|---|---|---|---|",
     );
     for (const entry of recent) {
       lines.push(
-        `| ${formatRelativeTime(entry.timestamp, now)} | ${escapeTableCell(entry.reply)} | ${entry.level} | ${entry.tier} | ${entry.model.provider}/${entry.model.id} |`,
+        `| ${formatRelativeTime(entry.timestamp, now)} | ${escapeTableCell(entry.reply)} | ${entry.level} | ${entry.tier} | ${entry.effort} | ${entry.model.provider}/${entry.model.id} |`,
       );
     }
   }

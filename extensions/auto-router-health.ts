@@ -49,6 +49,8 @@ export type ClassificationLogEntry = {
   reply: string;
   level: string;
   tier: string;
+  /** The thinking level actually applied - a model's own `effort` override, or `tier` when it has none. */
+  effort: string;
   model: ModelIdentity;
 };
 
@@ -255,6 +257,9 @@ function parseClassifications(value: unknown): ClassificationLogEntry[] {
       reply: raw.reply,
       level: raw.level,
       tier: raw.tier,
+      // Back-compat: entries logged before the `effort` field existed default to the tier name,
+      // matching what actually ran for them at the time.
+      effort: typeof raw.effort === "string" ? raw.effort : raw.tier,
       model: { provider: raw.model.provider, id: raw.model.id },
     });
   }
@@ -355,6 +360,7 @@ export class AutoRouterHealthStore {
       reply: truncateForLog(entry.reply),
       level: entry.level,
       tier: entry.tier,
+      effort: entry.effort,
       model: entry.model,
     };
     this.classifications = [...this.classifications, full].slice(
