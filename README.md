@@ -94,7 +94,7 @@ If you've scoped `/model` with `enabledModels` (or `--models`), Pi's picker defa
 
 ## Worktrees
 
-Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the managed checkout. The backward-compatible default creates or reuses local branch `<name>`; a missing branch starts at the selected checkout's `HEAD`.
+Run `/worktree <name>` to create `<repo-root>/.pi/worktrees/<name>`, run the optional `.pi/worktrees/setup.sh`, and move the active conversation into a replacement session rooted in the managed checkout. The backward-compatible default creates or reuses local branch `<name>`; a missing branch starts at the repository's default branch — `origin/HEAD` when set (for example `origin/main`), otherwise local `main` or `master` — and only falls back to the primary checkout's `HEAD` when none of those resolve.
 
 The managed directory name, local branch, and new-branch start point can be selected independently:
 
@@ -104,7 +104,7 @@ The managed directory name, local branch, and new-branch start point can be sele
   --start-point origin/tembo/cancel-builds
 ```
 
-That creates `.pi/worktrees/pr-30` without creating a `pr-30` branch. If `tembo/cancel-builds` does not exist locally, it is created at `origin/tembo/cancel-builds` and tracks that remote branch. If the local branch already exists, omit `--start-point`; Pi reuses it without moving it or taking ownership of it. A branch already checked out in any registered worktree is rejected. To enter an already registered worktree without modifying its checkout or branch, run `/worktree --existing <worktree-path>`.
+That creates `.pi/worktrees/pr-30` without creating a `pr-30` branch. If `tembo/cancel-builds` does not exist locally, it is created at `origin/tembo/cancel-builds` and tracks that remote branch. If the local branch already exists, omit `--start-point`; Pi reuses it without moving it or taking ownership of it. If it is already checked out in another registered worktree (or the primary checkout), Pi moves the conversation into that checkout instead of creating a duplicate; an entered checkout is never modified, rolled back, or removed. To enter an already registered worktree without modifying its checkout or branch, run `/worktree --existing <worktree-path>`.
 
 Managed ownership records the directory name and whether Pi created the local branch. Final-session cleanup removes the managed checkout, while automatic rollback removes it only when clean so unrelated uncommitted files are never discarded. Both paths delete only a branch created by Pi; reused branches are preserved. Switching completes only after the replacement CWD and actual branch or detached HEAD are verified; the replacement is then made self-contained and the source session is deleted automatically.
 

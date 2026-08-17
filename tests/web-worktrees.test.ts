@@ -106,15 +106,17 @@ test("web worktrees are created under the primary repository .pi directory", asy
 
   await writeFile(join(repository, "README.md"), "second\n");
   await Bun.$`git -C ${repository} commit -am second -q`;
+  const defaultHead = (
+    await Bun.$`git -C ${repository} rev-parse HEAD`.text()
+  ).trim();
   const linked = join(directory, "existing-worktree");
   await Bun.$`git -C ${repository} worktree add -q -b existing-branch ${linked} HEAD~1`;
-  const linkedHead = (
-    await Bun.$`git -C ${linked} rev-parse HEAD`.text()
-  ).trim();
+  // New branches start at the repository's default branch, not the linked
+  // checkout's HEAD.
   const fromLinked = await createWebWorktree(linked, "from-linked");
   expect(
     (await Bun.$`git -C ${fromLinked.path} rev-parse HEAD`.text()).trim(),
-  ).toBe(linkedHead);
+  ).toBe(defaultHead);
 });
 
 test("managed directory, local branch, remote start point, and upstream are independent", async () => {
@@ -221,7 +223,7 @@ test("an unused existing local branch is reused and preserved by rollback", asyn
   ).rejects.toThrow("omit --start-point");
 });
 
-test("managed creation rejects branches checked out in another worktree", async () => {
+test("managed creation enters branches already checked out elsewhere", async () => {
   directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-checked-out-"));
   const repository = join(directory, "repo");
   const linked = join(directory, "linked");
@@ -233,29 +235,102 @@ test("managed creation rejects branches checked out in another worktree", async 
   await Bun.$`git -C ${repository} commit -qm initial`;
   await Bun.$`git -C ${repository} worktree add -q -b occupied/topic ${linked}`;
 
-  try {
-    await createWebWorktree(repository, "duplicate", {
-      branch: "occupied/topic",
-    });
-    throw new Error("expected occupied branch rejection");
-  } catch (error) {
-    expect(error instanceof Error ? error.message : String(error)).toContain(
-      `already checked out at ${await realpath(linked)}`,
-    );
-  }
+  const entered = await createWebWorktree(repository, "duplicate", {
+    branch: "occupied/topic",
+  });
+  expect(entered).toMatchObject({
+    path: await realpath(linked),
+    repoRoot: await realpath(repository),
+    branch: "occupied/topic",
+    branchCreated: false,
+    existingCheckout: true,
+    setupRan: false,
+  });
+  await expect(
+    stat(join(repository, ".pi", "worktrees", "duplicate")),
+  ).rejects.toThrow();
+
   const sourceBranch = (
     await Bun.$`git -C ${repository} branch --show-current`.text()
   ).trim();
-  try {
-    await createWebWorktree(repository, "duplicate-source", {
-      branch: sourceBranch,
-    });
-    throw new Error("expected source branch rejection");
-  } catch (error) {
-    expect(error instanceof Error ? error.message : String(error)).toContain(
-      "already checked out",
-    );
-  }
+  const primary = await createWebWorktree(repository, "duplicate-source", {
+    branch: sourceBranch,
+  });
+  expect(primary).toMatchObject({
+    path: await realpath(repository),
+    branch: sourceBranch,
+    branchCreated: false,
+    existingCheckout: true,
+  });
+});
+
+test("new branches start at the repository default branch", async () => {
+  directory = await mkdtemp(
+    join(tmpdir(), "pi-kit-web-worktree-default-start-"),
+  );
+  const repository = join(directory, "repo");
+  const remote = join(directory, "origin.git");
+  await Bun.$`git init -q --bare ${remote}`;
+  await Bun.$`git init -q ${repository}`;
+  await Bun.$`git -C ${repository} config user.name test`;
+  await Bun.$`git -C ${repository} config user.email test@example.com`;
+  await writeFile(join(repository, "README.md"), "initial\n");
+  await Bun.$`git -C ${repository} add README.md`;
+  await Bun.$`git -C ${repository} commit -qm initial`;
+  const defaultBranch = (
+    await Bun.$`git -C ${repository} branch --show-current`.text()
+  ).trim();
+  const defaultHead = (
+    await Bun.$`git -C ${repository} rev-parse HEAD`.text()
+  ).trim();
+  await Bun.$`git -C ${repository} checkout -q -b feature`;
+  await writeFile(join(repository, "README.md"), "feature\n");
+  await Bun.$`git -C ${repository} commit -am feature -q`;
+
+  // Without a remote, new branches base on the local default branch, not on
+  // the feature checkout's HEAD.
+  const local = await createWebWorktree(repository, "local-default");
+  expect((await Bun.$`git -C ${local.path} rev-parse HEAD`.text()).trim()).toBe(
+    defaultHead,
+  );
+
+  // Once origin/HEAD is set, it wins even while the local default branch has
+  // moved ahead of it.
+  await Bun.$`git -C ${repository} remote add origin ${remote}`;
+  await Bun.$`git -C ${repository} push -q origin ${defaultBranch}`;
+  await Bun.$`git -C ${repository} symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/${defaultBranch}`;
+  await Bun.$`git -C ${repository} checkout -q ${defaultBranch}`;
+  await writeFile(join(repository, "README.md"), "advanced\n");
+  await Bun.$`git -C ${repository} commit -am advanced -q`;
+  const advancedHead = (
+    await Bun.$`git -C ${repository} rev-parse HEAD`.text()
+  ).trim();
+  await Bun.$`git -C ${repository} checkout -q feature`;
+  const remoteBased = await createWebWorktree(repository, "remote-default");
+  expect(
+    (await Bun.$`git -C ${remoteBased.path} rev-parse HEAD`.text()).trim(),
+  ).toBe(defaultHead);
+
+  // Without origin/HEAD, the moved-ahead local default branch wins.
+  await Bun.$`git -C ${repository} symbolic-ref -d refs/remotes/origin/HEAD`;
+  const localAdvanced = await createWebWorktree(repository, "local-advanced");
+  expect(
+    (await Bun.$`git -C ${localAdvanced.path} rev-parse HEAD`.text()).trim(),
+  ).toBe(advancedHead);
+
+  // A repository without main/master or a remote falls back to its HEAD.
+  const solo = join(directory, "solo");
+  await Bun.$`git init -q -b trunk ${solo}`;
+  await Bun.$`git -C ${solo} config user.name test`;
+  await Bun.$`git -C ${solo} config user.email test@example.com`;
+  await writeFile(join(solo, "README.md"), "solo\n");
+  await Bun.$`git -C ${solo} add README.md`;
+  await Bun.$`git -C ${solo} commit -qm solo`;
+  const soloHead = (await Bun.$`git -C ${solo} rev-parse HEAD`.text()).trim();
+  const fromSolo = await createWebWorktree(solo, "from-solo");
+  expect(
+    (await Bun.$`git -C ${fromSolo.path} rev-parse HEAD`.text()).trim(),
+  ).toBe(soloHead);
 });
 
 test("invalid branches and missing start points fail before creating resources", async () => {
