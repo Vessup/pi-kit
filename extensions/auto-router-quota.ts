@@ -204,8 +204,11 @@ async function fetchCodexQuota(
   // itself - check it before falling back to inferring exhaustion from window percentages.
   // (Verified directly against a real exhausted account: `{"allowed":false,"limit_reached":true,
   // "primary_window":{"used_percent":100,...}}` at the top level, alongside a *healthy*
-  // per-model entry under `additional_rate_limits` for the specific model in use - the
-  // account-wide flag is the one that actually blocks every model under this provider.)
+  // per-model entry under `additional_rate_limits` for a specific model — and that model kept
+  // working normally. So the account-wide flag applies only to the "default" bucket, i.e.
+  // whichever configured models aren't separately metered below; a model with its own
+  // additional_rate_limits entry has an independent quota track that the account-wide flag
+  // does not override in either direction.)
   const accountExhausted =
     rateLimit.limit_reached === true ||
     rateLimit.allowed === false ||
@@ -215,8 +218,9 @@ async function fetchCodexQuota(
     ? { exhausted: true, resetsAt: accountResetsAt, detail: accountDetail }
     : { exhausted: false, detail: accountDetail };
 
-  // Per-model detail (and, when the account itself isn't blocking, per-model exhaustion) from
-  // additional_rate_limits, matched to configured model ids by normalized label.
+  // Independently-metered models from additional_rate_limits, matched to configured model ids
+  // by normalized label. Each one's own status is authoritative for that model — it neither
+  // inherits the account-wide block nor is protected by the account being otherwise healthy.
   const perModel: Record<string, QuotaReconciliationResult> = {};
   const additional = Array.isArray(result.data.additional_rate_limits) ? result.data.additional_rate_limits : [];
   for (const entry of additional) {
@@ -226,14 +230,13 @@ async function fetchCodexQuota(
     const window = isRecord(entryRateLimit.primary_window) ? entryRateLimit.primary_window : undefined;
     const usedPercent = window ? windowUsedPercent(window) : undefined;
     const modelExhausted =
-      accountExhausted ||
       entryRateLimit.limit_reached === true ||
       entryRateLimit.allowed === false ||
       (usedPercent !== undefined && usedPercent >= EXHAUSTED_UTILIZATION_PERCENT);
     perModel[normalizeModelId(entry.limit_name)] = {
       exhausted: modelExhausted,
-      resetsAt: modelExhausted ? (accountResetsAt ?? (window ? windowResetsAt(window) : undefined)) : undefined,
-      detail: usedPercent !== undefined ? `${roundPercent(usedPercent)}% used` : accountDetail,
+      resetsAt: modelExhausted && window ? windowResetsAt(window) : undefined,
+      detail: usedPercent !== undefined ? `${roundPercent(usedPercent)}% used` : undefined,
     };
   }
 
@@ -291,6 +294,50 @@ async function fetchKimiCodingQuota(
   const detail = limit !== undefined && used !== undefined ? `${used}/${limit} this week` : undefined;
   if (limit !== undefined && used !== undefined && limit > 0 && used >= limit) {
     return { default: { exhausted: true, resetsAt: parseDateish(weekly.resetTime), detail } };
+  }
+  return { default: { exhausted: false, detail } };
+}
+
+/**
+ * `GET /zen/go/v1/usage` with the same API key Pi already uses for inference — a real, clean
+ * JSON endpoint, not documented anywhere but discovered directly (no scraping, no separate
+ * cookie/workspace-id setup needed, unlike pi-quotas' HTML-scraping approach for this provider).
+ * Verified shape: `{"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"..."},
+ * "weekly":{...},"monthly":{...}}}`.
+ */
+async function fetchOpenCodeGoQuota(
+  modelRegistry: ModelRegistry,
+  deps: QuotaFetchDependencies,
+): Promise<ProviderQuotaResult | undefined> {
+  const apiKey = await modelRegistry.getApiKeyForProvider("opencode-go");
+  if (!apiKey) return undefined;
+  const result = await fetchJson(
+    "https://opencode.ai/zen/go/v1/usage",
+    { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    deps.fetchImpl,
+  );
+  if (!result.ok || !isRecord(result.data) || !isRecord(result.data.usage)) return undefined;
+
+  const usage = result.data.usage;
+  let mostUsed: { label: string; percent: number; window: Record<string, unknown> } | undefined;
+  let blocked: { window: Record<string, unknown> } | undefined;
+  for (const label of ["rolling", "weekly", "monthly"] as const) {
+    const window = usage[label];
+    if (!isRecord(window)) continue;
+    if (!blocked && typeof window.status === "string" && window.status !== "ok") {
+      blocked = { window };
+    }
+    const percent = numeric(window.percent);
+    if (percent === undefined) continue;
+    if (!mostUsed || percent > mostUsed.percent) mostUsed = { label, percent, window };
+  }
+  if (!mostUsed && !blocked) return { default: { exhausted: false } };
+  const detail = mostUsed ? `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used` : undefined;
+  if (blocked) {
+    return { default: { exhausted: true, resetsAt: parseDateish(blocked.window.resetsAt), detail } };
+  }
+  if (mostUsed && mostUsed.percent >= EXHAUSTED_UTILIZATION_PERCENT) {
+    return { default: { exhausted: true, resetsAt: parseDateish(mostUsed.window.resetsAt), detail } };
   }
   return { default: { exhausted: false, detail } };
 }
@@ -355,6 +402,7 @@ export const QUOTA_FETCHERS: Record<
   zai: fetchZaiQuota,
   "kimi-coding": fetchKimiCodingQuota,
   minimax: fetchMinimaxQuota,
+  "opencode-go": fetchOpenCodeGoQuota,
 };
 
 /** Reconcile one provider's real quota state. Never throws; returns `undefined` when there's no known fetcher, no credentials, or the request failed. */

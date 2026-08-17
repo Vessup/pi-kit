@@ -91,10 +91,13 @@ test("reconcileProviderQuota(openai-codex) reports exhaustion when the spend cap
   expect(result).toEqual({ default: { exhausted: true, detail: "spend cap reached" } });
 });
 
-test("reconcileProviderQuota(openai-codex) reports exhaustion from the account-wide rate_limit.limit_reached flag", async () => {
-  // Shape verified against a real exhausted account: the account-wide flag was true while a
-  // per-model entry under additional_rate_limits for the model in active use was still healthy -
-  // the account-wide flag is what actually blocks every model under this provider.
+test("reconcileProviderQuota(openai-codex) applies the account-wide rate_limit.limit_reached flag only to models without their own additional_rate_limits entry", async () => {
+  // Shape verified against a real exhausted account, *and* the model-specific behavior verified
+  // directly by the user: the account-wide flag was true, a per-model entry under
+  // additional_rate_limits for the model actually in use was healthy, and that model kept
+  // working normally despite the account-wide flag. The two are independent quota tracks -
+  // the account-wide flag governs the "default" bucket (models with no specific entry below),
+  // not every model under the provider.
   const deps = fakeDeps(() =>
     jsonResponse({
       rate_limit: {
@@ -114,10 +117,10 @@ test("reconcileProviderQuota(openai-codex) reports exhaustion from the account-w
   );
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
   expect(result).toEqual({
+    // Applies to any configured model with no specific additional_rate_limits entry.
     default: { exhausted: true, resetsAt: 1787197007 * 1000, detail: "account 100% used" },
-    // The per-model entry is *also* exhausted, since the account-wide flag blocks it too -
-    // but its detail reflects the model's own (much lower) usage, not the account's.
-    perModel: { gpt53codexspark: { exhausted: true, resetsAt: 1787197007 * 1000, detail: "5% used" } },
+    // This model has its own entry, so it's unaffected by the account-wide flag.
+    perModel: { gpt53codexspark: { exhausted: false, detail: "5% used" } },
   });
 });
 
@@ -252,6 +255,55 @@ test("reconcileProviderQuota(minimax) degrades gracefully on unparseable CLI out
   const deps = fakeDeps(() => jsonResponse({}), { minimaxCli: async () => "not json" });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
   expect(result).toBeUndefined();
+});
+
+test("reconcileProviderQuota(opencode-go) reports headroom with the most-used window as detail", async () => {
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      usage: {
+        rolling: { status: "ok", percent: 0, resetsAt: "2030-01-01T00:00:00Z" },
+        weekly: { status: "ok", percent: 0, resetsAt: "2030-01-08T00:00:00Z" },
+        monthly: { status: "ok", percent: 20, resetsAt: "2030-02-01T00:00:00Z" },
+      },
+    }),
+  );
+  const result = await reconcileProviderQuota("opencode-go", fakeRegistry("key"), deps);
+  expect(result).toEqual({ default: { exhausted: false, detail: "monthly 20% used" } });
+});
+
+test("reconcileProviderQuota(opencode-go) reports exhaustion when a window's percent crosses the threshold", async () => {
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      usage: { monthly: { status: "ok", percent: 100, resetsAt: "2030-02-01T00:00:00Z" } },
+    }),
+  );
+  const result = await reconcileProviderQuota("opencode-go", fakeRegistry("key"), deps);
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse("2030-02-01T00:00:00Z"), detail: "monthly 100% used" },
+  });
+});
+
+test("reconcileProviderQuota(opencode-go) reports exhaustion from a non-ok status even at low percent", async () => {
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      usage: { rolling: { status: "limited", percent: 10, resetsAt: "2030-01-01T00:00:00Z" } },
+    }),
+  );
+  const result = await reconcileProviderQuota("opencode-go", fakeRegistry("key"), deps);
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z"), detail: "rolling 10% used" },
+  });
+});
+
+test("reconcileProviderQuota(opencode-go) returns undefined without credentials, never calling fetch", async () => {
+  let called = false;
+  const deps = fakeDeps(() => {
+    called = true;
+    return jsonResponse({});
+  });
+  const result = await reconcileProviderQuota("opencode-go", fakeRegistry(undefined), deps);
+  expect(result).toBeUndefined();
+  expect(called).toBe(false);
 });
 
 test("reconcileProviderQuota degrades gracefully on network/HTTP failure", async () => {
