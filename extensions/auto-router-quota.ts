@@ -433,7 +433,10 @@ async function fetchMinimaxQuota(
   // being hardcoded, since nothing else in the response names it.
   const intervalRemaining = numeric(general.current_interval_remaining_percent);
   const weeklyRemaining = numeric(general.current_weekly_remaining_percent);
-  const intervalSeconds = durationSeconds(general.start_time, general.end_time);
+  const intervalSeconds = durationSeconds(
+    parseDateish(general.start_time),
+    parseDateish(general.end_time),
+  );
   const intervalLabel = intervalSeconds !== undefined ? secondsToLabel(intervalSeconds) : "interval";
   const detailParts: string[] = [];
   if (intervalRemaining !== undefined) detailParts.push(`${intervalLabel} ${roundPercent(100 - intervalRemaining)}% used`);

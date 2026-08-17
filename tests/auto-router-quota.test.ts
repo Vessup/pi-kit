@@ -237,6 +237,27 @@ test("reconcileProviderQuota(minimax) labels the short window from its real star
   });
 });
 
+test("reconcileProviderQuota(minimax) still derives the right window duration when start/end times are epoch seconds, not milliseconds", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), {
+    minimaxCli: async () =>
+      JSON.stringify({
+        model_remains: [
+          {
+            model_name: "general",
+            start_time: 1_700_000_000,
+            end_time: 1_700_000_000 + 5 * 60 * 60,
+            current_interval_remaining_percent: 84,
+            current_weekly_remaining_percent: 89,
+          },
+        ],
+      }),
+  });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toEqual({
+    default: { exhausted: false, detail: "5h 16% used, weekly 11% used" },
+  });
+});
+
 test("reconcileProviderQuota(minimax) falls back to 'interval' when start/end times aren't present", async () => {
   const deps = fakeDeps(() => jsonResponse({}), {
     minimaxCli: async () =>

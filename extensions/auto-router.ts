@@ -330,7 +330,12 @@ export default function autoRouter(pi: ExtensionAPI): void {
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
     await healthStore.load();
-    autoActive = restoreAutoActive(ctx);
+    // A session can arrive with Auto active two different ways: a persisted entry from an
+    // earlier explicit `/model` pick (`restoreAutoActive`), or `ctx.model` already being the
+    // placeholder because the user set `defaultProvider`/`defaultModel` to "auto" globally - a
+    // brand-new session in that case has no entries yet, so `restoreAutoActive` alone would
+    // miss it and leave every turn dispatching straight at the placeholder's dead URL.
+    autoActive = restoreAutoActive(ctx) || ctx.model?.provider === AUTO_PROVIDER_ID;
     if (autoActive) {
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could

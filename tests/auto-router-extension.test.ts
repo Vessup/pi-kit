@@ -523,6 +523,26 @@ test("session_start on a cleanly-idle Auto session leaves the placeholder select
   expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto");
 });
 
+test("a brand-new session whose defaultModel is auto/auto routes on the first turn with no prior /model pick or session entries", async () => {
+  const medium = model("prov", "medium-model");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "medium-model" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [medium] });
+  // No `model_select` for Auto ever fired, and no session entries exist - this is what a
+  // brand-new session looks like when `defaultProvider`/`defaultModel` are set to "auto" in
+  // global settings rather than picked interactively.
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel, entries: [] });
+
+  await fake.fire("session_start", {}, ctx);
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([medium]);
+  expect(ctx.model).toEqual(medium);
+});
+
 test("session_start restored mid-turn (e.g. after a crash) reverts back to the Auto placeholder", async () => {
   const already = model("prov", "already-selected");
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "already-selected" }] } } });
