@@ -72,6 +72,7 @@ import {
   USAGE_STATE_ENTRY,
   type Usage,
   WEB_STATUS_PUBLISH_INTERVAL_MS,
+  DEFAULT_READ_WAIT_SECONDS,
 } from "./types.js";
 import {
   addUsage,
@@ -373,9 +374,13 @@ export class SubagentManager {
       agent.activity.splice(0, removed);
       agent.lastReadActivity = Math.max(0, agent.lastReadActivity - removed);
     }
+    this.publishFooter();
+  }
+
+  private wakeReadWaiters(agent: ManagedSubagent): void {
+    if (agent.waiters.size === 0) return;
     for (const waiter of agent.waiters) waiter();
     agent.waiters.clear();
-    this.publishFooter();
   }
 
   private addTranscript(agent: ManagedSubagent, message: unknown): void {
@@ -482,6 +487,7 @@ export class SubagentManager {
           break;
         case "agent_end":
           if (event.willRetry) this.activity(agent, "waiting to retry");
+          else this.wakeReadWaiters(agent);
           break;
         case "agent_settled":
           if (agent.status !== "terminated" && agent.status !== "terminating") {
@@ -494,6 +500,7 @@ export class SubagentManager {
                 ? `failed${agent.error ? `: ${agent.error}` : ` (${agent.lastStopReason})`}`
                 : "completed and is waiting for more instructions",
             );
+            this.wakeReadWaiters(agent);
           }
           break;
         case "auto_retry_start":
@@ -531,6 +538,7 @@ export class SubagentManager {
           agent.status = "completed";
           agent.completedAt = Date.now();
           this.activity(agent, "task run settled");
+          this.wakeReadWaiters(agent);
         }
       })
       .catch((error: unknown) => {
@@ -540,6 +548,7 @@ export class SubagentManager {
         agent.error = error instanceof Error ? error.message : String(error);
         agent.completedAt = Date.now();
         this.activity(agent, `failed: ${agent.error}`);
+        this.wakeReadWaiters(agent);
       });
   }
 
@@ -650,6 +659,7 @@ export class SubagentManager {
       agent.error = error instanceof Error ? error.message : String(error);
       agent.completedAt = Date.now();
       this.activity(agent, `${agent.status}: ${agent.error}`);
+      this.wakeReadWaiters(agent);
       throw error;
     }
   }
@@ -768,6 +778,7 @@ export class SubagentManager {
       agent.status = "terminated";
       agent.completedAt = Date.now();
       this.activity(agent, "terminated and released session resources");
+      this.wakeReadWaiters(agent);
     }
     this.agents.delete(id);
     this.webTranscriptCursors.delete(id);
@@ -816,12 +827,13 @@ export class SubagentManager {
     seconds: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (seconds <= 0 || agents.some((agent) => this.hasUnread(agent))) return;
+    if (agents.some((agent) => this.hasUnread(agent))) return;
     const running = agents.filter(
       (agent) => agent.status === "creating" || agent.status === "working",
     );
     if (running.length === 0) return;
 
+    const waitSeconds = Math.max(seconds, DEFAULT_READ_WAIT_SECONDS);
     await new Promise<void>((done) => {
       let finished = false;
       const finish = () => {
@@ -832,44 +844,46 @@ export class SubagentManager {
         signal?.removeEventListener("abort", finish);
         done();
       };
-      const timer = setTimeout(finish, Math.min(30, seconds) * 1_000);
+      const timer = setTimeout(finish, waitSeconds * 1_000);
       for (const agent of running) agent.waiters.add(finish);
       signal?.addEventListener("abort", finish, { once: true });
     });
   }
 
-  read(agents: ManagedSubagent[], includeTranscript: boolean): string {
+  private readSummary(agent: ManagedSubagent): string {
+    const now = Date.now();
+    const metadata = [
+      `Model: ${agent.model}`,
+      `Effort: ${agent.effort}`,
+      `Elapsed: ${formatDuration((agent.completedAt ?? now) - agent.createdAt)}`,
+      `Turns: ${agent.turns}`,
+      `Usage: ↑${formatTokens(agent.usage.input)} ↓${formatTokens(agent.usage.output)}${agent.usage.cost.total ? ` $${agent.usage.cost.total.toFixed(4)}` : ""}`,
+    ];
+    if (agent.currentTool) metadata.push(`Current tool: ${agent.currentTool}`);
+    if (agent.queuedSteering || agent.queuedFollowUp) {
+      metadata.push(
+        `Queued: ${agent.queuedSteering} steering, ${agent.queuedFollowUp} follow-up`,
+      );
+    }
+    if (agent.error) metadata.push(`Error: ${agent.error}`);
+
+    if (!isTerminalSubagentStatus(agent.status)) {
+      return metadata.join("\n") + "\n\nAwaiting completion before returning assistant output.";
+    }
+
+    const latest = finalAssistantText(agent);
+    if (!latest) return metadata.join("\n") + "\n\nCompletion summary: (no assistant output)";
+    return `${metadata.join("\n")}\n\nCompletion summary:\n${truncateChars(latest, 3_000)}`;
+  }
+
+  async read(agents: ManagedSubagent[], includeTranscript: boolean): Promise<string> {
     if (agents.length === 0)
       return "No subagents are involved in this session.";
-    const now = Date.now();
     const sections: string[] = [];
+    const terminalAgents: string[] = [];
     for (const agent of agents) {
       const heading = `## ${statusIcon(agent.status)} ${agent.id} — ${agent.status}`;
-      const metadata = [
-        `Model: ${agent.model}`,
-        `Effort: ${agent.effort}`,
-        `Elapsed: ${formatDuration((agent.completedAt ?? now) - agent.createdAt)}`,
-        `Turns: ${agent.turns}`,
-        `Usage: ↑${formatTokens(agent.usage.input)} ↓${formatTokens(agent.usage.output)}${agent.usage.cost.total ? ` $${agent.usage.cost.total.toFixed(4)}` : ""}`,
-      ];
-      if (agent.currentTool)
-        metadata.push(`Current tool: ${agent.currentTool}`);
-      if (agent.queuedSteering || agent.queuedFollowUp) {
-        metadata.push(
-          `Queued: ${agent.queuedSteering} steering, ${agent.queuedFollowUp} follow-up`,
-        );
-      }
-      if (agent.error) metadata.push(`Error: ${agent.error}`);
-
-      const unread = agent.activity.slice(agent.lastReadActivity);
-      const activity = unread.length
-        ? unread
-            .map((item) => `- ${formatClock(item.timestamp)} ${item.text}`)
-            .join("\n")
-        : "- No new activity.";
-      agent.lastReadActivity = agent.activity.length;
-
-      let output = `${heading}\n${metadata.join("\n")}\n\nActivity since last read:\n${activity}`;
+      let output = `${heading}\n${this.readSummary(agent)}`;
       if (includeTranscript) {
         const transcript = agent.transcript
           .map(
@@ -878,14 +892,17 @@ export class SubagentManager {
           )
           .join("\n\n");
         output += `\n\nTranscript:\n${transcript || agent.streamingText || "(empty)"}`;
-      } else {
-        const latest = finalAssistantText(agent);
-        if (latest) output += `\n\nLatest assistant output:\n${latest}`;
       }
       sections.push(output);
+      agent.lastReadActivity = agent.activity.length;
+      if (isTerminalSubagentStatus(agent.status)) terminalAgents.push(agent.id);
       if (this.archivedAgents.get(agent.id) === agent)
         this.archivedAgents.delete(agent.id);
     }
+
+    if (terminalAgents.length > 0)
+      await Promise.all(terminalAgents.map((id) => this.terminate(id, true)));
+
     return truncateToolOutput(sections.join("\n\n---\n\n"));
   }
 
