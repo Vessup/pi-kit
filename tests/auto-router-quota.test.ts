@@ -173,12 +173,33 @@ test("reconcileProviderQuota(openai-codex) can report a model exhausted independ
 
 test("reconcileProviderQuota(zai) reports exhaustion from a TOKENS_LIMIT entry", async () => {
   const deps = fakeDeps(() =>
-    jsonResponse({ data: { limits: [{ type: "TOKENS_LIMIT", percentage: 100, nextResetTime: 4_102_444_800_000 }] } }),
+    jsonResponse({
+      data: { limits: [{ type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 100, nextResetTime: 4_102_444_800_000 }] },
+    }),
   );
   const result = await reconcileProviderQuota("zai", fakeRegistry("key"), deps);
   expect(result).toEqual({
-    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "token 100% used" },
+    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "5h 100% used" },
   });
+});
+
+test("reconcileProviderQuota(zai) also reports usage from a CREDIT_LIMIT entry (a different plan tier's shape)", async () => {
+  // Verified directly against a real "pro" plan account: entries carry `type: "CREDIT_LIMIT"`
+  // (with absolute usage/currentValue/remaining alongside it) rather than "TOKENS_LIMIT", but
+  // the same `percentage` field either way.
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      data: {
+        limits: [
+          { type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 12000, currentValue: 12023, remaining: 0, percentage: 100 },
+          { type: "CREDIT_LIMIT", unit: 6, number: 1, usage: 60000, currentValue: 12023, remaining: 47976, percentage: 20 },
+        ],
+      },
+    }),
+  );
+  const result = await reconcileProviderQuota("zai", fakeRegistry("key"), deps);
+  // The 5h window (100%) is more used than the 7d window (20%), so it wins as "most used".
+  expect(result).toEqual({ default: { exhausted: true, detail: "5h 100% used" } });
 });
 
 test("reconcileProviderQuota(kimi-coding) reports exhaustion when used reaches the weekly limit", async () => {
@@ -201,7 +222,7 @@ test("reconcileProviderQuota(minimax) reports headroom from the mmx CLI's genera
   });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
   expect(result).toEqual({
-    default: { exhausted: false, detail: "interval 84% left, weekly 89% left" },
+    default: { exhausted: false, detail: "interval 16% used, weekly 11% used" },
   });
 });
 
@@ -221,7 +242,7 @@ test("reconcileProviderQuota(minimax) reports exhaustion when the interval bucke
   });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
   expect(result).toEqual({
-    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "interval 0% left, weekly 50% left" },
+    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "interval 100% used, weekly 50% used" },
   });
 });
 
@@ -241,7 +262,7 @@ test("reconcileProviderQuota(minimax) reports exhaustion when only the weekly bu
   });
   const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
   expect(result).toEqual({
-    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "interval 60% left, weekly 0.2% left" },
+    default: { exhausted: true, resetsAt: 4_102_444_800_000, detail: "interval 40% used, weekly 99.8% used" },
   });
 });
 

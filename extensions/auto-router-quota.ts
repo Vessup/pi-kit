@@ -243,6 +243,23 @@ async function fetchCodexQuota(
   return { default: defaultResult, perModel: Object.keys(perModel).length > 0 ? perModel : undefined };
 }
 
+/** `unit` is a time-unit enum (3=hour, 4=day, 6=week, 5=month observed); `number` is the count, e.g. unit 3 + number 5 = a 5-hour window. */
+function zaiWindowLabel(unit: unknown, count: unknown): string {
+  const n = numeric(count) ?? 1;
+  switch (unit) {
+    case 3:
+      return `${n}h`;
+    case 4:
+      return `${n}d`;
+    case 6:
+      return `${n * 7}d`;
+    case 5:
+      return "monthly";
+    default:
+      return "usage";
+  }
+}
+
 async function fetchZaiQuota(
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
@@ -256,14 +273,18 @@ async function fetchZaiQuota(
   );
   if (!result.ok || !isRecord(result.data)) return undefined;
 
+  // Different plan tiers report different `type` values (observed: "TOKENS_LIMIT" on some
+  // accounts, "CREDIT_LIMIT" — with usage/currentValue/remaining alongside it — on others,
+  // e.g. a "pro" plan). Both carry a real `percentage` field with the same meaning, so key off
+  // that directly rather than an allowlist of type strings that isn't fully known.
   const nested = isRecord(result.data.data) ? result.data.data : result.data;
   const limits = Array.isArray(nested.limits) ? nested.limits : [];
   let mostUsed: { label: string; percent: number; entry: Record<string, unknown> } | undefined;
   for (const entry of limits) {
-    if (!isRecord(entry) || entry.type !== "TOKENS_LIMIT") continue;
+    if (!isRecord(entry)) continue;
     const percentage = numeric(entry.percentage);
     if (percentage === undefined) continue;
-    const label = entry.unit === 3 ? "hourly" : entry.unit === 6 ? "weekly" : "token";
+    const label = zaiWindowLabel(entry.unit, entry.number);
     if (!mostUsed || percentage > mostUsed.percent) mostUsed = { label, percent: percentage, entry };
   }
   if (!mostUsed) return { default: { exhausted: false } };
@@ -367,13 +388,13 @@ async function fetchMinimaxQuota(
   const general = data.model_remains.find((entry) => isRecord(entry) && entry.model_name === "general");
   if (!isRecord(general)) return { default: { exhausted: false } };
 
-  // The API reports *remaining* percent (opposite convention from the other providers' *used*
-  // percent), and tracks a short rolling interval plus a weekly window separately.
+  // The API reports *remaining* percent (opposite convention from every other provider here,
+  // which all report *used* percent) - convert so /usage reads consistently across providers.
   const intervalRemaining = numeric(general.current_interval_remaining_percent);
   const weeklyRemaining = numeric(general.current_weekly_remaining_percent);
   const detailParts: string[] = [];
-  if (intervalRemaining !== undefined) detailParts.push(`interval ${roundPercent(intervalRemaining)}% left`);
-  if (weeklyRemaining !== undefined) detailParts.push(`weekly ${roundPercent(weeklyRemaining)}% left`);
+  if (intervalRemaining !== undefined) detailParts.push(`interval ${roundPercent(100 - intervalRemaining)}% used`);
+  if (weeklyRemaining !== undefined) detailParts.push(`weekly ${roundPercent(100 - weeklyRemaining)}% used`);
   const detail = detailParts.length > 0 ? detailParts.join(", ") : undefined;
 
   if (intervalRemaining !== undefined && intervalRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
