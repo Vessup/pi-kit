@@ -1166,10 +1166,10 @@ function SessionListItem({
     <div
       ref={overlay ? undefined : sortable.setNodeRef}
       style={style}
-      role="button"
-      tabIndex={0}
       {...(overlay ? {} : sortable.attributes)}
       {...(overlay ? {} : sortable.listeners)}
+      role="button"
+      tabIndex={0}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();
