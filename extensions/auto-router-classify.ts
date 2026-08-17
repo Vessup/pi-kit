@@ -74,6 +74,7 @@ export async function classifyTurnComplexity(
         reasoningEffort: "off",
         cacheRetention: "none",
         sessionId: uuidv7(),
+        maxTokens: 20,
       },
     );
     const reply = response.content
@@ -85,11 +86,15 @@ export async function classifyTurnComplexity(
       .join("")
       .trim()
       .toLowerCase();
-    // Word-boundary match, not plain substring: "high" is a substring of "xhigh",
-    // so a naive `.includes()` would mis-parse an "xhigh" reply as "high".
-    const level =
-      VALID_LEVELS.find((candidate) => new RegExp(`\\b${candidate}\\b`).test(reply)) ??
-      DEFAULT_LEVEL;
+    // Match whichever valid level word appears *first in the reply text*, not the first one
+    // in VALID_LEVELS' own order - a naive `VALID_LEVELS.find(word-boundary test)` would let an
+    // earlier-in-that-list word like "medium" win over a later one like "high" even when "high"
+    // is the word the model actually led with (e.g. "high complexity, more than a medium task"),
+    // silently downgrading the classification. `\b(...)\b` as one alternation also keeps the
+    // existing "high" vs "xhigh" substring safety: `\b` can't match between two word characters,
+    // so "high" never matches inside "xhigh" regardless of alternation order.
+    const match = reply.match(new RegExp(`\\b(${VALID_LEVELS.join("|")})\\b`));
+    const level = (match?.[1] as AutoRouterEffortLevel | undefined) ?? DEFAULT_LEVEL;
     const usage = response.usage
       ? {
           input: numeric(response.usage.input),

@@ -45,6 +45,28 @@ test("classifyTurnComplexity parses the reply case-insensitively with surroundin
   expect(result.level).toBe("max");
 });
 
+test("classifyTurnComplexity picks the level word the model actually led with, not whichever word sorts earliest in the level list", async () => {
+  // "medium" sorts before "high" in the internal level list, but the model's stated verdict
+  // here is "high" - a naive "first match in list order" parse would wrongly return "medium".
+  const result = await classifyTurnComplexity(
+    registryReplying("high complexity, more than a medium task"),
+    MODEL,
+    "do something",
+    false,
+  );
+  expect(result.level).toBe("high");
+});
+
+test("classifyTurnComplexity picks the level word the model actually led with, even when a later caveat mentions an earlier-sorting level", async () => {
+  const result = await classifyTurnComplexity(
+    registryReplying("medium at first glance, though parts could be high"),
+    MODEL,
+    "do something",
+    false,
+  );
+  expect(result.level).toBe("medium");
+});
+
 test("classifyTurnComplexity falls back to medium on an unparseable reply", async () => {
   const result = await classifyTurnComplexity(registryReplying("uh, tricky one"), MODEL, "do something", false);
   expect(result.level).toBe("medium");
