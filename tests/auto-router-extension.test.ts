@@ -572,6 +572,34 @@ test("a brand-new session whose defaultModel is auto/auto routes on the first tu
   expect(ctx.model).toEqual(medium);
 });
 
+test("before_agent_start routes for real even if autoActive's own bookkeeping never saw the placeholder become active", async () => {
+  const medium = model("prov", "medium-model");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "medium-model" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [medium] });
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  // Deliberately no `session_start` and no `model_select` at all here - autoActive is stuck at
+  // its initial `false`. Whatever caused that desync (a timing race, a code path we haven't
+  // accounted for), `ctx.model` already being the inert placeholder right before dispatch is
+  // itself proof a real request is about to fail, and that must be enough to route for real.
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel, entries: [] });
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([medium]);
+  expect(ctx.model).toEqual(medium);
+  expect(fake.appendedEntries).toContainEqual({
+    type: "vessup:auto-router:active",
+    data: { enabled: true },
+  });
+
+  // And the self-heal sticks: the next turn's placeholder-revert and routing both still work.
+  await fake.fire("agent_settled", {}, ctx);
+  expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
+});
+
 test("session_start restored mid-turn (e.g. after a crash) reverts back to the Auto placeholder", async () => {
   const already = model("prov", "already-selected");
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "already-selected" }] } } });

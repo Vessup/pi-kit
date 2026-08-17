@@ -370,7 +370,19 @@ export default function autoRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    if (!autoActive) return;
+    if (!autoActive) {
+      // `autoActive` is bookkeeping derived from model_select/session_start events, and every
+      // path that's supposed to keep it in sync with reality is a separate thing to get right -
+      // exactly the kind of thing that's easy to miss one case of (as happened with a brand-new
+      // session whose defaultModel is "auto" in settings). But whether a request is about to be
+      // sent against the inert placeholder is directly observable right here, right before
+      // dispatch: if `ctx.model` already *is* the Auto placeholder, sending this turn as-is is
+      // guaranteed to fail with a bare connection error no matter why our own flag says
+      // inactive. So treat that as authoritative and self-heal instead of trusting the flag.
+      if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
+      autoActive = true;
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true });
+    }
     await routeForPrompt(pi, ctx, event.prompt, Boolean(event.images?.length));
   });
 
