@@ -486,8 +486,13 @@ export class SubagentManager {
           );
           break;
         case "agent_end":
+          // Don't wake waiters here: `willRetry: false` only means this particular run won't
+          // auto-retry - Pi can still continue with queued follow-ups before ever reaching a
+          // real terminal state, so waking now can hand back a still-"working" snapshot and
+          // force the caller to wait a full cycle again for the actual completion. The terminal
+          // transition (agent_settled below, or attachRun's own handlers) wakes waiters once the
+          // status has actually changed.
           if (event.willRetry) this.activity(agent, "waiting to retry");
-          else this.wakeReadWaiters(agent);
           break;
         case "agent_settled":
           if (agent.status !== "terminated" && agent.status !== "terminating") {
@@ -818,16 +823,16 @@ export class SubagentManager {
     return terminalAgents.length;
   }
 
-  private hasUnread(agent: ManagedSubagent): boolean {
-    return agent.lastReadActivity < agent.activity.length;
-  }
-
   async waitForUpdates(
     agents: ManagedSubagent[],
     seconds: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (agents.some((agent) => this.hasUnread(agent))) return;
+    // No early-return on "any unread activity": `agent.activity` still grows on every routine
+    // event (tool start/end, throttled streaming text, queue updates), so that check would fire
+    // for almost any actively-working agent between two reads and skip the wait entirely,
+    // defeating the whole point of it. An already-terminal agent is instead caught below by
+    // `running.length === 0`, which is the actual "nothing worth waiting for" case.
     const running = agents.filter(
       (agent) => agent.status === "creating" || agent.status === "working",
     );
@@ -868,11 +873,11 @@ export class SubagentManager {
     if (agent.error) metadata.push(`Error: ${agent.error}`);
 
     if (!isTerminalSubagentStatus(agent.status)) {
-      return metadata.join("\n") + "\n\nAwaiting completion before returning assistant output.";
+      return `${metadata.join("\n")}\n\nAwaiting completion before returning assistant output.`;
     }
 
     const latest = finalAssistantText(agent);
-    if (!latest) return metadata.join("\n") + "\n\nCompletion summary: (no assistant output)";
+    if (!latest) return `${metadata.join("\n")}\n\nCompletion summary: (no assistant output)`;
     return `${metadata.join("\n")}\n\nCompletion summary:\n${truncateChars(latest, 3_000)}`;
   }
 
@@ -896,10 +901,11 @@ export class SubagentManager {
       sections.push(output);
       agent.lastReadActivity = agent.activity.length;
       if (isTerminalSubagentStatus(agent.status)) terminalAgents.push(agent.id);
-      if (this.archivedAgents.get(agent.id) === agent)
-        this.archivedAgents.delete(agent.id);
     }
 
+    // Removing an archived agent from `archivedAgents` here (before terminate() runs) would
+    // make it unresolvable by id - `terminate(id, true)` looks the agent up via `getAgent`
+    // first and only then removes it, so let it own that removal instead.
     if (terminalAgents.length > 0)
       await Promise.all(terminalAgents.map((id) => this.terminate(id, true)));
 

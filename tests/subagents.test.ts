@@ -17,19 +17,17 @@ import {
 } from "../extensions/subagents/ui.ts";
 import subagentsExtension, {
   abortRunningSubagentSessions,
-  appendBoundedStreamingText,
   countsAgainstSubagentLimit,
   filterModelsToScope,
   inheritedSubagentModel,
   isFailedStopReason,
   isTerminalSubagentStatus,
-  MAX_WEB_STREAMING_CHARS,
   parsePersistedUsageState,
   shouldArchiveTerminalSubagent,
   subagentModelGuidance,
   subagentModelRuntime,
 } from "../extensions/subagents.ts";
-import { type ManagedSubagent } from "../extensions/subagents/types.ts";
+import type { ManagedSubagent } from "../extensions/subagents/types.ts";
 test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
   const tools: string[] = [];
   const commands: string[] = [];
