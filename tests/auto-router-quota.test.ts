@@ -325,18 +325,20 @@ test("reconcileProviderQuota(minimax) degrades gracefully on unparseable CLI out
   expect(result).toBeUndefined();
 });
 
-test("reconcileProviderQuota(opencode-go) reports headroom with the most-used window as detail", async () => {
+test("reconcileProviderQuota(opencode-go) reports every window's usage together, not just whichever has the highest percentage", async () => {
   const deps = fakeDeps(() =>
     jsonResponse({
       usage: {
-        rolling: { status: "ok", percent: 0, resetsAt: "2030-01-01T00:00:00Z" },
+        rolling: { status: "ok", percent: 3, resetsAt: "2030-01-01T00:00:00Z" },
         weekly: { status: "ok", percent: 0, resetsAt: "2030-01-08T00:00:00Z" },
         monthly: { status: "ok", percent: 20, resetsAt: "2030-02-01T00:00:00Z" },
       },
     }),
   );
   const result = await reconcileProviderQuota("opencode-go", fakeRegistry("key"), deps);
-  expect(result).toEqual({ default: { exhausted: false, detail: "monthly 20% used" } });
+  expect(result).toEqual({
+    default: { exhausted: false, detail: "rolling 3% used, weekly 0% used, monthly 20% used" },
+  });
 });
 
 test("reconcileProviderQuota(opencode-go) reports exhaustion when a window's percent crosses the threshold", async () => {
@@ -363,10 +365,10 @@ test("reconcileProviderQuota(opencode-go) reports exhaustion from a non-ok statu
   });
 });
 
-test("reconcileProviderQuota(opencode-go) reports the blocked window's own detail, not a higher-percent healthy window's", async () => {
+test("reconcileProviderQuota(opencode-go) uses the blocked window's own resetsAt even when a healthy window has a higher percentage, while still showing both in detail", async () => {
   // A blocked window can have a lower percentage than a healthy one (e.g. a short window that
-  // resets rarely hit its own cap while a longer window is nowhere near full) - the detail and
-  // resetsAt must describe the same (blocked) window, not whichever has the highest percentage.
+  // resets rarely hit its own cap while a longer window is nowhere near full) - resetsAt must
+  // describe the blocked window specifically, even though detail now shows every window.
   const deps = fakeDeps(() =>
     jsonResponse({
       usage: {
@@ -377,7 +379,11 @@ test("reconcileProviderQuota(opencode-go) reports the blocked window's own detai
   );
   const result = await reconcileProviderQuota("opencode-go", fakeRegistry("key"), deps);
   expect(result).toEqual({
-    default: { exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z"), detail: "rolling 10% used" },
+    default: {
+      exhausted: true,
+      resetsAt: Date.parse("2030-01-01T00:00:00Z"),
+      detail: "rolling 10% used, weekly 90% used",
+    },
   });
 });
 

@@ -175,16 +175,27 @@ export default function autoRouter(pi: ExtensionAPI): void {
         if (model) return { model, tier: candidateTier };
       }
     }
-    // Last resort: nothing healthy anywhere. Use the first resolvable model in `tier`,
-    // or failing that the first resolvable model anywhere, rather than blocking the turn.
-    const fallbackRefs =
-      settings.efforts[tier]?.models ?? allConfiguredModels(settings);
-    const fallback =
-      resolveAvailableModels(ctx.modelRegistry, fallbackRefs)[0] ??
-      resolveAvailableModels(
-        ctx.modelRegistry,
-        allConfiguredModels(settings),
-      )[0];
+    // Last resort: nothing healthy anywhere. Use the first resolvable model still configured
+    // for `tier` itself, or failing that the first resolvable model in any other configured
+    // tier - labeled with whichever tier the picked model actually belongs to, not blindly
+    // `tier`, since mislabeling it would apply the wrong thinking level to the model in use.
+    const ownRefs = settings.efforts[tier]?.models;
+    let fallback = ownRefs
+      ? resolveAvailableModels(ctx.modelRegistry, ownRefs)[0]
+      : undefined;
+    let fallbackTier = tier;
+    if (!fallback) {
+      for (const candidateTier of AUTO_ROUTER_EFFORT_ORDER) {
+        const refs = settings.efforts[candidateTier]?.models;
+        if (!refs) continue;
+        const candidate = resolveAvailableModels(ctx.modelRegistry, refs)[0];
+        if (candidate) {
+          fallback = candidate;
+          fallbackTier = candidateTier;
+          break;
+        }
+      }
+    }
     if (fallback) {
       if (ctx.hasUI) {
         ctx.ui.notify(
@@ -192,7 +203,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
           "warning",
         );
       }
-      return { model: fallback, tier };
+      return { model: fallback, tier: fallbackTier };
     }
     // Nothing configured for Auto at all (or resolvable) - the "auto" placeholder has no real
     // backend, so leaving it selected here would send the actual request to it and fail with a

@@ -312,6 +312,45 @@ test("routing falls back to the classified tier's model as a last resort when no
   expect(ctx.notifications.some((n) => n.type === "warning" && n.message.includes("unavailable"))).toBe(true);
 });
 
+test("the last-resort fallback labels the model with the tier it actually belongs to, not the (unconfigured) resolved tier", async () => {
+  // Only "high" is configured; "medium" has nothing. resolveEffortTier falls back to the
+  // literal "medium" when nothing between the classified level and medium has models, so
+  // pickForTier can be called with a tier that itself has zero configured entries. When that
+  // happens and the only real fallback model comes from a *different* tier (high), the
+  // returned tier must reflect that model's real tier - otherwise the wrong thinking level
+  // gets applied to it.
+  const high = model("prov", "high-model");
+  await writeConfig({ efforts: { high: { models: [{ provider: "prov", id: "high-model" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [high], classify: () => "high" });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+
+  // First turn: classified "high", routes normally to the only configured model.
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  expect(fake.setModelCalls).toEqual([high]);
+  expect(fake.thinkingLevelCalls).toEqual(["high"]);
+
+  // It then fails, which also makes it unhealthy as the classifier - so the next turn's level
+  // defaults straight to "medium" without even running classification, and with nothing above
+  // it healthy either (high is now the only tier and it just failed), forcing the cross-tier
+  // last-resort fallback.
+  await fake.fire("after_provider_response", { status: 401, headers: {} }, ctx);
+  fake.setModelCalls.length = 0;
+  fake.thinkingLevelCalls.length = 0;
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([high]);
+  // Must be labeled "high" (where the model actually lives), not "medium" (the resolved-but-
+  // unconfigured tier that triggered the fallback).
+  expect(fake.thinkingLevelCalls).toEqual(["high"]);
+});
+
 test("a recorded failure fails over to the next configured model in the same tier", async () => {
   const a = model("prov", "model-a");
   const b = model("prov", "model-b");

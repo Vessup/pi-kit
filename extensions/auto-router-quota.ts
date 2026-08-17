@@ -369,33 +369,32 @@ async function fetchOpenCodeGoQuota(
   if (!result.ok || !isRecord(result.data) || !isRecord(result.data.usage)) return undefined;
 
   const usage = result.data.usage;
+  const windows: { label: string; percent: number; window: Record<string, unknown> }[] = [];
   let mostUsed: { label: string; percent: number; window: Record<string, unknown> } | undefined;
-  let blocked: { label: string; percent: number | undefined; window: Record<string, unknown> } | undefined;
+  let blocked: { label: string; window: Record<string, unknown> } | undefined;
   for (const label of ["rolling", "weekly", "monthly"] as const) {
     const window = usage[label];
     if (!isRecord(window)) continue;
-    const percent = numeric(window.percent);
     if (!blocked && typeof window.status === "string" && window.status !== "ok") {
-      blocked = { label, percent, window };
+      blocked = { label, window };
     }
+    const percent = numeric(window.percent);
     if (percent === undefined) continue;
-    if (!mostUsed || percent > mostUsed.percent) mostUsed = { label, percent, window };
+    const entry = { label, percent, window };
+    windows.push(entry);
+    if (!mostUsed || percent > mostUsed.percent) mostUsed = entry;
   }
-  if (!mostUsed && !blocked) return { default: { exhausted: false } };
+  if (windows.length === 0 && !blocked) return { default: { exhausted: false } };
+  // Report every window's usage together, not just whichever has the highest percentage -
+  // "rolling" (a short window, e.g. hourly) and the longer weekly/monthly windows are
+  // independent limits, and showing only one silently hides real usage against the others.
+  const detail =
+    windows.length > 0
+      ? windows.map((w) => `${w.label} ${roundPercent(w.percent)}% used`).join(", ")
+      : undefined;
   if (blocked) {
-    // Report the blocked window's own detail, not whichever window happens to have the
-    // highest percentage - a blocked window can have a low percentage (e.g. a short rolling
-    // window resets rarely but hit its cap) while a healthy window has a higher one, and
-    // showing the wrong window's numbers next to the real reset time is actively misleading.
-    const detail =
-      blocked.percent !== undefined
-        ? `${blocked.label} ${roundPercent(blocked.percent)}% used`
-        : mostUsed
-          ? `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used`
-          : undefined;
     return { default: { exhausted: true, resetsAt: parseDateish(blocked.window.resetsAt), detail } };
   }
-  const detail = mostUsed ? `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used` : undefined;
   if (mostUsed && mostUsed.percent >= EXHAUSTED_UTILIZATION_PERCENT) {
     return { default: { exhausted: true, resetsAt: parseDateish(mostUsed.window.resetsAt), detail } };
   }
