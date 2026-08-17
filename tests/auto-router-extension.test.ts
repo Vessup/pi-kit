@@ -127,7 +127,12 @@ function fakeModelRegistry({ models, unavailable = [], classify }: FakeRegistryO
   const allModels = [...models, AUTO_PLACEHOLDER];
   const unavailableKeys = new Set(unavailable.map((m) => `${m.provider}/${m.id}`));
   return {
-    find: (provider: string, id: string) => allModels.find((m) => m.provider === provider && m.id === id),
+    find: (provider: string, id: string) =>
+      // Real Pi also has every registered "auto-<tier>" pinned placeholder findable, the same
+      // way it has the bare "auto" one - synthesize rather than requiring every test to list them.
+      provider === "auto" && id.startsWith("auto-")
+        ? model(provider, id)
+        : allModels.find((m) => m.provider === provider && m.id === id),
     hasConfiguredAuth: (m: Model<Api>) => !unavailableKeys.has(`${m.provider}/${m.id}`),
     getApiKeyForProvider: async () => undefined,
     complete: async (_model: Model<Api>, context: { messages: Array<{ content: Array<{ text?: string }> }> }) => {
@@ -172,12 +177,24 @@ function selectAuto(fake: FakePi, ctx: unknown): Promise<unknown> {
   return fake.fire("model_select", { model: { provider: "auto", id: "auto" }, previousModel: undefined, source: "set" }, ctx);
 }
 
+function pinnedPlaceholder(tier: string): Model<Api> {
+  return model("auto", `auto-${tier}`);
+}
+
+function selectPinned(fake: FakePi, ctx: unknown, tier: string): Promise<unknown> {
+  return fake.fire(
+    "model_select",
+    { model: { provider: "auto", id: `auto-${tier}` }, previousModel: undefined, source: "set" },
+    ctx,
+  );
+}
+
 test("selecting Auto marks it active without eagerly routing, showing a neutral footer badge", async () => {
   const a = model("prov", "model-a");
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [a] }), currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
@@ -186,6 +203,117 @@ test("selecting Auto marks it active without eagerly routing, showing a neutral 
   expect(fake.setModelCalls).toEqual([]);
   expect(fake.thinkingLevelCalls).toEqual([]);
   expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto");
+});
+
+test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immediately, before any turn runs", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({ efforts: { high: { models: [{ provider: "prov", id: "model-a" }] } } });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [a] }), currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectPinned(fake, ctx, "high");
+
+  expect(fake.setModelCalls).toEqual([]);
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
+});
+
+test("a pinned Auto (<tier>) entry routes directly within that tier, skipping classification entirely", async () => {
+  const medium = model("prov", "medium-model");
+  const high = model("prov", "high-model");
+  let classifyCalls = 0;
+  await writeConfig({
+    efforts: {
+      medium: { models: [{ provider: "prov", id: "medium-model" }] },
+      high: { models: [{ provider: "prov", id: "high-model" }] },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const registry = fakeModelRegistry({
+    models: [medium, high],
+    // If classification ran, it would say "medium" - proving the pinned tier (high) wins
+    // regardless, and that this classifier was never actually asked.
+    classify: () => {
+      classifyCalls++;
+      return "medium";
+    },
+  });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectPinned(fake, ctx, "high");
+  await fake.fire("before_agent_start", { prompt: "anything, complexity doesn't matter here" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([high]);
+  expect(fake.thinkingLevelCalls).toEqual(["high"]);
+  expect(classifyCalls).toBe(0);
+});
+
+test("after a turn settles, /model reverts to the same pinned entry that was selected, not the adaptive one", async () => {
+  const high = model("prov", "high-model");
+  await writeConfig({ efforts: { high: { models: [{ provider: "prov", id: "high-model" }] } } });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [high] });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectPinned(fake, ctx, "high");
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(ctx.model).toEqual(pinnedPlaceholder("high"));
+});
+
+test("session_start restores a pinned tier from a persisted entry and reverts to that specific placeholder", async () => {
+  const already = model("prov", "already-selected");
+  await writeConfig({ efforts: { xhigh: { models: [{ provider: "prov", id: "already-selected" }] } } });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [already] });
+  fake.currentModel.value = already;
+  const ctx = fakeCtx({
+    modelRegistry: registry,
+    currentModel: fake.currentModel,
+    thinkingLevel: "xhigh",
+    entries: [
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true, pinnedTier: "xhigh" },
+      },
+    ],
+  });
+
+  await fake.fire("session_start", {}, ctx);
+
+  expect(fake.setModelCalls).toEqual([pinnedPlaceholder("xhigh")]);
+  expect(ctx.model).toEqual(pinnedPlaceholder("xhigh"));
+  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (xhigh)");
+});
+
+test("before_agent_start self-heals into the correct pinned tier when ctx.model is already that pinned placeholder", async () => {
+  const max = model("prov", "max-model");
+  await writeConfig({ efforts: { max: { models: [{ provider: "prov", id: "max-model" }] } } });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [max] });
+  // Simulates defaultModel/defaultProvider being set to a pinned "auto-max" entry globally -
+  // no model_select, no session entries, exactly like the earlier defaultModel=auto bug.
+  fake.currentModel.value = pinnedPlaceholder("max");
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel, entries: [] });
+
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([max]);
+  expect(fake.thinkingLevelCalls).toEqual(["max"]);
 });
 
 test("before_agent_start routes to the classified tier, and the picker shows Auto again once the turn settles", async () => {
@@ -199,7 +327,7 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({
     models: [medium, high],
     classify: (prompt) => (prompt.includes("refactor") ? "high" : "medium"),
@@ -236,7 +364,7 @@ test("a model's `effort` override sets its own thinking level, independent of th
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [high], classify: () => "high" });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -267,7 +395,7 @@ test("a routed turn's classification is logged and shows up in /usage, so a rout
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({
     models: [medium, high],
     classify: (prompt) => (prompt.includes("refactor") ? "high" : "medium"),
@@ -298,7 +426,7 @@ test("routing escalates to a higher tier when the classified tier is entirely un
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [medium, c, d], classify: () => "high" });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -326,7 +454,7 @@ test("routing falls back to the classified tier's model as a last resort when no
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "only-model" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [only] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -354,7 +482,7 @@ test("the last-resort fallback labels the model with the tier it actually belong
   await writeConfig({ efforts: { high: { models: [{ provider: "prov", id: "high-model" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [high], classify: () => "high" });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -397,7 +525,7 @@ test("a recorded failure fails over to the next configured model in the same tie
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, b] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -430,7 +558,7 @@ test("a message-level provider error (no distinct HTTP failure status) still fai
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, b] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -474,7 +602,7 @@ test("an aborted (user-cancelled) message does not count as a provider failure",
   });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, b] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -494,7 +622,7 @@ test("router-observed usage is tracked for a manually-selected configured model,
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -518,7 +646,7 @@ test("router-observed failures are tracked for a manually-selected configured mo
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -538,7 +666,7 @@ test("usage from a model that isn't configured anywhere in autoRouter is not tra
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, unrelated] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -563,7 +691,7 @@ test("manually picking a real model while Auto is active turns Auto off", async 
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [a, manual] });
   const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
 
@@ -582,7 +710,7 @@ test("deactivating Auto removes its footer badge", async () => {
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [a, manual] }), currentModel: fake.currentModel });
 
   await fake.fire("session_start", {}, ctx);
@@ -595,7 +723,7 @@ test("deactivating Auto removes its footer badge", async () => {
 
 test("/usage with no configured models notifies instead of throwing", async () => {
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [] }) });
 
   await fake.runCommand("usage", "", ctx);
@@ -607,7 +735,7 @@ test("session_start on a cleanly-idle Auto session leaves the placeholder select
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "already-selected" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [already] });
   fake.currentModel.value = AUTO_PLACEHOLDER;
   const ctx = fakeCtx({
@@ -627,7 +755,7 @@ test("a brand-new session whose defaultModel is auto/auto routes on the first tu
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "medium-model" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [medium] });
   // No `model_select` for Auto ever fired, and no session entries exist - this is what a
   // brand-new session looks like when `defaultProvider`/`defaultModel` are set to "auto" in
@@ -647,7 +775,7 @@ test("before_agent_start routes for real even if autoActive's own bookkeeping ne
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "medium-model" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [medium] });
   fake.currentModel.value = AUTO_PLACEHOLDER;
   // Deliberately no `session_start` and no `model_select` at all here - autoActive is stuck at
@@ -675,7 +803,7 @@ test("session_start restored mid-turn (e.g. after a crash) reverts back to the A
   await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "already-selected" }] } } });
 
   const fake = createFakePi();
-  autoRouter(fake.pi);
+  await autoRouter(fake.pi);
   const registry = fakeModelRegistry({ models: [already] });
   fake.currentModel.value = already;
   const ctx = fakeCtx({

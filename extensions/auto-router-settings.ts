@@ -204,13 +204,17 @@ export async function writeAutoRouterSettings(
   await writeAutoRouterSettingsFile(settingsPath(), settings);
 }
 
-/** Pattern that matches our registered virtual "Auto" model in `/model`'s scoping patterns. */
-export const AUTO_MODEL_SCOPE_PATTERN = "auto/auto";
+/**
+ * Pattern that matches every virtual "Auto" model in `/model`'s scoping patterns: the plain
+ * adaptive one and every "Auto (<tier>)" pinned-tier entry, both under the `auto` provider.
+ * `enabledModels` patterns are matched with minimatch, so a single glob covers all of them.
+ */
+export const AUTO_MODEL_SCOPE_PATTERN = "auto/*";
 
 /**
  * Best-effort: Pi's `/model` picker defaults to showing only `enabledModels`-scoped models
  * when that setting is non-empty, hiding everything else (including our own registered "Auto"
- * entry) behind a manual Tab toggle to "all". If the user has scoping configured, make sure it
+ * entries) behind a manual Tab toggle to "all". If the user has scoping configured, make sure it
  * includes a pattern matching Auto so it's visible by default. No-op when scoping isn't
  * configured at all (everything is already visible) or already includes a matching pattern.
  */

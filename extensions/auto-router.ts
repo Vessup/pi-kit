@@ -38,6 +38,21 @@ const AUTO_PROVIDER_ID = "auto";
 const AUTO_MODEL_ID = "auto";
 const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
 const FOOTER_KEY = "auto-router";
+const PINNED_MODEL_PREFIX = `${AUTO_MODEL_ID}-`;
+
+/** Model id for the `/model` entry that pins Auto to `tier` instead of classifying each turn. */
+function pinnedModelId(tier: AutoRouterEffortLevel): string {
+  return `${PINNED_MODEL_PREFIX}${tier}`;
+}
+
+/** The reverse of `pinnedModelId`: which tier (if any) a selected auto-provider model id pins to. `undefined` for the plain adaptive "auto" id. */
+function tierFromModelId(id: string): AutoRouterEffortLevel | undefined {
+  if (!id.startsWith(PINNED_MODEL_PREFIX)) return undefined;
+  const candidate = id.slice(PINNED_MODEL_PREFIX.length);
+  return (AUTO_ROUTER_EFFORT_ORDER as readonly string[]).includes(candidate)
+    ? (candidate as AutoRouterEffortLevel)
+    : undefined;
+}
 
 function numeric(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -73,7 +88,9 @@ function resolveAvailableModels(
   return models;
 }
 
-function restoreAutoActive(ctx: ExtensionContext): boolean {
+type AutoState = { active: boolean; pinnedTier: AutoRouterEffortLevel | undefined };
+
+function restoreAutoState(ctx: ExtensionContext): AutoState {
   const entries = ctx.sessionManager.getEntries();
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
@@ -82,10 +99,18 @@ function restoreAutoActive(ctx: ExtensionContext): boolean {
       entry.customType === AUTO_ACTIVE_ENTRY_TYPE
     ) {
       const data = entry.data;
-      return isRecord(data) && data.enabled === true;
+      if (!isRecord(data) || data.enabled !== true) {
+        return { active: false, pinnedTier: undefined };
+      }
+      const pinnedTier =
+        typeof data.pinnedTier === "string" &&
+        (AUTO_ROUTER_EFFORT_ORDER as readonly string[]).includes(data.pinnedTier)
+          ? (data.pinnedTier as AutoRouterEffortLevel)
+          : undefined;
+      return { active: true, pinnedTier };
     }
   }
-  return false;
+  return { active: false, pinnedTier: undefined };
 }
 
 function formatTier(tier: AutoRouterEffortLevel): string {
@@ -96,29 +121,44 @@ function footerBadge(tier: AutoRouterEffortLevel | undefined): string {
   return tier ? `🔀 Auto (${formatTier(tier)})` : "🔀 Auto";
 }
 
-export default function autoRouter(pi: ExtensionAPI): void {
+/** A registered-but-inert `/model` entry: never actually dispatched to, since `before_agent_start` always swaps in a real routed model first. */
+function placeholderModel(id: string, name: string) {
+  return {
+    id,
+    name,
+    reasoning: false,
+    input: ["text"] as ("text" | "image")[],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 4096,
+  };
+}
+
+export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
+  // Read once at startup (not re-read later) to decide which per-tier "Auto (<tier>)" picker
+  // entries to register - config changes after this need a process restart to pick up new
+  // tiers, same as any other extension code change.
+  const initialSettings = await readAutoRouterSettings();
+  const pinnedTierModels = AUTO_ROUTER_EFFORT_ORDER.filter(
+    (tier) => (initialSettings.efforts[tier]?.models.length ?? 0) > 0,
+  ).map((tier) => placeholderModel(pinnedModelId(tier), `Auto (${tier})`));
+
   pi.registerProvider(AUTO_PROVIDER_ID, {
     name: "Auto",
-    // Never actually dispatched to: `before_agent_start` always swaps to a real
-    // routed model before any request would be sent here.
     baseUrl: "http://127.0.0.1:0",
     apiKey: "auto-router",
     api: "openai-completions",
     models: [
-      {
-        id: AUTO_MODEL_ID,
-        name: "Auto",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 4096,
-      },
+      placeholderModel(AUTO_MODEL_ID, "Auto (auto)"),
+      ...pinnedTierModels,
     ],
   });
 
   let currentSessionId: string | undefined;
   let autoActive = false;
+  /** Set when the user picked a specific "Auto (<tier>)" entry rather than plain "Auto":
+   * every turn routes within that tier directly, skipping classification entirely. */
+  let pinnedTier: AutoRouterEffortLevel | undefined;
   let routingInFlight = false;
   /** The last thinking level actually applied to a routed model - not necessarily the tier
    * name it's classified under, since a model's `effort` override can differ from its tier. */
@@ -134,12 +174,20 @@ export default function autoRouter(pi: ExtensionAPI): void {
     } satisfies FooterContribution);
   }
 
-  /** Swap `ctx.model` back to the inert "auto" placeholder once a turn is fully done, so `/model` keeps showing Auto selected (not whichever real model just handled the turn) between turns. */
+  /** The specific auto-provider `/model` id currently selected: the pinned tier's, or the plain adaptive one. */
+  function currentAutoModelId(): string {
+    return pinnedTier ? pinnedModelId(pinnedTier) : AUTO_MODEL_ID;
+  }
+
+  /** Swap `ctx.model` back to the inert Auto placeholder (whichever one is selected - adaptive or a pinned tier) once a turn is fully done, so `/model` keeps showing it selected instead of whichever real model just handled the turn. */
   async function revertToAutoPlaceholder(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
   ): Promise<void> {
-    const placeholder = ctx.modelRegistry.find(AUTO_PROVIDER_ID, AUTO_MODEL_ID);
+    const placeholder = ctx.modelRegistry.find(
+      AUTO_PROVIDER_ID,
+      currentAutoModelId(),
+    );
     if (!placeholder) return;
     routingInFlight = true;
     try {
@@ -290,35 +338,48 @@ export default function autoRouter(pi: ExtensionAPI): void {
     hasImages: boolean,
   ): Promise<void> {
     const settings = await readAutoRouterSettings();
-    const classifierPool = resolveAvailableModels(
-      ctx.modelRegistry,
-      settings.efforts.medium?.models ?? allConfiguredModels(settings),
-    );
-    const classifierRef = healthStore.pickHealthy(classifierPool);
-    const classifierModel = classifierRef
-      ? classifierPool.find(
-          (m) =>
-            m.id === classifierRef.id && m.provider === classifierRef.provider,
-        )
-      : undefined;
 
-    let level: AutoRouterEffortLevel = "medium";
-    let classifierReply = "(no classifier available)";
-    if (classifierModel) {
-      const result = await classifyTurnComplexity(
+    let tier: AutoRouterEffortLevel;
+    let level: string;
+    let classifierReply: string;
+    if (pinnedTier) {
+      // The user picked "Auto (<tier>)" specifically to skip classification and always route
+      // within that tier - pickForTier's own escalation/fallback still applies if it's unhealthy.
+      tier = pinnedTier;
+      level = "(pinned)";
+      classifierReply = `pinned to ${pinnedTier} - not classified`;
+    } else {
+      const classifierPool = resolveAvailableModels(
         ctx.modelRegistry,
-        classifierModel,
-        prompt,
-        hasImages,
+        settings.efforts.medium?.models ?? allConfiguredModels(settings),
       );
-      level = result.level;
-      classifierReply = result.reply;
-      if (result.usage) {
-        healthStore.recordSuccess(modelKey(classifierModel), result.usage);
+      const classifierRef = healthStore.pickHealthy(classifierPool);
+      const classifierModel = classifierRef
+        ? classifierPool.find(
+            (m) =>
+              m.id === classifierRef.id && m.provider === classifierRef.provider,
+          )
+        : undefined;
+
+      let classifiedLevel: AutoRouterEffortLevel = "medium";
+      classifierReply = "(no classifier available)";
+      if (classifierModel) {
+        const result = await classifyTurnComplexity(
+          ctx.modelRegistry,
+          classifierModel,
+          prompt,
+          hasImages,
+        );
+        classifiedLevel = result.level;
+        classifierReply = result.reply;
+        if (result.usage) {
+          healthStore.recordSuccess(modelKey(classifierModel), result.usage);
+        }
       }
+      level = classifiedLevel;
+      tier = resolveEffortTier(settings, classifiedLevel);
     }
 
-    const tier = resolveEffortTier(settings, level);
     const picked = pickForTier(ctx, settings, tier);
     if (!picked) {
       if (ctx.hasUI) {
@@ -368,12 +429,16 @@ export default function autoRouter(pi: ExtensionAPI): void {
     if (routingInFlight) return;
     if (event.model.provider === AUTO_PROVIDER_ID) {
       autoActive = true;
-      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true });
-      publishFooter(lastKnownEffort);
+      pinnedTier = tierFromModelId(event.model.id);
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
+      // A pinned tier is worth showing immediately (the user explicitly locked to it), even
+      // before any turn has routed; the adaptive "auto" entry still waits for a real turn.
+      publishFooter(pinnedTier ?? lastKnownEffort);
       return;
     }
     if (event.source !== "restore" && autoActive) {
       autoActive = false;
+      pinnedTier = undefined;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: false });
       lastKnownEffort = undefined;
       clearFooter();
@@ -389,11 +454,17 @@ export default function autoRouter(pi: ExtensionAPI): void {
     // this reload's freshly-loaded state on disk with the old in-memory data.
     await healthStore.load();
     // A session can arrive with Auto active two different ways: a persisted entry from an
-    // earlier explicit `/model` pick (`restoreAutoActive`), or `ctx.model` already being the
-    // placeholder because the user set `defaultProvider`/`defaultModel` to "auto" globally - a
-    // brand-new session in that case has no entries yet, so `restoreAutoActive` alone would
-    // miss it and leave every turn dispatching straight at the placeholder's dead URL.
-    autoActive = restoreAutoActive(ctx) || ctx.model?.provider === AUTO_PROVIDER_ID;
+    // earlier explicit `/model` pick (`restoreAutoState`), or `ctx.model` already being one of
+    // Auto's placeholders because the user set `defaultProvider`/`defaultModel` to "auto" (or a
+    // pinned "auto-<tier>" id) globally - a brand-new session in that case has no entries yet,
+    // so `restoreAutoState` alone would miss it and leave every turn dispatching straight at
+    // the placeholder's dead URL.
+    const restored = restoreAutoState(ctx);
+    const modelIsAuto = ctx.model?.provider === AUTO_PROVIDER_ID;
+    autoActive = restored.active || modelIsAuto;
+    pinnedTier =
+      restored.pinnedTier ??
+      (modelIsAuto && ctx.model ? tierFromModelId(ctx.model.id) : undefined);
     if (autoActive) {
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could
@@ -401,7 +472,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
         lastKnownEffort = ctx.thinkingLevel;
         await revertToAutoPlaceholder(pi, ctx);
       }
-      publishFooter(lastKnownEffort);
+      publishFooter(pinnedTier ?? lastKnownEffort);
     }
     const settings = await readAutoRouterSettings();
     void reconcileAllProviders(ctx.modelRegistry, settings);
@@ -421,12 +492,13 @@ export default function autoRouter(pi: ExtensionAPI): void {
       // exactly the kind of thing that's easy to miss one case of (as happened with a brand-new
       // session whose defaultModel is "auto" in settings). But whether a request is about to be
       // sent against the inert placeholder is directly observable right here, right before
-      // dispatch: if `ctx.model` already *is* the Auto placeholder, sending this turn as-is is
-      // guaranteed to fail with a bare connection error no matter why our own flag says
+      // dispatch: if `ctx.model` already *is* one of Auto's placeholders, sending this turn as-is
+      // is guaranteed to fail with a bare connection error no matter why our own flag says
       // inactive. So treat that as authoritative and self-heal instead of trusting the flag.
       if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
       autoActive = true;
-      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true });
+      pinnedTier = tierFromModelId(ctx.model.id);
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
     }
     await routeForPrompt(pi, ctx, event.prompt, Boolean(event.images?.length));
   });
