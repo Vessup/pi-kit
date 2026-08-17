@@ -103,13 +103,17 @@ test("reconcileProviderQuota(openai-codex) applies the account-wide rate_limit.l
       rate_limit: {
         allowed: false,
         limit_reached: true,
-        primary_window: { used_percent: 100, reset_at: 1787197007 },
+        primary_window: { used_percent: 100, limit_window_seconds: 604_800, reset_at: 1787197007 },
         secondary_window: null,
       },
       additional_rate_limits: [
         {
           limit_name: "GPT-5.3-Codex-Spark",
-          rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 5 } },
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 5, limit_window_seconds: 604_800 },
+          },
         },
       ],
       spend_control: { reached: false },
@@ -117,10 +121,11 @@ test("reconcileProviderQuota(openai-codex) applies the account-wide rate_limit.l
   );
   const result = await reconcileProviderQuota("openai-codex", fakeRegistry("token"), deps);
   expect(result).toEqual({
-    // Applies to any configured model with no specific additional_rate_limits entry.
-    default: { exhausted: true, resetsAt: 1787197007 * 1000, detail: "account 100% used" },
+    // Applies to any configured model with no specific additional_rate_limits entry. The
+    // window's own limit_window_seconds (604800 = 7 days) labels it, not a vague "account".
+    default: { exhausted: true, resetsAt: 1787197007 * 1000, detail: "7d 100% used" },
     // This model has its own entry, so it's unaffected by the account-wide flag.
-    perModel: { gpt53codexspark: { exhausted: false, detail: "5% used" } },
+    perModel: { gpt53codexspark: { exhausted: false, detail: "7d 5% used" } },
   });
 });
 
@@ -210,13 +215,34 @@ test("reconcileProviderQuota(kimi-coding) reports exhaustion when used reaches t
   });
 });
 
-test("reconcileProviderQuota(minimax) reports headroom from the mmx CLI's general bucket", async () => {
+test("reconcileProviderQuota(minimax) labels the short window from its real start/end times (observed 5h), not a vague 'interval'", async () => {
+  const deps = fakeDeps(() => jsonResponse({}), {
+    minimaxCli: async () =>
+      JSON.stringify({
+        model_remains: [
+          {
+            model_name: "general",
+            start_time: 1_000_000_000_000,
+            end_time: 1_000_000_000_000 + 5 * 60 * 60 * 1000,
+            current_interval_remaining_percent: 84,
+            current_weekly_remaining_percent: 89,
+          },
+          { model_name: "video", current_interval_remaining_percent: 100, current_weekly_remaining_percent: 100 },
+        ],
+      }),
+  });
+  const result = await reconcileProviderQuota("minimax", fakeRegistry(undefined), deps);
+  expect(result).toEqual({
+    default: { exhausted: false, detail: "5h 16% used, weekly 11% used" },
+  });
+});
+
+test("reconcileProviderQuota(minimax) falls back to 'interval' when start/end times aren't present", async () => {
   const deps = fakeDeps(() => jsonResponse({}), {
     minimaxCli: async () =>
       JSON.stringify({
         model_remains: [
           { model_name: "general", current_interval_remaining_percent: 84, current_weekly_remaining_percent: 89 },
-          { model_name: "video", current_interval_remaining_percent: 100, current_weekly_remaining_percent: 100 },
         ],
       }),
   });

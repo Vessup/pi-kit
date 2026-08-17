@@ -165,6 +165,27 @@ function windowResetsAt(window: Record<string, unknown>): number | undefined {
   return parseDateish(window.reset_at ?? window.reset_time_ms);
 }
 
+/** e.g. 604800 -> "7d", 3600 -> "1h". Codex's own `limit_window_seconds` field, so this is the window's real duration, not a guess. */
+function secondsToLabel(seconds: number): string {
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
+/** Window length from a pair of epoch-ms timestamps, rounded to the nearest second. */
+function durationSeconds(startMs: unknown, endMs: unknown): number | undefined {
+  const start = numeric(startMs);
+  const end = numeric(endMs);
+  if (start === undefined || end === undefined || end <= start) return undefined;
+  return Math.round((end - start) / 1000);
+}
+
+function windowLabel(window: Record<string, unknown>): string | undefined {
+  const seconds = numeric(window.limit_window_seconds);
+  return seconds !== undefined && seconds > 0 ? secondsToLabel(seconds) : undefined;
+}
+
 async function fetchCodexQuota(
   modelRegistry: ModelRegistry,
   deps: QuotaFetchDependencies,
@@ -197,7 +218,11 @@ async function fetchCodexQuota(
     ? ((rateLimit.primary_window ?? rateLimit.primary) as Record<string, unknown>)
     : undefined;
   const accountUsedPercent = accountWindow ? windowUsedPercent(accountWindow) : undefined;
-  const accountDetail = accountUsedPercent !== undefined ? `account ${roundPercent(accountUsedPercent)}% used` : undefined;
+  // Codex's own `limit_window_seconds` gives the real window duration (e.g. 604800 = 7 days /
+  // weekly) rather than a vague "account" placeholder.
+  const accountLabel = accountWindow ? (windowLabel(accountWindow) ?? "account") : "account";
+  const accountDetail =
+    accountUsedPercent !== undefined ? `${accountLabel} ${roundPercent(accountUsedPercent)}% used` : undefined;
   const accountResetsAt = accountWindow ? windowResetsAt(accountWindow) : undefined;
 
   // Codex reports exhaustion account-wide, authoritatively, right on the rate_limit object
@@ -233,10 +258,14 @@ async function fetchCodexQuota(
       entryRateLimit.limit_reached === true ||
       entryRateLimit.allowed === false ||
       (usedPercent !== undefined && usedPercent >= EXHAUSTED_UTILIZATION_PERCENT);
+    const modelLabel = window ? windowLabel(window) : undefined;
     perModel[normalizeModelId(entry.limit_name)] = {
       exhausted: modelExhausted,
       resetsAt: modelExhausted && window ? windowResetsAt(window) : undefined,
-      detail: usedPercent !== undefined ? `${roundPercent(usedPercent)}% used` : undefined,
+      detail:
+        usedPercent !== undefined
+          ? `${modelLabel ? `${modelLabel} ` : ""}${roundPercent(usedPercent)}% used`
+          : undefined,
     };
   }
 
@@ -390,10 +419,14 @@ async function fetchMinimaxQuota(
 
   // The API reports *remaining* percent (opposite convention from every other provider here,
   // which all report *used* percent) - convert so /usage reads consistently across providers.
+  // The short window's actual length (observed 5h) comes from start_time/end_time rather than
+  // being hardcoded, since nothing else in the response names it.
   const intervalRemaining = numeric(general.current_interval_remaining_percent);
   const weeklyRemaining = numeric(general.current_weekly_remaining_percent);
+  const intervalSeconds = durationSeconds(general.start_time, general.end_time);
+  const intervalLabel = intervalSeconds !== undefined ? secondsToLabel(intervalSeconds) : "interval";
   const detailParts: string[] = [];
-  if (intervalRemaining !== undefined) detailParts.push(`interval ${roundPercent(100 - intervalRemaining)}% used`);
+  if (intervalRemaining !== undefined) detailParts.push(`${intervalLabel} ${roundPercent(100 - intervalRemaining)}% used`);
   if (weeklyRemaining !== undefined) detailParts.push(`weekly ${roundPercent(100 - weeklyRemaining)}% used`);
   const detail = detailParts.length > 0 ? detailParts.join(", ") : undefined;
 
