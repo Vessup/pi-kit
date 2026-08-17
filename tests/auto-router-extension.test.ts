@@ -390,6 +390,74 @@ test("an aborted (user-cancelled) message does not count as a provider failure",
   expect(fake.setModelCalls).toEqual([a]);
 });
 
+test("router-observed usage is tracked for a manually-selected configured model, not just ones Auto routed to", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [a] });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  // The user picks model-a straight from /model - Auto is never engaged.
+  fake.currentModel.value = a;
+
+  await fake.fire(
+    "message_end",
+    { message: { role: "assistant", stopReason: "stop", usage: { input: 10, output: 5, cost: { total: 0.01 } } } },
+    ctx,
+  );
+
+  await fake.runCommand("usage", "", ctx);
+  const notified = ctx.notifications.at(-1)?.message ?? "";
+  expect(notified).toContain("1 req");
+});
+
+test("router-observed failures are tracked for a manually-selected configured model too", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [a] });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  fake.currentModel.value = a;
+
+  await fake.fire("after_provider_response", { status: 429, headers: {} }, ctx);
+
+  await fake.runCommand("usage", "", ctx);
+  const notified = ctx.notifications.at(-1)?.message ?? "";
+  expect(notified).toContain("cooldown");
+});
+
+test("usage from a model that isn't configured anywhere in autoRouter is not tracked", async () => {
+  const a = model("prov", "model-a");
+  const unrelated = model("other", "unrelated-model");
+  await writeConfig({ efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } } });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [a, unrelated] });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  fake.currentModel.value = unrelated;
+
+  await fake.fire(
+    "message_end",
+    { message: { role: "assistant", stopReason: "stop", usage: { input: 10, output: 5, cost: { total: 0.01 } } } },
+    ctx,
+  );
+
+  await fake.runCommand("usage", "", ctx);
+  const notified = ctx.notifications.at(-1)?.message ?? "";
+  expect(notified).toContain("prov/model-a");
+  expect(notified).not.toContain("unrelated-model");
+});
+
 test("manually picking a real model while Auto is active turns Auto off", async () => {
   const a = model("prov", "model-a");
   const manual = model("prov", "manual-model");

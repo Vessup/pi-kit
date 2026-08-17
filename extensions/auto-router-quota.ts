@@ -370,22 +370,32 @@ async function fetchOpenCodeGoQuota(
 
   const usage = result.data.usage;
   let mostUsed: { label: string; percent: number; window: Record<string, unknown> } | undefined;
-  let blocked: { window: Record<string, unknown> } | undefined;
+  let blocked: { label: string; percent: number | undefined; window: Record<string, unknown> } | undefined;
   for (const label of ["rolling", "weekly", "monthly"] as const) {
     const window = usage[label];
     if (!isRecord(window)) continue;
-    if (!blocked && typeof window.status === "string" && window.status !== "ok") {
-      blocked = { window };
-    }
     const percent = numeric(window.percent);
+    if (!blocked && typeof window.status === "string" && window.status !== "ok") {
+      blocked = { label, percent, window };
+    }
     if (percent === undefined) continue;
     if (!mostUsed || percent > mostUsed.percent) mostUsed = { label, percent, window };
   }
   if (!mostUsed && !blocked) return { default: { exhausted: false } };
-  const detail = mostUsed ? `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used` : undefined;
   if (blocked) {
+    // Report the blocked window's own detail, not whichever window happens to have the
+    // highest percentage - a blocked window can have a low percentage (e.g. a short rolling
+    // window resets rarely but hit its cap) while a healthy window has a higher one, and
+    // showing the wrong window's numbers next to the real reset time is actively misleading.
+    const detail =
+      blocked.percent !== undefined
+        ? `${blocked.label} ${roundPercent(blocked.percent)}% used`
+        : mostUsed
+          ? `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used`
+          : undefined;
     return { default: { exhausted: true, resetsAt: parseDateish(blocked.window.resetsAt), detail } };
   }
+  const detail = mostUsed ? `${mostUsed.label} ${roundPercent(mostUsed.percent)}% used` : undefined;
   if (mostUsed && mostUsed.percent >= EXHAUSTED_UTILIZATION_PERCENT) {
     return { default: { exhausted: true, resetsAt: parseDateish(mostUsed.window.resetsAt), detail } };
   }
@@ -430,11 +440,15 @@ async function fetchMinimaxQuota(
   if (weeklyRemaining !== undefined) detailParts.push(`weekly ${roundPercent(100 - weeklyRemaining)}% used`);
   const detail = detailParts.length > 0 ? detailParts.join(", ") : undefined;
 
+  // Through parseDateish, not a raw numeric() read: this API has been observed returning
+  // milliseconds, but nothing guarantees every account/response does, and parseDateish's
+  // seconds-vs-milliseconds heuristic is what every other provider's reset time already goes
+  // through here.
   if (intervalRemaining !== undefined && intervalRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
-    return { default: { exhausted: true, resetsAt: numeric(general.end_time), detail } };
+    return { default: { exhausted: true, resetsAt: parseDateish(general.end_time), detail } };
   }
   if (weeklyRemaining !== undefined && weeklyRemaining <= 100 - EXHAUSTED_UTILIZATION_PERCENT) {
-    return { default: { exhausted: true, resetsAt: numeric(general.weekly_end_time), detail } };
+    return { default: { exhausted: true, resetsAt: parseDateish(general.weekly_end_time), detail } };
   }
   return { default: { exhausted: false, detail } };
 }

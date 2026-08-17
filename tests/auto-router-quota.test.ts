@@ -342,6 +342,24 @@ test("reconcileProviderQuota(opencode-go) reports exhaustion from a non-ok statu
   });
 });
 
+test("reconcileProviderQuota(opencode-go) reports the blocked window's own detail, not a higher-percent healthy window's", async () => {
+  // A blocked window can have a lower percentage than a healthy one (e.g. a short window that
+  // resets rarely hit its own cap while a longer window is nowhere near full) - the detail and
+  // resetsAt must describe the same (blocked) window, not whichever has the highest percentage.
+  const deps = fakeDeps(() =>
+    jsonResponse({
+      usage: {
+        rolling: { status: "limited", percent: 10, resetsAt: "2030-01-01T00:00:00Z" },
+        weekly: { status: "ok", percent: 90, resetsAt: "2030-01-08T00:00:00Z" },
+      },
+    }),
+  );
+  const result = await reconcileProviderQuota("opencode-go", fakeRegistry("key"), deps);
+  expect(result).toEqual({
+    default: { exhausted: true, resetsAt: Date.parse("2030-01-01T00:00:00Z"), detail: "rolling 10% used" },
+  });
+});
+
 test("reconcileProviderQuota(opencode-go) returns undefined without credentials, never calling fetch", async () => {
   let called = false;
   const deps = fakeDeps(() => {

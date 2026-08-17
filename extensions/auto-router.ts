@@ -119,9 +119,8 @@ export default function autoRouter(pi: ExtensionAPI): void {
   let currentSessionId: string | undefined;
   let autoActive = false;
   let routingInFlight = false;
-  let currentInFlightModel: ModelIdentity | undefined;
   let lastKnownTier: AutoRouterEffortLevel | undefined;
-  let healthStore = new AutoRouterHealthStore();
+  const healthStore = new AutoRouterHealthStore();
 
   function publishFooter(tier: AutoRouterEffortLevel | undefined): void {
     if (!currentSessionId) return;
@@ -194,6 +193,22 @@ export default function autoRouter(pi: ExtensionAPI): void {
       }
       return { model: fallback, tier };
     }
+    // Nothing configured for Auto at all (or resolvable) - the "auto" placeholder has no real
+    // backend, so leaving it selected here would send the actual request to it and fail with a
+    // connection error instead of a clear message. Fall back to any authenticated model in the
+    // whole catalog rather than ever letting a turn run against the placeholder.
+    const anyModel = ctx.modelRegistry
+      .getAvailable()
+      .find((candidate) => candidate.provider !== AUTO_PROVIDER_ID);
+    if (anyModel) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Auto has no configured models. Add an \`autoRouter\` entry to ~/.pi/agent/settings.json — falling back to ${anyModel.provider}/${anyModel.id} for now.`,
+          "warning",
+        );
+      }
+      return { model: anyModel, tier };
+    }
     return undefined;
   }
 
@@ -219,7 +234,6 @@ export default function autoRouter(pi: ExtensionAPI): void {
     } finally {
       routingInFlight = false;
     }
-    currentInFlightModel = { provider: model.provider, id: model.id };
     lastKnownTier = tier;
     publishFooter(tier);
   }
@@ -303,7 +317,6 @@ export default function autoRouter(pi: ExtensionAPI): void {
     if (event.source !== "restore" && autoActive) {
       autoActive = false;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: false });
-      currentInFlightModel = undefined;
       lastKnownTier = undefined;
       clearFooter();
     }
@@ -312,16 +325,16 @@ export default function autoRouter(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
-    currentInFlightModel = undefined;
     lastKnownTier = undefined;
-    healthStore = new AutoRouterHealthStore();
+    // Reuse the single instance rather than replacing it: a stale instance's pending
+    // debounced-save timer would otherwise still fire independently and could overwrite
+    // this reload's freshly-loaded state on disk with the old in-memory data.
     await healthStore.load();
     autoActive = restoreAutoActive(ctx);
     if (autoActive) {
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could
         // revert it). Normalize back to the placeholder so /model shows Auto again.
-        currentInFlightModel = { provider: ctx.model.provider, id: ctx.model.id };
         lastKnownTier = ctx.thinkingLevel;
         await revertToAutoPlaceholder(pi, ctx);
       }
@@ -343,31 +356,38 @@ export default function autoRouter(pi: ExtensionAPI): void {
     await routeForPrompt(pi, ctx, event.prompt, Boolean(event.images?.length));
   });
 
-  pi.on("after_provider_response", (event) => {
-    if (!currentInFlightModel) return;
-    if (event.status >= 200 && event.status < 300) return;
-    healthStore.recordFailure(
-      modelKey(currentInFlightModel),
-      event.status,
-      event.headers,
+  // Health/usage tracking isn't limited to turns Auto itself routed: any turn against a model
+  // that's *configured* somewhere in autoRouter (picked manually from /model, or left over from
+  // before Auto was engaged) is just as real a signal for future routing decisions and /usage,
+  // so it's tracked the same way regardless of who selected the model.
+  async function trackedModel(model: ModelIdentity | undefined): Promise<ModelIdentity | undefined> {
+    if (!model || model.provider === AUTO_PROVIDER_ID) return undefined;
+    const settings = await readAutoRouterSettings();
+    const configured = allConfiguredModels(settings).some(
+      (candidate) => candidate.provider === model.provider && candidate.id === model.id,
     );
+    return configured ? model : undefined;
+  }
+
+  pi.on("after_provider_response", async (event, ctx) => {
+    if (event.status >= 200 && event.status < 300) return;
+    const model = await trackedModel(ctx.model);
+    if (!model) return;
+    healthStore.recordFailure(modelKey(model), event.status, event.headers);
   });
 
-  pi.on("message_end", (event) => {
-    if (!autoActive || !currentInFlightModel) return;
+  pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const message = event.message;
     if (message.stopReason === "aborted") return; // user-cancelled, not a provider health signal
+    const model = await trackedModel(ctx.model);
+    if (!model) return;
     if (message.stopReason === "error") {
-      healthStore.recordFailure(
-        modelKey(currentInFlightModel),
-        inferFailureStatus(message.errorMessage),
-        undefined,
-      );
+      healthStore.recordFailure(modelKey(model), inferFailureStatus(message.errorMessage), undefined);
       return;
     }
     const usage = isRecord(message) ? message.usage : undefined;
-    healthStore.recordSuccess(modelKey(currentInFlightModel), {
+    healthStore.recordSuccess(modelKey(model), {
       input: numeric(isRecord(usage) ? usage.input : undefined),
       output: numeric(isRecord(usage) ? usage.output : undefined),
       cost: numeric(
@@ -380,7 +400,6 @@ export default function autoRouter(pi: ExtensionAPI): void {
     void healthStore.flush();
     currentSessionId = undefined;
     autoActive = false;
-    currentInFlightModel = undefined;
   });
 
   pi.registerCommand("usage", {
@@ -450,7 +469,7 @@ function rowStatus(entry: ModelHealthEntry | undefined, now: number): string {
   return "healthy";
 }
 
-/** Real usage from the provider's own quota API, when reconciliation has run for this model — separate from (and often more accurate than) this router's own request/token counters, which only see traffic Auto itself routed. */
+/** Real usage from the provider's own quota API, when reconciliation has run for this model — separate from (and often more accurate than) this router's own request/token counters, which only see traffic this Pi installation itself made against the model. */
 function verifiedUsageText(entry: ModelHealthEntry | undefined): string {
   if (!entry?.verifiedAt) return "—";
   return entry.verifiedDetail ?? "verified, no detail";
@@ -463,7 +482,7 @@ function rowLine(row: UsageRow, now: number): string {
   const tokens = formatTokenCount(
     (entry?.totals.input ?? 0) + (entry?.totals.output ?? 0),
   );
-  return `${row.model.provider}/${row.model.id} — ${status} · ${verifiedUsageText(entry)} · ${requests} routed req · ${tokens} tok`;
+  return `${row.model.provider}/${row.model.id} — ${status} · ${verifiedUsageText(entry)} · ${requests} req · ${tokens} tok`;
 }
 
 function formatUsagePlainText(rows: UsageRow[]): string {
@@ -488,7 +507,7 @@ function formatUsageMarkdown(rows: UsageRow[]): string {
   if (rows.length === 0) return "No models configured.";
   const now = Date.now();
   const lines = [
-    "| Tier | Model | Status | Verified usage | Routed req | Routed tokens | Routed cost |",
+    "| Tier | Model | Status | Verified usage | Observed req | Observed tokens | Observed cost |",
     "|---|---|---|---|---|---|---|",
   ];
   for (const row of rows) {
@@ -503,7 +522,7 @@ function formatUsageMarkdown(rows: UsageRow[]): string {
   }
   lines.push(
     "",
-    "_Verified usage comes from the provider's own quota API, where available. Routed req/tokens/cost only count turns Auto itself routed to that model — usage from other sessions, manual `/model` picks, or other tools isn't reflected there._",
+    "_Verified usage comes from the provider's own quota API, where available. Observed req/tokens/cost count every turn this Pi installation has run against that model since Auto started tracking it — whether Auto routed there or it was picked manually from `/model` — but not usage from other sessions/machines/tools or from before that; that's exactly what verified usage is for._",
   );
   return lines.join("\n");
 }
