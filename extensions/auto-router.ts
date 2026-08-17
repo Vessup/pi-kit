@@ -12,6 +12,7 @@ import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
 import { classifyTurnComplexity } from "./auto-router-classify.js";
 import {
   AutoRouterHealthStore,
+  type ClassificationLogEntry,
   type ModelHealthEntry,
   type ModelIdentity,
   modelKey,
@@ -258,6 +259,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
       : undefined;
 
     let level: AutoRouterEffortLevel = "medium";
+    let classifierReply = "(no classifier available)";
     if (classifierModel) {
       const result = await classifyTurnComplexity(
         ctx.modelRegistry,
@@ -266,6 +268,7 @@ export default function autoRouter(pi: ExtensionAPI): void {
         hasImages,
       );
       level = result.level;
+      classifierReply = result.reply;
       if (result.usage) {
         healthStore.recordSuccess(modelKey(classifierModel), result.usage);
       }
@@ -282,6 +285,16 @@ export default function autoRouter(pi: ExtensionAPI): void {
       }
       return;
     }
+    // Persisted so `/usage` can show what the classifier actually said - the classify call
+    // itself is otherwise a throwaway completion whose result is discarded after parsing, which
+    // made a prior misrouting report impossible to actually verify against real evidence.
+    healthStore.recordClassification({
+      prompt,
+      reply: classifierReply,
+      level,
+      tier: picked.tier,
+      model: picked.model,
+    });
     await applyRouting(pi, ctx, picked.model, picked.tier);
   }
 
@@ -422,10 +435,11 @@ export default function autoRouter(pi: ExtensionAPI): void {
       }
       await reconcileAllProviders(ctx.modelRegistry, settings);
       const rows = buildUsageRows(settings, healthStore);
+      const classifications = healthStore.getClassifications();
       if (ctx.mode === "tui") {
-        await showUsageDashboard(rows, ctx);
+        await showUsageDashboard(rows, classifications, ctx);
       } else if (ctx.hasUI) {
-        ctx.ui.notify(formatUsagePlainText(rows), "info");
+        ctx.ui.notify(formatUsagePlainText(rows, classifications), "info");
       }
     },
   });
@@ -490,7 +504,28 @@ function rowLine(row: UsageRow, now: number): string {
   return `${row.model.provider}/${row.model.id} — ${status} · ${verifiedUsageText(entry)} · ${requests} req · ${tokens} tok`;
 }
 
-function formatUsagePlainText(rows: UsageRow[]): string {
+/** How many recent classification decisions `/usage` shows, most recent first. */
+const CLASSIFICATION_DISPLAY_LIMIT = 5;
+
+function formatRelativeTime(at: number, now: number): string {
+  const delta = now - at;
+  return delta < 60_000 ? "just now" : `${formatDuration(delta)} ago`;
+}
+
+function escapeTableCell(text: string): string {
+  return text.replace(/\|/g, "\\|");
+}
+
+function recentClassifications(
+  entries: readonly ClassificationLogEntry[],
+): ClassificationLogEntry[] {
+  return entries.slice(-CLASSIFICATION_DISPLAY_LIMIT).reverse();
+}
+
+function formatUsagePlainText(
+  rows: UsageRow[],
+  classifications: readonly ClassificationLogEntry[],
+): string {
   if (rows.length === 0) return "Auto: no models configured.";
   const now = Date.now();
   const byTier = new Map<AutoRouterEffortLevel, UsageRow[]>();
@@ -505,10 +540,22 @@ function formatUsagePlainText(rows: UsageRow[]): string {
       `${tier}: ${tierRows.map((row) => rowLine(row, now)).join(" | ")}`,
     );
   }
+  const recent = recentClassifications(classifications);
+  if (recent.length > 0) {
+    lines.push("", "Recent classifications:");
+    for (const entry of recent) {
+      lines.push(
+        `  ${formatRelativeTime(entry.timestamp, now)}: said "${entry.reply}" → ${entry.level}, routed to ${entry.tier} (${entry.model.provider}/${entry.model.id})`,
+      );
+    }
+  }
   return lines.join("\n");
 }
 
-function formatUsageMarkdown(rows: UsageRow[]): string {
+function formatUsageMarkdown(
+  rows: UsageRow[],
+  classifications: readonly ClassificationLogEntry[],
+): string {
   if (rows.length === 0) return "No models configured.";
   const now = Date.now();
   const lines = [
@@ -529,11 +576,28 @@ function formatUsageMarkdown(rows: UsageRow[]): string {
     "",
     "_Verified usage comes from the provider's own quota API, where available. Observed req/tokens/cost count every turn this Pi installation has run against that model since Auto started tracking it — whether Auto routed there or it was picked manually from `/model` — but not usage from other sessions/machines/tools or from before that; that's exactly what verified usage is for._",
   );
+  const recent = recentClassifications(classifications);
+  if (recent.length > 0) {
+    lines.push(
+      "",
+      "### Recent classifications",
+      "_What the classifier actually said, so a routing decision that looks wrong can be checked against real evidence instead of guessed at._",
+      "",
+      "| When | Said | Level | Tier used | Model |",
+      "|---|---|---|---|---|",
+    );
+    for (const entry of recent) {
+      lines.push(
+        `| ${formatRelativeTime(entry.timestamp, now)} | ${escapeTableCell(entry.reply)} | ${entry.level} | ${entry.tier} | ${entry.model.provider}/${entry.model.id} |`,
+      );
+    }
+  }
   return lines.join("\n");
 }
 
 async function showUsageDashboard(
   rows: UsageRow[],
+  classifications: readonly ClassificationLogEntry[],
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
@@ -545,7 +609,9 @@ async function showUsageDashboard(
     container.addChild(
       new Text(theme.fg("accent", theme.bold("Auto Router Usage")), 1, 0),
     );
-    container.addChild(new Markdown(formatUsageMarkdown(rows), 1, 1, mdTheme));
+    container.addChild(
+      new Markdown(formatUsageMarkdown(rows, classifications), 1, 1, mdTheme),
+    );
     container.addChild(
       new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0),
     );

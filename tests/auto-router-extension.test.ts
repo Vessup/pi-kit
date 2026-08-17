@@ -225,6 +225,35 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
 });
 
+test("a routed turn's classification is logged and shows up in /usage, so a routing decision can be checked against what the classifier actually said", async () => {
+  const medium = model("prov", "medium-model");
+  const high = model("prov", "high-model");
+  await writeConfig({
+    efforts: {
+      medium: { models: [{ provider: "prov", id: "medium-model" }] },
+      high: { models: [{ provider: "prov", id: "high-model" }] },
+    },
+  });
+
+  const fake = createFakePi();
+  autoRouter(fake.pi);
+  const registry = fakeModelRegistry({
+    models: [medium, high],
+    classify: (prompt) => (prompt.includes("refactor") ? "high" : "medium"),
+  });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "please refactor this multi-file module" }, ctx);
+
+  await fake.runCommand("usage", "", ctx);
+  const notified = ctx.notifications.at(-1)?.message ?? "";
+  expect(notified).toContain("Recent classifications");
+  expect(notified).toContain("high");
+  expect(notified).toContain("prov/high-model");
+});
+
 test("routing escalates to a higher tier when the classified tier is entirely unhealthy", async () => {
   const c = model("prov", "high-model");
   const d = model("prov", "xhigh-model");

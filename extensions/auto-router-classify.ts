@@ -34,6 +34,13 @@ export type ClassificationUsage = {
 export type ClassificationResult = {
   level: AutoRouterEffortLevel;
   usage?: ClassificationUsage;
+  /**
+   * The classifier's raw reply (trimmed/lowercased), or a bracketed placeholder when the call
+   * itself failed. Callers should log this alongside `level` - otherwise there's no way to tell
+   * apart "the model genuinely said medium" from "parsing picked the wrong word out of a messy
+   * reply" after the fact, since the model call itself is never persisted anywhere else.
+   */
+  reply: string;
 };
 
 function numeric(value: unknown): number {
@@ -102,9 +109,10 @@ export async function classifyTurnComplexity(
           cost: numeric(response.usage.cost?.total),
         }
       : undefined;
-    return { level, usage };
-  } catch {
-    return { level: DEFAULT_LEVEL };
+    return { level, usage, reply: reply || "(empty reply)" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { level: DEFAULT_LEVEL, reply: `(classification failed: ${message})` };
   } finally {
     clearTimeout(timeout);
   }

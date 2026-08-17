@@ -1,8 +1,12 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   applyFailure,
   applyQuotaResult,
   applySuccess,
+  AutoRouterHealthStore,
   type AutoRouterHealthState,
   isHealthy,
   modelKey,
@@ -11,6 +15,23 @@ import {
 } from "../extensions/auto-router-health.ts";
 
 const NOW = 1_000_000_000_000;
+
+const ENV_VAR = "PI_CODING_AGENT_DIR";
+let previousEnv: string | undefined;
+let agentDir: string | undefined;
+
+beforeEach(async () => {
+  previousEnv = process.env[ENV_VAR];
+  agentDir = await mkdtemp(join(tmpdir(), "pi-kit-auto-router-health-"));
+  process.env[ENV_VAR] = agentDir;
+});
+
+afterEach(async () => {
+  if (previousEnv === undefined) delete process.env[ENV_VAR];
+  else process.env[ENV_VAR] = previousEnv;
+  if (agentDir) await rm(agentDir, { recursive: true, force: true });
+  agentDir = undefined;
+});
 
 test("modelKey joins provider and id", () => {
   expect(modelKey({ provider: "openai", id: "gpt-5.3-codex" })).toBe("openai/gpt-5.3-codex");
@@ -138,4 +159,66 @@ test("a cooldown clears once its expiry has passed", () => {
   const state = applyFailure({}, modelKey(a), 401, undefined, NOW);
   expect(isHealthy(state, modelKey(a), NOW + 30 * 60_000 - 1)).toBe(false);
   expect(isHealthy(state, modelKey(a), NOW + 30 * 60_000 + 1)).toBe(true);
+});
+
+function statePath(): string {
+  if (!agentDir) throw new Error("agentDir not set");
+  return join(agentDir, "auto-router-state.json");
+}
+
+test("AutoRouterHealthStore round-trips model health and classification log through flush/load", async () => {
+  const store = new AutoRouterHealthStore();
+  const model = { provider: "prov", id: "a" };
+  store.recordSuccess(modelKey(model), { input: 10, output: 20, cost: 0.01 });
+  store.recordClassification(
+    { prompt: "do the thing", reply: "high complexity", level: "high", tier: "high", model },
+    NOW,
+  );
+  await store.flush();
+
+  const reloaded = new AutoRouterHealthStore();
+  await reloaded.load();
+  expect(reloaded.getEntry(modelKey(model))?.totals).toEqual({
+    requests: 1,
+    input: 10,
+    output: 20,
+    cost: 0.01,
+  });
+  expect(reloaded.getClassifications()).toEqual([
+    { timestamp: NOW, prompt: "do the thing", reply: "high complexity", level: "high", tier: "high", model },
+  ]);
+});
+
+test("AutoRouterHealthStore.load reads a pre-classification-log file (flat model-keyed record) as model health with an empty log", async () => {
+  const model = { provider: "prov", id: "a" };
+  await writeFile(
+    statePath(),
+    JSON.stringify({
+      [modelKey(model)]: {
+        consecutiveFailures: 0,
+        totals: { requests: 3, input: 1, output: 2, cost: 0.001 },
+      },
+    }),
+  );
+  const store = new AutoRouterHealthStore();
+  await store.load();
+  expect(store.getEntry(modelKey(model))?.totals.requests).toBe(3);
+  expect(store.getClassifications()).toEqual([]);
+});
+
+test("AutoRouterHealthStore.recordClassification truncates long text and caps the log at the most recent 20 entries", async () => {
+  const store = new AutoRouterHealthStore();
+  const model = { provider: "prov", id: "a" };
+  const longReply = "x".repeat(500);
+  for (let i = 0; i < 25; i++) {
+    store.recordClassification(
+      { prompt: `turn ${i}`, reply: i === 24 ? longReply : `reply ${i}`, level: "medium", tier: "medium", model },
+      NOW + i,
+    );
+  }
+  const entries = store.getClassifications();
+  expect(entries).toHaveLength(20);
+  expect(entries[0]?.prompt).toBe("turn 5");
+  expect(entries.at(-1)?.reply.length).toBeLessThanOrEqual(201);
+  expect(entries.at(-1)?.reply.endsWith("…")).toBe(true);
 });

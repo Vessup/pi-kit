@@ -72,10 +72,22 @@ test("classifyTurnComplexity falls back to medium on an unparseable reply", asyn
   expect(result.level).toBe("medium");
 });
 
-test("classifyTurnComplexity falls back to medium when the provider call throws", async () => {
+test("classifyTurnComplexity falls back to medium when the provider call throws, and records why in reply", async () => {
   const result = await classifyTurnComplexity(throwingRegistry(), MODEL, "do something", false);
   expect(result.level).toBe("medium");
   expect(result.usage).toBeUndefined();
+  expect(result.reply).toContain("provider down");
+});
+
+test("classifyTurnComplexity surfaces the raw reply text alongside the parsed level, for diagnosing mismatches later", async () => {
+  const result = await classifyTurnComplexity(
+    registryReplying("high complexity, more than a medium task"),
+    MODEL,
+    "do something",
+    false,
+  );
+  expect(result.level).toBe("high");
+  expect(result.reply).toBe("high complexity, more than a medium task");
 });
 
 test("classifyTurnComplexity surfaces usage from the response when present", async () => {

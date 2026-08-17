@@ -34,6 +34,31 @@ export type ModelHealthEntry = {
 
 export type AutoRouterHealthState = Record<string, ModelHealthEntry>;
 
+const CLASSIFICATION_LOG_LIMIT = 20;
+const CLASSIFICATION_LOG_TEXT_LIMIT = 200;
+
+/**
+ * A single routing decision, kept so `/usage` can show what the classifier actually said - the
+ * classification call itself is otherwise a throwaway completion whose result is discarded
+ * after parsing, so without this there's no way to tell apart "the model genuinely said medium"
+ * from "the reply parsed wrong" after the fact.
+ */
+export type ClassificationLogEntry = {
+  timestamp: number;
+  prompt: string;
+  reply: string;
+  level: string;
+  tier: string;
+  model: ModelIdentity;
+};
+
+function truncateForLog(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > CLASSIFICATION_LOG_TEXT_LIMIT
+    ? `${collapsed.slice(0, CLASSIFICATION_LOG_TEXT_LIMIT)}…`
+    : collapsed;
+}
+
 export type UsageDelta = { input: number; output: number; cost: number };
 
 export type QuotaReconciliationResult = {
@@ -210,23 +235,75 @@ function parseState(value: unknown): AutoRouterHealthState {
   return state;
 }
 
+function parseClassifications(value: unknown): ClassificationLogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: ClassificationLogEntry[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    if (typeof raw.timestamp !== "number") continue;
+    if (typeof raw.prompt !== "string" || typeof raw.reply !== "string") continue;
+    if (typeof raw.level !== "string" || typeof raw.tier !== "string") continue;
+    if (
+      !isRecord(raw.model) ||
+      typeof raw.model.provider !== "string" ||
+      typeof raw.model.id !== "string"
+    )
+      continue;
+    entries.push({
+      timestamp: raw.timestamp,
+      prompt: raw.prompt,
+      reply: raw.reply,
+      level: raw.level,
+      tier: raw.tier,
+      model: { provider: raw.model.provider, id: raw.model.id },
+    });
+  }
+  return entries;
+}
+
+/**
+ * Handles both the current `{models, classifications}` shape and the flat `Record<modelKey,
+ * ModelHealthEntry>` shape every persisted file had before classification logging existed.
+ */
+function parsePersisted(value: unknown): {
+  models: AutoRouterHealthState;
+  classifications: ClassificationLogEntry[];
+} {
+  if (!isRecord(value)) return { models: {}, classifications: [] };
+  if (isRecord(value.models)) {
+    return {
+      models: parseState(value.models),
+      classifications: parseClassifications(value.classifications),
+    };
+  }
+  return { models: parseState(value), classifications: [] };
+}
+
 /** Debounced, best-effort persistence for router-observed health/usage state, shared across concurrent Pi processes on a last-write-wins basis (telemetry, not correctness-critical config). */
 export class AutoRouterHealthStore {
   private state: AutoRouterHealthState = {};
+  private classifications: ClassificationLogEntry[] = [];
   private writeTimer: ReturnType<typeof setTimeout> | undefined;
 
   async load(): Promise<void> {
     try {
-      this.state = parseState(
+      const parsed = parsePersisted(
         JSON.parse(await readFile(statePath(), "utf8")),
       );
+      this.state = parsed.models;
+      this.classifications = parsed.classifications;
     } catch {
       this.state = {};
+      this.classifications = [];
     }
   }
 
   getState(): AutoRouterHealthState {
     return this.state;
+  }
+
+  getClassifications(): readonly ClassificationLogEntry[] {
+    return this.classifications;
   }
 
   getEntry(key: string): ModelHealthEntry | undefined {
@@ -268,6 +345,24 @@ export class AutoRouterHealthStore {
     this.scheduleSave();
   }
 
+  recordClassification(
+    entry: Omit<ClassificationLogEntry, "timestamp">,
+    now: number = Date.now(),
+  ): void {
+    const full: ClassificationLogEntry = {
+      timestamp: now,
+      prompt: truncateForLog(entry.prompt),
+      reply: truncateForLog(entry.reply),
+      level: entry.level,
+      tier: entry.tier,
+      model: entry.model,
+    };
+    this.classifications = [...this.classifications, full].slice(
+      -CLASSIFICATION_LOG_LIMIT,
+    );
+    this.scheduleSave();
+  }
+
   private scheduleSave(): void {
     if (this.writeTimer) return;
     this.writeTimer = setTimeout(() => {
@@ -287,7 +382,7 @@ export class AutoRouterHealthStore {
     try {
       await writeFile(
         tempPath,
-        `${JSON.stringify(this.state, null, 2)}\n`,
+        `${JSON.stringify({ models: this.state, classifications: this.classifications }, null, 2)}\n`,
         "utf8",
       );
       await rename(tempPath, statePath());
