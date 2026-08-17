@@ -51,6 +51,11 @@ test("parseRetryAfterMs reads an HTTP-date header", () => {
   expect(parseRetryAfterMs({ "retry-after": future }, NOW)).toBeCloseTo(60_000, -2);
 });
 
+test("parseRetryAfterMs finds the header regardless of casing", () => {
+  expect(parseRetryAfterMs({ "RETRY-AFTER": "30" }, NOW)).toBe(30_000);
+  expect(parseRetryAfterMs({ "Retry-After": "30" }, NOW)).toBe(30_000);
+});
+
 test("parseRetryAfterMs returns undefined when the header is missing or unparseable", () => {
   expect(parseRetryAfterMs(undefined, NOW)).toBeUndefined();
   expect(parseRetryAfterMs({}, NOW)).toBeUndefined();

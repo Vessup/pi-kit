@@ -506,9 +506,28 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   // that's *configured* somewhere in autoRouter (picked manually from /model, or left over from
   // before Auto was engaged) is just as real a signal for future routing decisions and /usage,
   // so it's tracked the same way regardless of who selected the model.
+  const TRACKED_SETTINGS_CACHE_MS = 5_000;
+  let trackedSettingsCache: { settings: AutoRouterSettings; expiresAt: number } | undefined;
+
+  // Short-TTL cache scoped to this membership check specifically: after_provider_response and
+  // message_end can both fire multiple times per turn, and re-reading + re-parsing settings.json
+  // from disk for each one is wasted work when nothing's changed. Routing decisions themselves
+  // (routeForPrompt, /usage, reconciliation) still always read fresh, since staleness there would
+  // mean routing on config the user no longer has - a few seconds of staleness in "is this model
+  // even one we track" is a much cheaper trade.
+  async function trackedSettings(): Promise<AutoRouterSettings> {
+    const now = Date.now();
+    if (trackedSettingsCache && trackedSettingsCache.expiresAt > now) {
+      return trackedSettingsCache.settings;
+    }
+    const settings = await readAutoRouterSettings();
+    trackedSettingsCache = { settings, expiresAt: now + TRACKED_SETTINGS_CACHE_MS };
+    return settings;
+  }
+
   async function trackedModel(model: ModelIdentity | undefined): Promise<ModelIdentity | undefined> {
     if (!model || model.provider === AUTO_PROVIDER_ID) return undefined;
-    const settings = await readAutoRouterSettings();
+    const settings = await trackedSettings();
     const configured = allConfiguredModels(settings).some(
       (candidate) => candidate.provider === model.provider && candidate.id === model.id,
     );
@@ -543,7 +562,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("session_shutdown", () => {
-    void healthStore.flush();
+    // Best-effort telemetry: a transient write failure must not become an unhandled rejection.
+    void healthStore.flush().catch(() => undefined);
     currentSessionId = undefined;
     autoActive = false;
   });

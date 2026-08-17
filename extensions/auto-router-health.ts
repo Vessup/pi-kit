@@ -89,7 +89,11 @@ export function parseRetryAfterMs(
   headers: Record<string, string> | undefined,
   now: number,
 ): number | undefined {
-  const raw = headers?.["retry-after"] ?? headers?.["Retry-After"];
+  const raw = headers
+    ? Object.entries(headers).find(
+        ([name]) => name.toLowerCase() === "retry-after",
+      )?.[1]
+    : undefined;
   if (!raw) return undefined;
   const seconds = Number(raw);
   if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
@@ -375,7 +379,9 @@ export class AutoRouterHealthStore {
     if (this.writeTimer) return;
     this.writeTimer = setTimeout(() => {
       this.writeTimer = undefined;
-      void this.flush();
+      // Best-effort telemetry: a transient write failure (ENOSPC, EACCES, ...) must not become
+      // an unhandled rejection with no caller to catch it, which would crash the process.
+      void this.flush().catch(() => undefined);
     }, SAVE_DEBOUNCE_MS);
     this.writeTimer.unref?.();
   }

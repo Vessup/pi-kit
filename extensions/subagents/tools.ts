@@ -74,8 +74,8 @@ const ReadParams = Type.Object({
   ),
   wait_seconds: Type.Optional(
     Type.Integer({
-      description: `Wait for meaningful new activity before returning. Default ${DEFAULT_READ_WAIT_SECONDS}, maximum 30.`,
-      minimum: 0,
+      description: `Wait for meaningful subagent state changes before returning. Default and minimum ${DEFAULT_READ_WAIT_SECONDS}.`,
+      minimum: DEFAULT_READ_WAIT_SECONDS,
       maximum: 30,
     }),
   ),
@@ -134,7 +134,7 @@ export function registerSubagentTools(
       "Create a background subagent with a chosen prompt, model, and effort",
     promptGuidelines: [
       "When calling subagent_create, omit model to inherit the current model unless deliberately choosing one of the exact session-available provider/model IDs listed in the system prompt; never shorten or invent a model ID.",
-      "After subagent_create returns, use subagent_read with its default wait roughly every 15–30 seconds while work continues; briefly tell the user about meaningful progress between polls without narrating every event.",
+      "After subagent_create returns, use subagent_read with wait_seconds 30 while work continues; expect a completion summary when the task transitions to completed. Re-poll only at that cadence for stalled work.",
       "Wait for subagent_create to return before calling another subagent management tool for that id.",
       "Use subagent_send with urgent only when the current approach must change immediately; use normal for work that can wait until the current run finishes.",
       "Use subagent_terminate when delegated work is no longer needed, and clean up retained subagents before finishing when appropriate.",
@@ -174,7 +174,7 @@ export function registerSubagentTools(
     name: "subagent_read",
     label: "Read subagents",
     description:
-      "Wait for and read meaningful subagent activity, status, output, usage, or full transcripts. Omit id to monitor all subagents.",
+      "Wait for meaningful subagent state updates. Completed subagents return a concise summary and are auto-released after read. Omit id to monitor all subagents.",
     promptSnippet: "Read and monitor background subagent activity and output",
     parameters: ReadParams,
     async execute(_toolCallId, params, signal) {
@@ -187,7 +187,7 @@ export function registerSubagentTools(
       if (signal?.aborted) throw new Error("Subagent read was cancelled");
       return toolResult(
         manager,
-        manager.read(agents, params.include_transcript ?? false),
+        await manager.read(agents, params.include_transcript ?? false),
       );
     },
     renderCall(args, theme) {
