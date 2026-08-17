@@ -1399,7 +1399,7 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
             );
           })
         : undefined;
-      if (!replacement) {
+      if (!sourceId || !replacement) {
         if (!existsSync(staged.source))
           renameSync(staged.tombstone, staged.source);
         continue;

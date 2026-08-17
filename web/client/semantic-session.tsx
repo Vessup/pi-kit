@@ -666,8 +666,7 @@ function TokenDetails({ session }: { session: WebSession }) {
       )}
       {(usage?.cacheWrite ?? 0) > 0 && (
         <span>
-          Cache write{" "}
-          <strong>{formatTokenCount(usage?.cacheWrite ?? 0)}</strong>
+          Cache write <strong>{formatTokenCount(usage?.cacheWrite ?? 0)}</strong>
         </span>
       )}
       <span>
