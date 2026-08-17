@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { SubagentManager } from "../extensions/subagents/manager.ts";
 import {
   stringifyCompact,
   truncateChars,
@@ -16,19 +17,17 @@ import {
 } from "../extensions/subagents/ui.ts";
 import subagentsExtension, {
   abortRunningSubagentSessions,
-  appendBoundedStreamingText,
   countsAgainstSubagentLimit,
   filterModelsToScope,
   inheritedSubagentModel,
   isFailedStopReason,
   isTerminalSubagentStatus,
-  MAX_WEB_STREAMING_CHARS,
   parsePersistedUsageState,
   shouldArchiveTerminalSubagent,
   subagentModelGuidance,
   subagentModelRuntime,
 } from "../extensions/subagents.ts";
-
+import type { ManagedSubagent } from "../extensions/subagents/types.ts";
 test("subagent entrypoint preserves its tool, command, and lifecycle registrations", () => {
   const tools: string[] = [];
   const commands: string[] = [];
@@ -90,6 +89,39 @@ const usage = {
     total: 0.33,
   },
 };
+
+function makeManagedAgent(
+  override: Partial<ManagedSubagent> = {},
+): ManagedSubagent {
+  const now = Date.now();
+  return {
+    id: "worker",
+    prompt: "task",
+    cwd: "/tmp",
+    createdAt: now - 1_000,
+    updatedAt: now,
+    status: "completed",
+    model: "provider/model",
+    effort: "medium",
+    turns: 1,
+    queuedSteering: 0,
+    queuedFollowUp: 0,
+    activity: [{ timestamp: now - 10, text: "assistant finished" }],
+    lastReadActivity: 0,
+    transcript: [
+      {
+        timestamp: now - 5,
+        role: "assistant",
+        text: "Subagent summary of work completed.",
+      },
+    ],
+    streamingText: "",
+    lastStreamActivityAt: 0,
+    usage: usage,
+    waiters: new Set(),
+    ...override,
+  };
+}
 
 test("compact formatting handles non-JSON values and preserves Unicode code points", () => {
   assert.equal(stringifyCompact(undefined), "undefined");
@@ -355,13 +387,52 @@ test("subagent model guidance exposes exact choices and inheritance", () => {
   assert.match(guidance, /Never shorten, generalize, or invent a model ID/);
 });
 
-test("streaming subagent output remains bounded to its newest text", () => {
-  const prefix = "a".repeat(MAX_WEB_STREAMING_CHARS - 2);
-  assert.equal(appendBoundedStreamingText(prefix, "bc"), `${prefix}bc`);
-  assert.equal(
-    appendBoundedStreamingText(prefix, "012345"),
-    `${prefix.slice(4)}012345`,
+test("subagent read returns a concise completion summary and auto-releases terminal agents", async () => {
+  const manager = new SubagentManager({
+    events: { emit() {} },
+  } as never);
+  const agent = makeManagedAgent();
+
+  (manager as { agents: Map<string, ManagedSubagent> }).agents.set(
+    agent.id,
+    agent,
   );
+
+  const output = await manager.read([agent], false);
+
+  assert.ok(output.includes("Completion summary:"));
+  assert.equal(output.includes("Activity since last read:"), false);
+  assert.equal(manager.list().length, 0);
+});
+
+test("subagent read includes transcript only when requested", async () => {
+  const manager = new SubagentManager({
+    events: { emit() {} },
+  } as never);
+  const withTranscript = makeManagedAgent({ id: "detailed" });
+
+  (manager as { agents: Map<string, ManagedSubagent> }).agents.set(
+    withTranscript.id,
+    withTranscript,
+  );
+
+  const without = await manager.read([withTranscript], false);
+  assert.equal(without.includes("Transcript:"), false);
+
+  // Re-insert a completed agent for the detailed-read assertion.
+  (manager as { agents: Map<string, ManagedSubagent> }).agents.set(
+    withTranscript.id,
+    {
+      ...withTranscript,
+      lastReadActivity: 0,
+      status: "completed",
+      waiters: new Set(),
+    },
+  );
+
+  const withTranscriptOutput = await manager.read([withTranscript], true);
+  assert.ok(withTranscriptOutput.includes("Transcript:"));
+  assert.ok(withTranscriptOutput.includes(withTranscript.transcript[0]?.text));
 });
 
 test("persisted usage checkpoints reject malformed data", () => {
