@@ -37,7 +37,7 @@ The subagent extension independently contributes its token use and status to `ex
 
 `extensions/auto-router.ts` adds an "Auto" entry to `/model`. Selecting it routes each turn to a model/reasoning-effort pair chosen from your own configured lists, based on the turn's classified complexity, and fails over to other configured models or tiers when one is unhealthy or out of usage.
 
-Configure it under a new `autoRouter` key in `~/.pi/agent/settings.json` (or `.pi/settings.json` for a project override):
+Configure it under a new `autoRouter` key in `~/.pi/agent/settings.json`:
 
 ```json
 {
