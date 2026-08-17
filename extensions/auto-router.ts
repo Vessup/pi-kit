@@ -394,7 +394,6 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     // itself is otherwise a throwaway completion whose result is discarded after parsing, which
     // made a prior misrouting report impossible to actually verify against real evidence.
     healthStore.recordClassification({
-      prompt,
       reply: classifierReply,
       level,
       tier: picked.tier,
@@ -641,8 +640,14 @@ function formatRelativeTime(at: number, now: number): string {
   return delta < 60_000 ? "just now" : `${formatDuration(delta)} ago`;
 }
 
-function escapeTableCell(text: string): string {
-  return text.replace(/\|/g, "\\|");
+/**
+ * Neutralizes both pipes and line breaks for a Markdown table cell. Every current caller
+ * already gets pre-collapsed text from `truncateForLog`, but this stays a defense of its own
+ * rather than relying on that - a raw multi-line value would otherwise terminate the row early
+ * and break the rest of the table, not just that one cell.
+ */
+export function escapeTableCell(text: string): string {
+  return text.replace(/\s*[\r\n]+\s*/g, " ").replace(/\|/g, "\\|");
 }
 
 function recentClassifications(

@@ -41,11 +41,13 @@ const CLASSIFICATION_LOG_TEXT_LIMIT = 200;
  * A single routing decision, kept so `/usage` can show what the classifier actually said - the
  * classification call itself is otherwise a throwaway completion whose result is discarded
  * after parsing, so without this there's no way to tell apart "the model genuinely said medium"
- * from "the reply parsed wrong" after the fact.
+ * from "the reply parsed wrong" after the fact. Deliberately excludes the user's prompt text:
+ * `/usage` never displays it, and this file is plaintext on disk, so persisting it would be
+ * pure liability - prompts can contain source code, credentials, or personal data - for no
+ * actual benefit.
  */
 export type ClassificationLogEntry = {
   timestamp: number;
-  prompt: string;
   reply: string;
   level: string;
   tier: string;
@@ -243,7 +245,7 @@ function parseClassifications(value: unknown): ClassificationLogEntry[] {
   for (const raw of value) {
     if (!isRecord(raw)) continue;
     if (typeof raw.timestamp !== "number") continue;
-    if (typeof raw.prompt !== "string" || typeof raw.reply !== "string") continue;
+    if (typeof raw.reply !== "string") continue;
     if (typeof raw.level !== "string" || typeof raw.tier !== "string") continue;
     if (
       !isRecord(raw.model) ||
@@ -251,9 +253,10 @@ function parseClassifications(value: unknown): ClassificationLogEntry[] {
       typeof raw.model.id !== "string"
     )
       continue;
+    // Any `prompt` field from an entry logged before this was dropped is intentionally not
+    // read back here, so a reload+resave (e.g. the next classification) scrubs it from disk.
     entries.push({
       timestamp: raw.timestamp,
-      prompt: raw.prompt,
       reply: raw.reply,
       level: raw.level,
       tier: raw.tier,
@@ -356,7 +359,6 @@ export class AutoRouterHealthStore {
   ): void {
     const full: ClassificationLogEntry = {
       timestamp: now,
-      prompt: truncateForLog(entry.prompt),
       reply: truncateForLog(entry.reply),
       level: entry.level,
       tier: entry.tier,

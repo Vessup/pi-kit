@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,24 +9,36 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import autoRouter from "../extensions/auto-router.ts";
+import autoRouter, { escapeTableCell } from "../extensions/auto-router.ts";
 import type { AutoRouterSettings } from "../extensions/auto-router-settings.ts";
 
-const ENV_VAR = "PI_CODING_AGENT_DIR";
-let previousEnv: string | undefined;
-let agentDir: string | undefined;
+test("escapeTableCell neutralizes both pipes and line breaks, so one bad reply can't break the rest of the table", () => {
+  expect(escapeTableCell("a | b")).toBe("a \\| b");
+  expect(escapeTableCell("line one\nline two")).toBe("line one line two");
+  expect(escapeTableCell("windows\r\nstyle")).toBe("windows style");
+  expect(escapeTableCell("multi\n\n\nblank\nlines")).toBe("multi blank lines");
+});
 
+const ENV_VAR = "PI_CODING_AGENT_DIR";
+let agentDir: string | undefined;
+const usedDirs: string[] = [];
+
+// The extension's internal AutoRouterHealthStore debounces its writes (~2s after the last
+// record call), so a save scheduled by one test can fire well after that test's own teardown -
+// if `afterEach` restored PI_CODING_AGENT_DIR to its prior (usually unset) value in the
+// meantime, that late write would land in the real global agent directory instead of a test's
+// temp one. So the env var is never restored to anything other than a temp dir for the whole
+// run - only ever moved to a new one - and every temp dir used stays on disk until all tests
+// finish, so even a very late write can only ever land somewhere harmless.
 beforeEach(async () => {
-  previousEnv = process.env[ENV_VAR];
   agentDir = await mkdtemp(join(tmpdir(), "pi-kit-auto-router-agent-"));
+  usedDirs.push(agentDir);
   process.env[ENV_VAR] = agentDir;
 });
 
-afterEach(async () => {
-  if (previousEnv === undefined) delete process.env[ENV_VAR];
-  else process.env[ENV_VAR] = previousEnv;
-  if (agentDir) await rm(agentDir, { recursive: true, force: true });
-  agentDir = undefined;
+afterAll(async () => {
+  delete process.env[ENV_VAR];
+  await Promise.all(usedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 async function writeConfig(settings: AutoRouterSettings): Promise<void> {

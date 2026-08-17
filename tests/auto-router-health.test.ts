@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { afterAll, beforeEach, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,20 +17,25 @@ import {
 const NOW = 1_000_000_000_000;
 
 const ENV_VAR = "PI_CODING_AGENT_DIR";
-let previousEnv: string | undefined;
 let agentDir: string | undefined;
+const usedDirs: string[] = [];
 
+// AutoRouterHealthStore debounces its writes (~2s after the last record call), so a save
+// scheduled by one test can fire well after that test's own teardown - if `afterEach` restored
+// PI_CODING_AGENT_DIR to its prior (usually unset) value in the meantime, that late write would
+// land in the real global agent directory instead of a test's temp one. So the env var is never
+// restored to anything other than a temp dir for the whole run - only ever moved to a new one -
+// and every temp dir used stays on disk until all tests finish, so even a very late write can
+// only ever land somewhere harmless.
 beforeEach(async () => {
-  previousEnv = process.env[ENV_VAR];
   agentDir = await mkdtemp(join(tmpdir(), "pi-kit-auto-router-health-"));
+  usedDirs.push(agentDir);
   process.env[ENV_VAR] = agentDir;
 });
 
-afterEach(async () => {
-  if (previousEnv === undefined) delete process.env[ENV_VAR];
-  else process.env[ENV_VAR] = previousEnv;
-  if (agentDir) await rm(agentDir, { recursive: true, force: true });
-  agentDir = undefined;
+afterAll(async () => {
+  delete process.env[ENV_VAR];
+  await Promise.all(usedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 test("modelKey joins provider and id", () => {
@@ -166,15 +171,20 @@ function statePath(): string {
   return join(agentDir, "auto-router-state.json");
 }
 
-test("AutoRouterHealthStore round-trips model health and classification log through flush/load", async () => {
+test("AutoRouterHealthStore round-trips model health and classification log through flush/load, without ever persisting prompt content", async () => {
   const store = new AutoRouterHealthStore();
   const model = { provider: "prov", id: "a" };
   store.recordSuccess(modelKey(model), { input: 10, output: 20, cost: 0.01 });
   store.recordClassification(
-    { prompt: "do the thing", reply: "high complexity", level: "high", tier: "high", effort: "high", model },
+    { reply: "high complexity", level: "high", tier: "high", effort: "high", model },
     NOW,
   );
   await store.flush();
+
+  // The prompt itself (which can contain source code, credentials, or personal data) must
+  // never reach the plaintext state file on disk - only routing metadata does.
+  const onDisk = await readFile(statePath(), "utf8");
+  expect(onDisk).not.toContain("prompt");
 
   const reloaded = new AutoRouterHealthStore();
   await reloaded.load();
@@ -187,7 +197,6 @@ test("AutoRouterHealthStore round-trips model health and classification log thro
   expect(reloaded.getClassifications()).toEqual([
     {
       timestamp: NOW,
-      prompt: "do the thing",
       reply: "high complexity",
       level: "high",
       tier: "high",
@@ -221,7 +230,6 @@ test("AutoRouterHealthStore.recordClassification truncates long text and caps th
   for (let i = 0; i < 25; i++) {
     store.recordClassification(
       {
-        prompt: `turn ${i}`,
         reply: i === 24 ? longReply : `reply ${i}`,
         level: "medium",
         tier: "medium",
@@ -233,7 +241,7 @@ test("AutoRouterHealthStore.recordClassification truncates long text and caps th
   }
   const entries = store.getClassifications();
   expect(entries).toHaveLength(20);
-  expect(entries[0]?.prompt).toBe("turn 5");
+  expect(entries[0]?.reply).toBe("reply 5");
   expect(entries.at(-1)?.reply.length).toBeLessThanOrEqual(201);
   expect(entries.at(-1)?.reply.endsWith("…")).toBe(true);
 });
