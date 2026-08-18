@@ -6,7 +6,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 /** Structural — matches both `AutoRouterModelRef` and the SDK's `Model<Api>`. */
 export type ModelIdentity = { provider: string; id: string };
 
-const SAVE_DEBOUNCE_MS = 2_000;
+/** Exported so tests can wait out the debounce window before tearing down the temp `PI_CODING_AGENT_DIR` they pointed it at - otherwise a save still in flight resolves the real default path instead and corrupts the caller's actual global state file. */
+export const SAVE_DEBOUNCE_MS = 2_000;
 
 /** Resolved at call time (not module load) so it honors a `PI_CODING_AGENT_DIR` override set after import. */
 function statePath(): string {

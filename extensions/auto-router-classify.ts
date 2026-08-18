@@ -81,7 +81,13 @@ export async function classifyTurnComplexity(
         reasoningEffort: "off",
         cacheRetention: "none",
         sessionId: uuidv7(),
-        maxTokens: 20,
+        // No maxTokens cap: a small fixed budget (previously 20) is plenty for a non-reasoning
+        // model's one-word reply, but a reasoning-capable model can spend the entire budget on
+        // reasoning content before ever emitting the answer - `reasoningEffort: "off"` should
+        // suppress that, but isn't honored the same way by every provider/model, and when it
+        // isn't, a tight cap starves the visible reply to nothing rather than just some reasoning
+        // tokens (verified: this is what was happening). `CLASSIFY_TIMEOUT_MS` above is the real
+        // bound on how long/expensive a stuck classification call can get.
       },
     );
     const reply = response.content
