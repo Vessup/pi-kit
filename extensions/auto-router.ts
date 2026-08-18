@@ -117,8 +117,16 @@ function formatTier(tier: AutoRouterEffortLevel): string {
   return tier;
 }
 
-function footerBadge(tier: AutoRouterEffortLevel | undefined): string {
-  return tier ? `🔀 Auto (${formatTier(tier)})` : "🔀 Auto";
+/**
+ * The footer badge always reflects the current `/model` selection - "Auto (auto)" for the
+ * plain adaptive entry, "Auto (<tier>)" for a pinned one - never what a given turn happened to
+ * classify or dispatch to. Showing per-turn routing here made the badge look like a claim about
+ * the model in use (e.g. "Auto (max)" beside a model actually running at a lower thinking level,
+ * whenever that model's own `effort` override differs from its tier), when the selection never
+ * changed. `/usage` is the place to see what actually got routed to.
+ */
+function footerBadge(pinnedTier: AutoRouterEffortLevel | undefined): string {
+  return `🔀 Auto (${pinnedTier ?? "auto"})`;
 }
 
 /** A registered-but-inert `/model` entry: never actually dispatched to, since `before_agent_start` always swaps in a real routed model first. */
@@ -160,17 +168,14 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
    * every turn routes within that tier directly, skipping classification entirely. */
   let pinnedTier: AutoRouterEffortLevel | undefined;
   let routingInFlight = false;
-  /** The last thinking level actually applied to a routed model - not necessarily the tier
-   * name it's classified under, since a model's `effort` override can differ from its tier. */
-  let lastKnownEffort: AutoRouterEffortLevel | undefined;
   const healthStore = new AutoRouterHealthStore();
 
-  function publishFooter(effort: AutoRouterEffortLevel | undefined): void {
+  function publishFooter(): void {
     if (!currentSessionId) return;
     pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
       sessionId: currentSessionId,
       key: FOOTER_KEY,
-      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(effort)),
+      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(pinnedTier)),
     } satisfies FooterContribution);
   }
 
@@ -327,8 +332,6 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     } finally {
       routingInFlight = false;
     }
-    lastKnownEffort = effort;
-    publishFooter(effort);
   }
 
   async function routeForPrompt(
@@ -430,16 +433,15 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       autoActive = true;
       pinnedTier = tierFromModelId(event.model.id);
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
-      // A pinned tier is worth showing immediately (the user explicitly locked to it), even
-      // before any turn has routed; the adaptive "auto" entry still waits for a real turn.
-      publishFooter(pinnedTier ?? lastKnownEffort);
+      // Reflects the selection itself, immediately - "Auto (auto)" or "Auto (<tier>)" - not
+      // anything about routing, so there's nothing to wait for a turn to determine.
+      publishFooter();
       return;
     }
     if (event.source !== "restore" && autoActive) {
       autoActive = false;
       pinnedTier = undefined;
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: false });
-      lastKnownEffort = undefined;
       clearFooter();
     }
   });
@@ -447,7 +449,6 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("session_start", async (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
-    lastKnownEffort = undefined;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -468,10 +469,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could
         // revert it). Normalize back to the placeholder so /model shows Auto again.
-        lastKnownEffort = ctx.thinkingLevel;
         await revertToAutoPlaceholder(pi, ctx);
       }
-      publishFooter(pinnedTier ?? lastKnownEffort);
+      publishFooter();
     }
     const settings = await readAutoRouterSettings();
     void reconcileAllProviders(ctx.modelRegistry, settings);
@@ -498,6 +498,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       autoActive = true;
       pinnedTier = tierFromModelId(ctx.model.id);
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
+      publishFooter();
     }
     await routeForPrompt(pi, ctx, event.prompt, Boolean(event.images?.length));
   });
