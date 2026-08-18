@@ -78,16 +78,21 @@ export async function classifyTurnComplexity(
       },
       {
         signal: controller.signal,
-        reasoningEffort: "off",
+        // No `reasoningEffort` here, deliberately: `ModelRegistry.complete()` passes it straight
+        // through to each API module's own raw request builder, and "off" isn't a valid value in
+        // any OpenAI-family reasoningEffort enum (openai-completions/-responses/azure-responses
+        // accept only minimal..max; openai-codex-responses accepts "none" instead of "off"). It
+        // only type-checked here because `model: Model<Api>` is the broad provider union, not the
+        // specific API this model actually uses. Concretely, passing "off" to an
+        // openai-codex-responses model sends a literally invalid `reasoning.effort: "off"` in the
+        // request body - verified: this is why the classifier came back with no text at all every
+        // time it landed on a codex model, silently defaulting every turn to "medium" instead of
+        // ever actually classifying it. Since there's no single sentinel valid across every
+        // provider's raw enum, the safe provider-agnostic choice is to not specify one at all and
+        // let each model use its own default; `CLASSIFY_TIMEOUT_MS` above still bounds worst-case
+        // cost/latency regardless of how much a model decides to reason before answering.
         cacheRetention: "none",
         sessionId: uuidv7(),
-        // No maxTokens cap: a small fixed budget (previously 20) is plenty for a non-reasoning
-        // model's one-word reply, but a reasoning-capable model can spend the entire budget on
-        // reasoning content before ever emitting the answer - `reasoningEffort: "off"` should
-        // suppress that, but isn't honored the same way by every provider/model, and when it
-        // isn't, a tight cap starves the visible reply to nothing rather than just some reasoning
-        // tokens (verified: this is what was happening). `CLASSIFY_TIMEOUT_MS` above is the real
-        // bound on how long/expensive a stuck classification call can get.
       },
     );
     const reply = response.content
