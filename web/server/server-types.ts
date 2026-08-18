@@ -75,6 +75,7 @@ export type SessionRecord = {
   queueSettleFallbackTimer?: ReturnType<typeof setTimeout>;
   queueDirtyWorker?: DirtySnapshotRetryWorker;
   managedRefreshTail?: Promise<void>;
+  compactionHistoryRefresh?: Promise<void>;
   managedIdentityOperation?: ClientCommandMessage["command"]["type"];
   managedWorktree?: ManagedWorktree;
   managedWorktreeScanned?: boolean;

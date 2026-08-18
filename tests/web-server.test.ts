@@ -31,6 +31,13 @@ import {
   WORKTREE_SESSION_ENTRY,
 } from "../web/server/worktrees.ts";
 
+// Every daemon startup would otherwise pay a full vite build before writing
+// its state file (CI installs with --ignore-scripts, so nothing pre-builds
+// web/dist). Let the first daemon build the assets once and every later
+// daemon in this suite reuse them, so startup stops racing build-server load.
+// Spawns below inherit this through `...process.env`.
+process.env.PI_WEB_SKIP_ASSET_BUILD = "1";
+
 let child: Bun.Subprocess | undefined;
 // A daemon this test expects another process to evict; reaped unconditionally
 // in afterEach so a failed eviction cannot leak it into later tests.
@@ -175,8 +182,16 @@ afterEach(async () => {
 });
 
 async function waitForState(path: string): Promise<ServerStateFile> {
-  const deadline = Date.now() + 8_000;
+  // Generous budget: the first daemon of a run may still need to build the
+  // client assets, and CI runners share CPUs with sibling jobs.
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
+    // Fail fast with the real cause when the daemon died instead of waiting
+    // out the whole budget for a state file that can never appear.
+    if (child?.exitCode !== null && child?.exitCode !== undefined)
+      throw new Error(
+        `web server exited with code ${child.exitCode} before creating its state file`,
+      );
     try {
       return JSON.parse(await readFile(path, "utf8")) as ServerStateFile;
     } catch {
@@ -1544,10 +1559,12 @@ async function compactionLifecycle(
 ): Promise<{
   states: Array<{ reason?: string; status: string }>;
   historyReset: boolean;
+  completionNotice: string | undefined;
 }> {
   return await new Promise((resolve, reject) => {
     const states: Array<{ reason?: string; status: string }> = [];
     let historyReset = false;
+    let completionNotice: string | undefined;
     const socket = browserSocket(url);
     let started = false;
     let ended = false;
@@ -1562,6 +1579,10 @@ async function compactionLifecycle(
         sessionId?: string;
         replace?: boolean;
         entries?: Array<{ id?: string; message?: { content?: unknown } }>;
+        event?: {
+          type?: string;
+          message?: { content?: Array<{ type?: string; text?: string }> };
+        };
         session?: {
           id?: string;
           status?: string;
@@ -1603,6 +1624,14 @@ async function compactionLifecycle(
           serialized.includes("after compaction") &&
           !serialized.includes("before compaction");
         return;
+      }
+      if (
+        message.type === "server.event" &&
+        message.event?.type === "message_end"
+      ) {
+        completionNotice = message.event.message?.content?.find(
+          (part) => part.type === "text",
+        )?.text;
       }
       if (
         message.type !== "server.session" ||
@@ -1656,7 +1685,7 @@ async function compactionLifecycle(
         states.push({ status: message.session.status });
         clearTimeout(timeout);
         socket.close();
-        resolve({ states, historyReset });
+        resolve({ states, historyReset, completionNotice });
       }
     };
     socket.onerror = () => {
@@ -3861,19 +3890,49 @@ test("native sessions route the web /compact command with optional instructions"
       )
         return;
       clearTimeout(timeout);
+      // Mirror the real native bridge: emit compaction_end before acking so the
+      // web server can broadcast "Compaction complete." to subscribed clients.
+      agent.send(
+        JSON.stringify({
+          type: "agent.event",
+          sessionId,
+          event: {
+            type: "compaction_end",
+            reason: "manual",
+            aborted: false,
+            willRetry: false,
+          },
+        }),
+      );
       resolve({
         requestId: message.requestId,
         customInstructions: message.command.customInstructions,
       });
     };
   });
-  const result = new Promise<void>((resolve, reject) => {
+  const result = new Promise<string | undefined>((resolve, reject) => {
     const client = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
     const requestId = crypto.randomUUID();
+    let completionNotice: string | undefined;
+    let responseError: string | undefined;
+    let responded = false;
+    let settled = false;
     const timeout = setTimeout(() => {
       client.close();
       reject(new Error("compact client response timed out"));
     }, 5_000);
+    const finish = () => {
+      if (settled) return;
+      // The completion notice is broadcast from the compaction_end handler and
+      // the command response arrives once the agent acks; accept either order.
+      if (!responseError && (!responded || completionNotice === undefined))
+        return;
+      clearTimeout(timeout);
+      client.close();
+      settled = true;
+      if (responseError) reject(new Error(responseError));
+      else resolve(completionNotice);
+    };
     client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
     client.onmessage = ({ data }) => {
       const message = JSON.parse(String(data)) as {
@@ -3881,8 +3940,13 @@ test("native sessions route the web /compact command with optional instructions"
         requestId?: string;
         success?: boolean;
         error?: string;
+        event?: {
+          type?: string;
+          message?: { content?: Array<{ type?: string; text?: string }> };
+        };
       };
-      if (message.type === "server.snapshot")
+      if (message.type === "server.snapshot") {
+        client.send(JSON.stringify({ type: "client.subscribe", sessionId }));
         client.send(
           JSON.stringify({
             type: "client.prompt",
@@ -3892,13 +3956,21 @@ test("native sessions route the web /compact command with optional instructions"
             images: [],
           }),
         );
+      }
+      if (
+        message.type === "server.event" &&
+        message.event?.type === "message_end"
+      ) {
+        completionNotice = message.event.message?.content?.find(
+          (part) => part.type === "text",
+        )?.text;
+        finish();
+      }
       if (message.type !== "server.response" || message.requestId !== requestId)
         return;
-      clearTimeout(timeout);
-      client.close();
-      message.success
-        ? resolve()
-        : reject(new Error(message.error ?? "compact failed"));
+      responded = true;
+      if (!message.success) responseError = message.error ?? "compact failed";
+      finish();
     };
   });
   const routed = await command;
@@ -3911,7 +3983,7 @@ test("native sessions route the web /compact command with optional instructions"
       data: { accepted: true },
     }),
   );
-  await result;
+  expect(await result).toBe("Compaction complete.");
   agent.close();
 }, 10_000);
 
@@ -4781,6 +4853,9 @@ test("native sessions expose queued-delivery ordering and context compaction lif
   expect(await compactionLifecycle(socketUrl, sessionId, agent)).toEqual({
     states: [{ reason: "overflow", status: "working" }, { status: "idle" }],
     historyReset: true,
+    // Overflow compaction completes server-side and announces "Compaction
+    // complete." to subscribed clients just like a manual /compact.
+    completionNotice: "Compaction complete.",
   });
   const compactedHistory = JSON.stringify(
     await waitForSemanticHistory(socketUrl, sessionId),

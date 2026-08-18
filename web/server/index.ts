@@ -788,6 +788,19 @@ async function hydrateGitMetadata(record: SessionRecord): Promise<void> {
   broadcastSessionToAll(record);
 }
 
+function broadcastCompactionNotice(record: SessionRecord): void {
+  // A managed bridge can replace compacted history after the compaction_end
+  // event settles. Wait for that trailing snapshot so the completion notice is
+  // not immediately wiped by the authoritative history replacement.
+  const refresh = record.compactionHistoryRefresh;
+  const deliver = () => {
+    if (sessions.get(record.id) !== record) return;
+    broadcastCompactionComplete(record);
+  };
+  if (refresh) void refresh.finally(deliver);
+  else deliver();
+}
+
 async function runRpcSessionCommand(
   record: SessionRecord,
   command: RpcSessionCommand,
@@ -907,6 +920,7 @@ const {
   cancelWebQueueWork,
   broadcastQueueDelivery,
   broadcastReloadComplete,
+  broadcastCompactionComplete,
   sendSessionState,
   flushWebQueue,
   routeQueueCommand,
@@ -1633,7 +1647,10 @@ async function createManagedSessionUnlocked(
         } satisfies ServerHistoryMessage);
         const runtime = record.managed;
         if (runtime) {
-          void runtime
+          // Track the trailing authoritative snapshot so any compaction_end
+          // notice can wait for it before broadcasting; otherwise the notice
+          // would be wiped by this history replacement on subscribed clients.
+          const refresh: Promise<void> = runtime
             .getMessages()
             .then(({ messages }) => {
               if (
@@ -1653,8 +1670,16 @@ async function createManagedSessionUnlocked(
               console.error(
                 `Could not refresh compacted history for ${record.id}: ${error instanceof Error ? error.message : String(error)}`,
               ),
-            );
+            )
+            .finally(() => {
+              if (record.compactionHistoryRefresh === refresh)
+                record.compactionHistoryRefresh = undefined;
+            });
+          record.compactionHistoryRefresh = refresh;
         }
+      }
+      if (event.type === "compaction_end" && event.aborted !== true) {
+        broadcastCompactionNotice(record);
       }
       broadcast(record.id, {
         type: "server.event",
@@ -2662,6 +2687,9 @@ async function handleAgentMessage(
           record.agentRunning = false;
           scheduleQueueSettleFallback(record);
           lifecycleChanged = true;
+        }
+        if (event.event.aborted !== true) {
+          broadcastCompactionNotice(record);
         }
       }
       if (
@@ -3744,6 +3772,16 @@ async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
 // web/dist is not checked in; rebuild it on every startup so a long-running
 // server always serves the client assets that match the checked-out source.
 async function buildWebClientAssets(): Promise<void> {
+  // Test suites opt out of the per-startup rebuild: they spawn ~30 daemons per
+  // run and never exercise asset freshness, and each rebuild puts the state
+  // file behind a full vite build. Skip only when assets already exist.
+  if (process.env.PI_WEB_SKIP_ASSET_BUILD === "1") {
+    try {
+      if (statSync(join(distDir, "index.html")).isFile()) return;
+    } catch {
+      // No built assets yet; fall through and build them.
+    }
+  }
   console.log("Building web client assets...");
   const build = Bun.spawn({
     cmd: ["bun", "run", "webBuild"],
