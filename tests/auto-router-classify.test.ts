@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { classifyTurnComplexity } from "../extensions/auto-router-classify.ts";
+import { CLASSIFY_MAX_TOKENS, classifyTurnComplexity } from "../extensions/auto-router-classify.ts";
 import type { AutoRouterEffortLevel } from "../extensions/auto-router-settings.ts";
 
 const MODEL = { provider: "prov", id: "classifier" } as unknown as Model<Api>;
@@ -16,6 +16,27 @@ function registryReplying(
       usage,
     }),
   } as unknown as ModelRegistry;
+}
+
+/** Captures the raw options object passed to `complete()`, so a test can assert on the actual
+ * request shape rather than just the parsed result - the only way to catch a regression like the
+ * invalid `reasoningEffort: "off"` this suite didn't previously guard against. */
+function registryCapturingOptions(text: string): {
+  registry: ModelRegistry;
+  options: () => Record<string, unknown> | undefined;
+} {
+  let captured: Record<string, unknown> | undefined;
+  const registry = {
+    complete: async (
+      _model: Model<Api>,
+      _context: unknown,
+      options: Record<string, unknown>,
+    ) => {
+      captured = options;
+      return { content: [{ type: "text", text }], usage: undefined };
+    },
+  } as unknown as ModelRegistry;
+  return { registry, options: () => captured };
 }
 
 function throwingRegistry(): ModelRegistry {
@@ -134,4 +155,17 @@ test("classifyTurnComplexity notes attached images in the classification prompt"
 
   await classifyTurnComplexity(registry, MODEL, "describe this screenshot", true);
   expect(capturedText).toContain("attached images");
+});
+
+test("classifyTurnComplexity does not send reasoningEffort, and caps output at CLASSIFY_MAX_TOKENS", async () => {
+  const { registry, options } = registryCapturingOptions("medium");
+
+  await classifyTurnComplexity(registry, MODEL, "do something", false);
+
+  // "off" isn't a valid reasoningEffort value for any OpenAI-family API - regression coverage
+  // for that bug: the field must be entirely absent, not just falsy, since some raw request
+  // builders treat "any value present" as "send a reasoning object" regardless of its content.
+  expect(options()).not.toHaveProperty("reasoningEffort");
+  // Bounded, but not the old fixed 20 that starved reasoning-capable models to an empty reply.
+  expect(options()?.maxTokens).toBe(CLASSIFY_MAX_TOKENS);
 });

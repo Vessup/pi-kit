@@ -4,6 +4,16 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AutoRouterEffortLevel } from "./auto-router-settings.js";
 
 const CLASSIFY_TIMEOUT_MS = 15_000;
+/**
+ * Generous compared to the single word this call actually needs, but bounded: a reasoning-capable
+ * classifier model can spend real output budget on reasoning content before ever emitting the
+ * answer, and the previous fixed cap of 20 starved that to nothing (verified). Uncapped isn't the
+ * right fix either though - `CLASSIFY_TIMEOUT_MS` only bounds wall-clock time, not tokens, so a
+ * model that reasons at length but still finishes quickly could otherwise run up real cost on what
+ * is supposed to be a cheap per-turn triage call. This leaves room for a few hundred tokens of
+ * reasoning plus the answer while still capping the worst case.
+ */
+export const CLASSIFY_MAX_TOKENS = 2_000;
 const VALID_LEVELS: readonly AutoRouterEffortLevel[] = [
   "minimal",
   "low",
@@ -99,10 +109,10 @@ export async function classifyTurnComplexity(
         // time it landed on a codex model, silently defaulting every turn to "medium" instead of
         // ever actually classifying it. Since there's no single sentinel valid across every
         // provider's raw enum, the safe provider-agnostic choice is to not specify one at all and
-        // let each model use its own default; `CLASSIFY_TIMEOUT_MS` above still bounds worst-case
-        // cost/latency regardless of how much a model decides to reason before answering.
+        // let each model use its own default.
         cacheRetention: "none",
         sessionId: uuidv7(),
+        maxTokens: CLASSIFY_MAX_TOKENS,
       },
     );
     const reply = response.content
