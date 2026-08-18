@@ -3772,6 +3772,16 @@ async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
 // web/dist is not checked in; rebuild it on every startup so a long-running
 // server always serves the client assets that match the checked-out source.
 async function buildWebClientAssets(): Promise<void> {
+  // Test suites opt out of the per-startup rebuild: they spawn ~30 daemons per
+  // run and never exercise asset freshness, and each rebuild puts the state
+  // file behind a full vite build. Skip only when assets already exist.
+  if (process.env.PI_WEB_SKIP_ASSET_BUILD === "1") {
+    try {
+      if (statSync(join(distDir, "index.html")).isFile()) return;
+    } catch {
+      // No built assets yet; fall through and build them.
+    }
+  }
   console.log("Building web client assets...");
   const build = Bun.spawn({
     cmd: ["bun", "run", "webBuild"],

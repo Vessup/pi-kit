@@ -31,6 +31,13 @@ import {
   WORKTREE_SESSION_ENTRY,
 } from "../web/server/worktrees.ts";
 
+// Every daemon startup would otherwise pay a full vite build before writing
+// its state file (CI installs with --ignore-scripts, so nothing pre-builds
+// web/dist). Let the first daemon build the assets once and every later
+// daemon in this suite reuse them, so startup stops racing build-server load.
+// Spawns below inherit this through `...process.env`.
+process.env.PI_WEB_SKIP_ASSET_BUILD = "1";
+
 let child: Bun.Subprocess | undefined;
 // A daemon this test expects another process to evict; reaped unconditionally
 // in afterEach so a failed eviction cannot leak it into later tests.
@@ -175,8 +182,16 @@ afterEach(async () => {
 });
 
 async function waitForState(path: string): Promise<ServerStateFile> {
-  const deadline = Date.now() + 8_000;
+  // Generous budget: the first daemon of a run may still need to build the
+  // client assets, and CI runners share CPUs with sibling jobs.
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
+    // Fail fast with the real cause when the daemon died instead of waiting
+    // out the whole budget for a state file that can never appear.
+    if (child?.exitCode !== null && child?.exitCode !== undefined)
+      throw new Error(
+        `web server exited with code ${child.exitCode} before creating its state file`,
+      );
     try {
       return JSON.parse(await readFile(path, "utf8")) as ServerStateFile;
     } catch {
