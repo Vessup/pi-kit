@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +26,7 @@ import type {
   WebSession,
 } from "../web/protocol.js";
 import { mergeWebSubagentUpdates, WEB_STATE_VERSION } from "../web/protocol.js";
+import { isConfirmedMissingPath } from "../web/server/file-presence.js";
 import { managedWorktreeFromEntries } from "../web/server/worktrees.js";
 import {
   expandSlashCommand,
@@ -331,22 +331,26 @@ export function parseDaemonHealth(
   return payload as DaemonHealthPayload;
 }
 
-/** Healthy enough to adopt: a daemon that can actually serve the web app. */
-export function daemonCanServeWebApp(payload: DaemonHealthPayload): boolean {
-  return payload.assets === true;
+/** Healthy enough to adopt: the CLI↔daemon bridge only needs the WS/API
+ * surface, not the browser bundle. A daemon is rejected only when its own
+ * checkout is confirmed gone, since that daemon can never serve anything
+ * again — blocking adoption on a stale web/dist would break /web, session
+ * mirroring, and /web-tailscale for otherwise-healthy daemons. */
+export function daemonIsAdoptable(payload: DaemonHealthPayload): boolean {
+  const root = payload.root ?? "";
+  return !(root !== "" && isConfirmedMissingPath(root));
 }
 
-/**
- * A daemon reporting a missing build over a checkout that still exists cannot
- * be repaired by respawning; surface its root so the user can rebuild.
- */
-export function daemonBuildIsBroken(payload: DaemonHealthPayload): boolean {
-  return (
-    payload.assets === false &&
-    typeof payload.root === "string" &&
-    payload.root.length > 0 &&
-    existsSync(payload.root)
-  );
+/** A degraded (stale/failed) browser build over a live checkout. */
+export function daemonBuildIsDegraded(payload: DaemonHealthPayload): boolean {
+  return payload.assets === false;
+}
+
+function warnIfDegraded(payload: DaemonHealthPayload | undefined): void {
+  if (payload && daemonBuildIsDegraded(payload))
+    console.warn(
+      `Pi web server cannot serve its web app (run 'bun run webBuild' in ${payload.root || "its checkout"} and restart it); session bridging continues normally.`,
+    );
 }
 
 async function fetchDaemonHealth(
@@ -362,19 +366,14 @@ async function fetchDaemonHealth(
   }
 }
 
-function assertServable(payload: DaemonHealthPayload | undefined): void {
-  if (payload && daemonBuildIsBroken(payload))
-    throw new Error(
-      `Pi web server is running but cannot serve its web app from ${payload.root}. Run 'bun run webBuild' in that checkout (or reinstall the pi package) and restart this session.`,
-    );
-}
-
 async function ensureServer(): Promise<ServerStateFile> {
   const current = await readServerState();
   if (current) {
     const payload = await fetchDaemonHealth(current);
-    if (payload && daemonCanServeWebApp(payload)) return current;
-    assertServable(payload);
+    if (payload && daemonIsAdoptable(payload)) {
+      warnIfDegraded(payload);
+      return current;
+    }
   }
 
   const child = spawn("bun", ["run", SERVER_ENTRY], {
@@ -395,8 +394,10 @@ async function ensureServer(): Promise<ServerStateFile> {
     const state = await readServerState();
     if (!state) continue;
     const payload = await fetchDaemonHealth(state);
-    if (payload && daemonCanServeWebApp(payload)) return state;
-    assertServable(payload);
+    if (payload && daemonIsAdoptable(payload)) {
+      warnIfDegraded(payload);
+      return state;
+    }
   }
   throw new Error(
     "Pi web server did not become ready. Make sure Bun is installed and web assets are built.",

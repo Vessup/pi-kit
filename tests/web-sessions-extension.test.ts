@@ -6,8 +6,8 @@ import {
   abortSessionAndSubagents,
   applySubagentStatusToSession,
   applyTailscaleSettingTransaction,
-  daemonBuildIsBroken,
-  daemonCanServeWebApp,
+  daemonBuildIsDegraded,
+  daemonIsAdoptable,
   isScopedModelAllowed,
   parseDaemonHealth,
   splitWebWorktreeCommandArgs,
@@ -30,31 +30,44 @@ test("the bridge only adopts daemons that can serve the web app", () => {
   expect(
     parseDaemonHealth({ ok: true, pid: 7, assets: true, root: "/a" }, state),
   ).toMatchObject({ assets: true });
-  expect(daemonCanServeWebApp({ ok: true, pid: 7, assets: true })).toBe(true);
-  expect(daemonCanServeWebApp({ ok: true, pid: 7 })).toBe(false);
-  expect(daemonCanServeWebApp({ ok: true, pid: 7, assets: false })).toBe(false);
 });
 
-test("a daemon with a missing build over an existing checkout is reported, not respawned", async () => {
-  const tempDir = await mkdtemp(join(tmpdir(), "pi-kit-daemon-health-"));
+test("the bridge adopts every healthy daemon except one whose checkout is gone", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "pi-kit-daemon-adopt-"));
   try {
     const checkout = join(tempDir, "checkout");
     await Bun.write(join(checkout, "keep"), "");
+    // Full health: adoptable.
     expect(
-      daemonBuildIsBroken({ ok: true, pid: 7, assets: false, root: checkout }),
+      daemonIsAdoptable({ ok: true, pid: 7, assets: true, root: checkout }),
     ).toBe(true);
-    // A vanished checkout is handled by daemon eviction instead.
+    // Degraded browser build over a live checkout: the WS bridge still works,
+    // so the daemon stays adoptable (and is flagged degraded for a warning).
     expect(
-      daemonBuildIsBroken({
+      daemonIsAdoptable({ ok: true, pid: 7, assets: false, root: checkout }),
+    ).toBe(true);
+    expect(
+      daemonBuildIsDegraded({
+        ok: true,
+        pid: 7,
+        assets: false,
+        root: checkout,
+      }),
+    ).toBe(true);
+    expect(
+      daemonBuildIsDegraded({ ok: true, pid: 7, assets: true, root: checkout }),
+    ).toBe(false);
+    // Legacy daemons report neither field: adoptable (pre-change behavior).
+    expect(daemonIsAdoptable({ ok: true, pid: 7 })).toBe(true);
+    // A daemon whose checkout is confirmed gone can never serve again.
+    expect(
+      daemonIsAdoptable({
         ok: true,
         pid: 7,
         assets: false,
         root: join(tempDir, "gone"),
       }),
     ).toBe(false);
-    expect(daemonBuildIsBroken({ ok: true, pid: 7, assets: false })).toBe(
-      false,
-    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

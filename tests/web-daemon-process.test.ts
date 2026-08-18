@@ -6,6 +6,7 @@ import {
   type DaemonHealth,
   daemonIsEvictable,
   daemonServesWebApps,
+  incumbentDisposition,
   isPidAlive,
   isPiWebDaemonPid,
   matchesPiWebDaemonCommand,
@@ -35,9 +36,26 @@ test("a daemon whose checkout disappeared is evictable", async () => {
     expect(daemonIsEvictable(health({ root: vanished }))).toBe(false);
     await rm(vanished, { recursive: true, force: true });
     expect(daemonIsEvictable(health({ root: vanished }))).toBe(true);
+    // A checkout that exists with a failed build is kept, not evicted.
+    expect(daemonIsEvictable(health({ root: tempDir, assets: false }))).toBe(
+      false,
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("incumbent disposition collapses serve/evict/keep for both ownership paths", () => {
+  expect(incumbentDisposition(health())).toBe("serve");
+  expect(
+    incumbentDisposition(
+      health({ root: "/definitely/not/here", assets: false }),
+    ),
+  ).toBe("evict");
+  expect(
+    incumbentDisposition(health({ root: process.cwd(), assets: false })),
+  ).toBe("keep");
+  expect(incumbentDisposition(health({ assets: false }))).toBe("evict");
 });
 
 test("daemons that cannot prove they serve the web app are evictable exactly once replaced", () => {

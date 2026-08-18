@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { isConfirmedMissingPath } from "./file-presence.js";
 
 /**
  * Ownership decisions about the machine-wide Pi web daemon. A daemon is only
@@ -45,7 +45,7 @@ async function processCommand(pid: number): Promise<string | undefined> {
   }
   try {
     const child = Bun.spawn({
-      cmd: ["ps", "-p", String(pid), "-o", "command="],
+      cmd: ["ps", "-ww", "-p", String(pid), "-o", "command="],
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -141,15 +141,34 @@ export function daemonServesWebApps(health: DaemonHealth): boolean {
 
 /**
  * A daemon is evictable when its own checkout no longer exists, so it can
- * never serve the app shell again. Daemons that predate asset reporting
- * cannot prove they serve the web app either; a newer spawn replaces them
- * once, after which the replacement reports its own assets. A daemon that
- * reports a missing build over an existing checkout is NOT evictable —
- * respawning from the same checkout would fail the same way.
+ * never serve the app shell again. Only a filesystem-confirmed absence
+ * (ENOENT) counts: a transient EACCES/EIO on the checkout root must never
+ * read as "deleted" and get a healthy daemon killed. Daemons that predate
+ * asset reporting cannot prove they serve the web app either; a newer spawn
+ * replaces them once, after which the replacement reports its own assets. A
+ * daemon reporting a missing build over an existing checkout is NOT evictable
+ * — respawning from the same checkout would fail the same way.
  */
 export function daemonIsEvictable(health: DaemonHealth): boolean {
-  if (health.root) return !existsSync(health.root);
+  if (health.root) return isConfirmedMissingPath(health.root);
   return health.assets !== true;
+}
+
+/** What a newly starting daemon should do with a verified incumbent. */
+export type IncumbentDisposition = "serve" | "evict" | "keep";
+
+/**
+ * The single decision shared by both ownership paths (state-file and
+ * port-probe): a serving incumbent is deferred to, a provably dead one is
+ * evicted, and anything else (failed build over an existing checkout) is kept
+ * in place. Duplicating this logic is how the two paths previously disagreed.
+ */
+export function incumbentDisposition(
+  health: DaemonHealth,
+): IncumbentDisposition {
+  if (daemonServesWebApps(health)) return "serve";
+  if (daemonIsEvictable(health)) return "evict";
+  return "keep";
 }
 
 async function waitForPidExit(
@@ -169,9 +188,15 @@ async function waitForPidExit(
  * when the pid could not be verified or did not exit; callers must then leave
  * shared discovery state untouched rather than steal it.
  */
+// A daemon under eviction may be mid-turn on managed sessions; its own
+// shutdown policy waits for them. Give it a generous graceful window before
+// escalating — bounded, because a new daemon's startup must not hang forever —
+// and re-verify the pid still names our daemon before the uncatchable signal.
+const GRACEFUL_TERMINATION_MS = 30_000;
+
 export async function terminatePiWebDaemon(
   pid: number,
-  timeoutMs = 5_000,
+  timeoutMs = GRACEFUL_TERMINATION_MS,
 ): Promise<boolean> {
   if (!isPidAlive(pid)) return true;
   if (!(await isPiWebDaemonPid(pid))) return false;
@@ -181,6 +206,9 @@ export async function terminatePiWebDaemon(
     return !isPidAlive(pid);
   }
   if (await waitForPidExit(pid, timeoutMs)) return true;
+  // The pid may have exited and been recycled between the wait and now; the
+  // uncatchable signal must never reach an unrelated process.
+  if (!(await isPiWebDaemonPid(pid))) return false;
   try {
     process.kill(pid, "SIGKILL");
   } catch {

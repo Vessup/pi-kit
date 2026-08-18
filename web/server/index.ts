@@ -78,8 +78,7 @@ import {
 import { replacementFromEntries } from "../worktree-replacement.js";
 import {
   type DaemonHealth,
-  daemonIsEvictable,
-  daemonServesWebApps,
+  incumbentDisposition,
   isPidAlive,
   isPiWebDaemonPid,
   terminatePiWebDaemon,
@@ -3599,13 +3598,21 @@ async function cleanupAndExit(code = 0): Promise<void> {
   // Stop admitting queue work and drain each per-session mutation tail before the
   // final snapshot. This prevents a late mutation from racing or following flush.
   const records = [...sessions.values()];
-  await Promise.all(records.map((record) => quiesceQueueMutations(record)));
+  // A single rejected mutation tail must not skip the remaining cleanup or the
+  // final exit; each step is individually best-effort.
+  await Promise.all(
+    records.map((record) =>
+      quiesceQueueMutations(record).catch(() => undefined),
+    ),
+  );
   // Accepted queue items are removed in memory before their durable snapshot may
   // finish. Drain any existing write before the final write, all within one bound.
   await Promise.all(
     records.map(async (record) => {
       if (record.queueDirtyWorker)
-        await record.queueDirtyWorker.flushAndCancel(1_000);
+        await record.queueDirtyWorker
+          .flushAndCancel(1_000)
+          .catch(() => undefined);
     }),
   );
   for (const record of sessions.values()) {
@@ -3650,6 +3657,28 @@ type DaemonOwnership =
   | { action: "abort"; reason: string }
   | { action: "defer"; owner: DaemonHealth; republished: boolean };
 
+async function ownershipForIncumbent(
+  health: DaemonHealth,
+  republished: boolean,
+): Promise<DaemonOwnership> {
+  switch (incumbentDisposition(health)) {
+    case "serve":
+    case "keep":
+      // Defer to the incumbent (keep = failed build over an existing
+      // checkout; respawning from the same checkout would fail identically).
+      return { action: "defer", owner: health, republished };
+    case "evict": {
+      const stopped = await terminatePiWebDaemon(health.pid);
+      if (stopped) return { action: "own" };
+      // The incumbent still holds the port; never race it for the listener.
+      return {
+        action: "abort",
+        reason: `pid ${health.pid} still holds port ${health.port} and could not be stopped`,
+      };
+    }
+  }
+}
+
 async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
   const existing = readStateFile(stateFilePath);
   if (existing && existing.pid !== process.pid && isPidAlive(existing.pid)) {
@@ -3671,17 +3700,8 @@ async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
           reason: `pid ${existing.pid} still holds port ${existing.port} and could not be stopped`,
         };
       }
-      if (daemonServesWebApps(health))
-        return { action: "defer", owner: health, republished: false };
-      if (daemonIsEvictable(health)) {
-        const stopped = await terminatePiWebDaemon(existing.pid);
-        if (stopped) return { action: "own" };
-        // Could not stop it; never steal discovery from a live daemon.
-        return { action: "defer", owner: health, republished: false };
-      }
-      // Alive with an existing checkout but unservable assets (failed build):
-      // defer so the owner can recover instead of churning replacements.
-      return { action: "defer", owner: health, republished: false };
+      // The state file already names the incumbent, so it needs no rewrite.
+      return ownershipForIncumbent(health, false);
     }
     return { action: "own" };
   }
@@ -3695,14 +3715,7 @@ async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
       isPidAlive(health.pid) &&
       (await isPiWebDaemonPid(health.pid))
     ) {
-      if (daemonServesWebApps(health))
-        return { action: "defer", owner: health, republished: true };
-      if (daemonIsEvictable(health) && (await terminatePiWebDaemon(health.pid)))
-        return { action: "own" };
-      // A live daemon holds this port (for example a failed build over an
-      // existing checkout). Never race it for the listener; restore its state
-      // file so sessions find the incumbent, matching the state-file path.
-      return { action: "defer", owner: health, republished: true };
+      return ownershipForIncumbent(health, true);
     }
   }
   return { action: "own" };
@@ -3726,6 +3739,19 @@ async function buildWebClientAssets(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // Signals must be handled before ownership resolution: eviction can wait a
+  // long time for the incumbent's graceful exit, and an interrupt during that
+  // window would otherwise kill this process with default handlers mid-eviction.
+  process.on("SIGINT", () => void cleanupAndExit(0));
+  process.on("SIGTERM", () => void cleanupAndExit(0));
+  process.on("exit", () => {
+    try {
+      if (readStateFile(stateFilePath)?.pid === process.pid)
+        rmSync(stateFilePath, { force: true });
+    } catch {
+      // ignore
+    }
+  });
   const ownership = await resolveDaemonOwnership();
   if (ownership.action === "abort") {
     console.error(`pi web server could not start: ${ownership.reason}`);
@@ -3837,16 +3863,6 @@ async function main(): Promise<void> {
   // state with the final tailnet URL. Simultaneous startup losers never acquire
   // the port and therefore cannot overwrite the winning server's state.
   await configureTailscaleServe();
-  process.on("SIGINT", () => void cleanupAndExit(0));
-  process.on("SIGTERM", () => void cleanupAndExit(0));
-  process.on("exit", () => {
-    try {
-      if (readStateFile(stateFilePath)?.pid === process.pid)
-        rmSync(stateFilePath, { force: true });
-    } catch {
-      // ignore
-    }
-  });
   console.log(`pi web server listening on http://${host}:${port}`);
   missingSessionReconcileTimer = setInterval(
     () => void reconcileMissingSessionFiles(),
