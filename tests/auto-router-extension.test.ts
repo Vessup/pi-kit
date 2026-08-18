@@ -10,6 +10,7 @@ import type {
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import autoRouter, { escapeTableCell } from "../extensions/auto-router.ts";
+import { SAVE_DEBOUNCE_MS } from "../extensions/auto-router-health.ts";
 import type { AutoRouterSettings } from "../extensions/auto-router-settings.ts";
 
 test("escapeTableCell neutralizes both pipes and line breaks, so one bad reply can't break the rest of the table", () => {
@@ -37,6 +38,16 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  // The debounced save timer is unref'd, so it never blocks the process from exiting - but if
+  // this suite's own run happens to keep the process alive past SAVE_DEBOUNCE_MS anyway (e.g.
+  // a larger `bun test` invocation still running other files), a timer scheduled by one of this
+  // file's last tests can still fire *after* this hook would otherwise have already deleted
+  // PI_CODING_AGENT_DIR and removed its temp dir - at which point `statePath()` falls back to
+  // the real default `~/.pi/agent`, and the save actually corrupts the developer's real global
+  // auto-router-state.json with this suite's fixture data (verified: it happened). Waiting out
+  // the debounce window here first, before touching the env var or any directory, guarantees
+  // every such timer fires while it's still pointed at a real (about-to-be-removed) temp dir.
+  await new Promise((resolve) => setTimeout(resolve, SAVE_DEBOUNCE_MS + 500));
   delete process.env[ENV_VAR];
   await Promise.all(usedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
