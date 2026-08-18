@@ -3647,6 +3647,7 @@ function webAssetsServable(): boolean {
  */
 type DaemonOwnership =
   | { action: "own" }
+  | { action: "abort"; reason: string }
   | { action: "defer"; owner: DaemonHealth; republished: boolean };
 
 async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
@@ -3661,9 +3662,14 @@ async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
         3_000,
       );
       if (!health) {
-        // Verified daemon that never answers: wedged. Replace it.
-        await terminatePiWebDaemon(existing.pid);
-        return { action: "own" };
+        // Verified daemon that never answers: wedged. Replace it, but only
+        // claim ownership when it actually stopped; otherwise another process
+        // still holds the port and Bun.serve would fail to listen.
+        if (await terminatePiWebDaemon(existing.pid)) return { action: "own" };
+        return {
+          action: "abort",
+          reason: `pid ${existing.pid} still holds port ${existing.port} and could not be stopped`,
+        };
       }
       if (daemonServesWebApps(health))
         return { action: "defer", owner: health, republished: false };
@@ -3693,6 +3699,10 @@ async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
         return { action: "defer", owner: health, republished: true };
       if (daemonIsEvictable(health) && (await terminatePiWebDaemon(health.pid)))
         return { action: "own" };
+      // A live daemon holds this port (for example a failed build over an
+      // existing checkout). Never race it for the listener; restore its state
+      // file so sessions find the incumbent, matching the state-file path.
+      return { action: "defer", owner: health, republished: true };
     }
   }
   return { action: "own" };
@@ -3717,6 +3727,10 @@ async function buildWebClientAssets(): Promise<void> {
 
 async function main(): Promise<void> {
   const ownership = await resolveDaemonOwnership();
+  if (ownership.action === "abort") {
+    console.error(`pi web server could not start: ${ownership.reason}`);
+    process.exit(1);
+  }
   if (ownership.action === "defer") {
     // Another daemon already owns machine-wide discovery. Restoring its state
     // file (when missing) lets Pi sessions find it; never touch its Tailscale

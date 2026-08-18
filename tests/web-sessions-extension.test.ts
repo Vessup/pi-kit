@@ -12,9 +12,15 @@ import {
   parseDaemonHealth,
   splitWebWorktreeCommandArgs,
 } from "../extensions/web-sessions.ts";
+import type { ServerStateFile } from "../web/protocol.ts";
 
 test("the bridge only adopts daemons that can serve the web app", () => {
-  const state = { pid: 7, port: 31415, startedAt: 1, version: 1 };
+  const state: ServerStateFile = {
+    pid: 7,
+    port: 31415,
+    startedAt: 1,
+    version: 1,
+  };
   expect(parseDaemonHealth({ ok: true, pid: 7 }, state)).toEqual({
     ok: true,
     pid: 7,

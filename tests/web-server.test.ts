@@ -31,6 +31,9 @@ import {
 } from "../web/server/worktrees.ts";
 
 let child: Bun.Subprocess | undefined;
+// A daemon this test expects another process to evict; reaped unconditionally
+// in afterEach so a failed eviction cannot leak it into later tests.
+let evictedDaemon: Bun.Subprocess | undefined;
 let tempDir: string | undefined;
 
 function session(
@@ -154,6 +157,15 @@ afterEach(async () => {
     child.kill("SIGTERM");
     await child.exited.catch(() => undefined);
     child = undefined;
+  }
+  if (evictedDaemon) {
+    try {
+      evictedDaemon.kill("SIGKILL");
+      await evictedDaemon.exited.catch(() => undefined);
+    } catch {
+      // Already gone via eviction.
+    }
+    evictedDaemon = undefined;
   }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
@@ -4951,6 +4963,9 @@ test("a daemon whose checkout disappeared is replaced by the next spawn", async 
   expect(shell.status).toBe(404);
 
   await rm(vanishingRoot, { recursive: true, force: true });
+  // Keep an explicit handle on the doomed daemon: if eviction does not
+  // happen, afterEach must still reap it instead of leaking the process.
+  evictedDaemon = child;
   const replacement = startServer(process.cwd());
   child = replacement;
   let successor: ServerStateFile | undefined;

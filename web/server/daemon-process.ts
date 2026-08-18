@@ -49,25 +49,43 @@ async function processCommand(pid: number): Promise<string | undefined> {
       stdout: "pipe",
       stderr: "ignore",
     });
-    const [output, code] = await Promise.all([
-      new Response(child.stdout as ReadableStream<Uint8Array>).text(),
-      child.exited,
-    ]);
-    return code === 0 ? output.trim() : undefined;
+    // ps is only a fallback on the ownership critical path; never let a hung
+    // invocation block daemon startup.
+    const timeout = setTimeout(() => child.kill(), 2_000);
+    try {
+      const [output, code] = await Promise.all([
+        new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+        child.exited,
+      ]);
+      return code === 0 ? output.trim() : undefined;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return undefined;
   }
 }
 
-/** Verify a pid still belongs to a Pi web daemon before signaling it. */
-export async function isPiWebDaemonPid(pid: number): Promise<boolean> {
-  const command = await processCommand(pid);
-  if (!command) return false;
+/**
+ * Whether a command line names a Pi web daemon. The executable must be bun
+ * itself, so a recycled pid running an unrelated command that merely mentions
+ * the entrypoint path (an editor, a search tool) is never treated as ours and
+ * never signaled.
+ */
+export function matchesPiWebDaemonCommand(command: string): boolean {
+  const executable = command.trim().split(/\s+/, 1)[0] ?? "";
+  if (!/(^|\/)bun(-[^/\s]+)?$/.test(executable)) return false;
   // Match both the direct entrypoint and the package "webServer" script so a
   // daemon started either way is recognized as ours.
   return (
     command.includes("web/server/index.ts") || /\bwebServer\b/.test(command)
   );
+}
+
+/** Verify a pid still belongs to a Pi web daemon before signaling it. */
+export async function isPiWebDaemonPid(pid: number): Promise<boolean> {
+  const command = await processCommand(pid);
+  return command !== undefined && matchesPiWebDaemonCommand(command);
 }
 
 export async function probeDaemonHealth(

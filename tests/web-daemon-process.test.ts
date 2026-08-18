@@ -8,6 +8,7 @@ import {
   daemonServesWebApps,
   isPidAlive,
   isPiWebDaemonPid,
+  matchesPiWebDaemonCommand,
 } from "../web/server/daemon-process.ts";
 
 function health(overrides: Partial<DaemonHealth> = {}): DaemonHealth {
@@ -63,4 +64,28 @@ test("pid verification reads a real command line and only matches Pi web daemons
   // command line (via /proc or ps) and correctly report it is not a daemon.
   expect(await isPiWebDaemonPid(process.pid)).toBe(false);
   expect(await isPiWebDaemonPid(999_999_999)).toBe(false);
+});
+
+test("daemon command matching requires bun itself as the executable", () => {
+  expect(matchesPiWebDaemonCommand("bun run /repo/web/server/index.ts")).toBe(
+    true,
+  );
+  expect(
+    matchesPiWebDaemonCommand(
+      "/Users/x/.bun/bin/bun run /repo/web/server/index.ts",
+    ),
+  ).toBe(true);
+  expect(matchesPiWebDaemonCommand("bun run webServer")).toBe(true);
+  expect(matchesPiWebDaemonCommand("bun --hot /repo/web/server/index.ts")).toBe(
+    true,
+  );
+  // A recycled pid running an unrelated command that merely mentions the
+  // entrypoint must never be mistaken for the daemon.
+  expect(matchesPiWebDaemonCommand("vim web/server/index.ts")).toBe(false);
+  expect(matchesPiWebDaemonCommand("rg web/server/index.ts")).toBe(false);
+  expect(matchesPiWebDaemonCommand("node web/server/index.ts")).toBe(false);
+  expect(matchesPiWebDaemonCommand("bun test tests/web-server.test.ts")).toBe(
+    false,
+  );
+  expect(matchesPiWebDaemonCommand("")).toBe(false);
 });
