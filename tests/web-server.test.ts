@@ -3758,6 +3758,7 @@ for await (const line of lines) {
     body: JSON.stringify({ cwd: repository }),
   });
   expect(baseResponse.status).toBe(201);
+  const base = (await baseResponse.json()) as { session: { id: string } };
   expect(await readFile(piStartedMarker, "utf8")).toBe("started");
   // main is already checked out in the primary checkout, so this enters it.
   const failed = await fetch(`${origin}/api/sessions`, {
@@ -3777,8 +3778,14 @@ for await (const line of lines) {
   const listed = await fetch(`${origin}/api/sessions`, {
     headers: { Origin: origin },
   });
-  const payload = (await listed.json()) as { sessions: unknown[] };
-  expect(payload.sessions).toHaveLength(1);
+  const payload = (await listed.json()) as {
+    sessions: Array<{ id: string }>;
+  };
+  // The stale initial session for the failed entry is cleaned up; only the
+  // base session survives.
+  expect(payload.sessions.map((session) => session.id)).toEqual([
+    base.session.id,
+  ]);
 }, 15_000);
 
 test("native sessions route the web /compact command with optional instructions", async () => {
