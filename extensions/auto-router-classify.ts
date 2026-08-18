@@ -41,6 +41,14 @@ export type ClassificationResult = {
    * reply" after the fact, since the model call itself is never persisted anywhere else.
    */
   reply: string;
+  /**
+   * True when `level` is the `medium` default because the classifier call errored, timed out, or
+   * came back with no recognizable level word - not because the model actually judged the turn to
+   * be medium complexity. Callers should surface this (a notification, a log line) rather than let
+   * it pass as an ordinary classification: silently defaulting with no visible signal is exactly
+   * what made a real, sustained classifier failure indistinguishable from normal routing.
+   */
+  failed: boolean;
 };
 
 function numeric(value: unknown): number {
@@ -50,7 +58,9 @@ function numeric(value: unknown): number {
 /**
  * Classify a turn's complexity using the given (default/medium-tier) model. Never throws and
  * never blocks indefinitely: a bounded timeout, a provider error, or an unparseable reply all
- * fall back to `medium` so classification can never stall or break the user's turn.
+ * fall back to `medium` so classification can never stall or break the user's turn - but that
+ * fallback is reported via `failed: true` rather than silently, so a caller can still tell a real
+ * judgment apart from a classifier that never actually answered.
  */
 export async function classifyTurnComplexity(
   modelRegistry: ModelRegistry,
@@ -120,10 +130,20 @@ export async function classifyTurnComplexity(
           cost: numeric(response.usage.cost?.total),
         }
       : undefined;
-    return { level, usage, reply: reply || "(empty reply)" };
+    return {
+      level,
+      usage,
+      reply: reply || "(empty reply)",
+      // `String.match()` returns `null`, not `undefined`, when nothing matches.
+      failed: match === null,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { level: DEFAULT_LEVEL, reply: `(classification failed: ${message})` };
+    return {
+      level: DEFAULT_LEVEL,
+      reply: `(classification failed: ${message})`,
+      failed: true,
+    };
   } finally {
     clearTimeout(timeout);
   }

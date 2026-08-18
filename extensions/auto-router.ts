@@ -378,6 +378,16 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
         if (result.usage) {
           healthStore.recordSuccess(modelKey(classifierModel), result.usage);
         }
+        // The classifier defaulting to `medium` isn't a real judgment of this turn's complexity
+        // when it failed to answer at all - that's silently indistinguishable from a genuine
+        // medium verdict otherwise, which is exactly what let a sustained classifier failure go
+        // unnoticed. Surface it visibly rather than let it pass as ordinary routing.
+        if (result.failed && ctx.hasUI) {
+          ctx.ui.notify(
+            `Auto: classifier gave no usable answer (${result.reply}); defaulting to ${classifiedLevel} for this turn. Check /usage for details.`,
+            "warning",
+          );
+        }
       }
       level = classifiedLevel;
       tier = resolveEffortTier(settings, classifiedLevel);

@@ -67,9 +67,27 @@ test("classifyTurnComplexity picks the level word the model actually led with, e
   expect(result.level).toBe("medium");
 });
 
-test("classifyTurnComplexity falls back to medium on an unparseable reply", async () => {
+test("classifyTurnComplexity falls back to medium on an unparseable reply, and flags it as failed", async () => {
   const result = await classifyTurnComplexity(registryReplying("uh, tricky one"), MODEL, "do something", false);
   expect(result.level).toBe("medium");
+  // `failed: true` is what lets a caller tell "the model actually said medium" apart from "the
+  // model said nothing usable, so this is just the fallback" - a distinction that matters because
+  // the two look identical if only `level` is checked, which is exactly what let a real, sustained
+  // classifier failure pass as ordinary routing undetected.
+  expect(result.failed).toBe(true);
+});
+
+test("classifyTurnComplexity flags a completely empty reply as failed too, not just unparseable text", async () => {
+  const result = await classifyTurnComplexity(registryReplying(""), MODEL, "do something", false);
+  expect(result.level).toBe("medium");
+  expect(result.reply).toBe("(empty reply)");
+  expect(result.failed).toBe(true);
+});
+
+test("classifyTurnComplexity does not flag a genuine parsed verdict as failed", async () => {
+  const result = await classifyTurnComplexity(registryReplying("medium"), MODEL, "do something", false);
+  expect(result.level).toBe("medium");
+  expect(result.failed).toBe(false);
 });
 
 test("classifyTurnComplexity falls back to medium when the provider call throws, and records why in reply", async () => {
@@ -77,6 +95,7 @@ test("classifyTurnComplexity falls back to medium when the provider call throws,
   expect(result.level).toBe("medium");
   expect(result.usage).toBeUndefined();
   expect(result.reply).toContain("provider down");
+  expect(result.failed).toBe(true);
 });
 
 test("classifyTurnComplexity surfaces the raw reply text alongside the parsed level, for diagnosing mismatches later", async () => {
