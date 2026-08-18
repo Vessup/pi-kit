@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   appendFile,
   chmod,
@@ -3693,6 +3694,91 @@ for await (const line of lines) {
       await Bun.$`git -C ${repository} branch --list startup-fails`.text()
     ).trim(),
   ).toContain("startup-fails");
+}, 15_000);
+
+test("entered checkout startup failure cleans up the stale initial session", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-entered-fail-test-"));
+  const repository = join(tempDir, "repository");
+  const fakeBin = join(tempDir, "bin");
+  const agentDir = join(tempDir, "pi-agent");
+  await mkdir(repository, { recursive: true });
+  await mkdir(fakeBin, { recursive: true });
+  await Bun.$`git -C ${repository} init -q -b main`;
+  await Bun.$`git -C ${repository} config user.name test`;
+  await Bun.$`git -C ${repository} config user.email test@example.com`;
+  await writeFile(join(repository, "README.md"), "base\n");
+  await Bun.$`git -C ${repository} add README.md`;
+  await Bun.$`git -C ${repository} commit -qm initial`;
+  const fakePi = join(fakeBin, "pi");
+  const piStartedMarker = join(tempDir, "base-pi-started");
+  await writeFile(
+    fakePi,
+    `#!/usr/bin/env bun
+import { existsSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const marker = ${JSON.stringify(piStartedMarker)};
+const fail = existsSync(marker);
+if (!fail) writeFileSync(marker, "started");
+const lines = createInterface({ input: process.stdin });
+for await (const line of lines) {
+  const request = JSON.parse(line);
+  if (fail && request.type === "get_state") {
+    process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: false, error: "worktree startup failed" }) + "\\n");
+    continue;
+  }
+  let data;
+  if (request.type === "get_state") data = { sessionId: "base-session", messageCount: 0, isStreaming: false };
+  else if (request.type === "get_entries") data = { entries: [], leafId: null };
+  else if (request.type === "get_session_stats") data = {};
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+}
+`,
+  );
+  await chmod(fakePi, 0o755);
+  const statePath = join(tempDir, "server.json");
+  child = Bun.spawn({
+    cmd: ["bun", "web/server/index.ts"],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_PORT: "0",
+      PI_WEB_ROOT: process.cwd(),
+      PI_WEB_STATE_FILE: statePath,
+      PI_CODING_AGENT_DIR: agentDir,
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const { port } = await waitForState(statePath);
+  const origin = `http://127.0.0.1:${port}`;
+  const baseResponse = await fetch(`${origin}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", Origin: origin },
+    body: JSON.stringify({ cwd: repository }),
+  });
+  expect(baseResponse.status).toBe(201);
+  expect(await readFile(piStartedMarker, "utf8")).toBe("started");
+  // main is already checked out in the primary checkout, so this enters it.
+  const failed = await fetch(`${origin}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", Origin: origin },
+    body: JSON.stringify({
+      cwd: repository,
+      worktreeName: "entered",
+      worktreeBranch: "main",
+    }),
+  });
+  expect(failed.status).toBe(500);
+  const body = await failed.text();
+  expect(body).toContain("worktree startup failed");
+  expect(body).not.toContain("retained at");
+  expect(existsSync(join(repository, ".pi", "worktrees"))).toBe(false);
+  const listed = await fetch(`${origin}/api/sessions`, {
+    headers: { Origin: origin },
+  });
+  const payload = (await listed.json()) as { sessions: unknown[] };
+  expect(payload.sessions).toHaveLength(1);
 }, 15_000);
 
 test("native sessions route the web /compact command with optional instructions", async () => {

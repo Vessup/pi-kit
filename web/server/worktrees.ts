@@ -932,6 +932,10 @@ export async function removeManagedWorktreeAsync(
 
 /** Remove an operation-owned checkout and only the local branch created with it. */
 export function rollbackWebWorktree(worktree: CreatedWebWorktree): void {
+  if (worktree.existingCheckout)
+    throw new Error(
+      "Refusing to roll back a checkout entered because its branch was already checked out elsewhere",
+    );
   const verified = verifiedManagedWorktreeLocation(worktree);
   const dirty = gitOutput(verified.path, [
     "status",

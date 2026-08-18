@@ -262,6 +262,16 @@ test("managed creation enters branches already checked out elsewhere", async () 
     branchCreated: false,
     existingCheckout: true,
   });
+
+  // Rollback refuses entered checkouts so a verification failure can never
+  // remove a checkout Pi did not create.
+  expect(() => rollbackWebWorktree(entered)).toThrow(
+    "already checked out elsewhere",
+  );
+  expect(() => rollbackWebWorktree(primary)).toThrow(
+    "already checked out elsewhere",
+  );
+  expect((await stat(linked)).isDirectory()).toBe(true);
 });
 
 test("new branches start at the repository default branch", async () => {
@@ -271,7 +281,7 @@ test("new branches start at the repository default branch", async () => {
   const repository = join(directory, "repo");
   const remote = join(directory, "origin.git");
   await Bun.$`git init -q --bare ${remote}`;
-  await Bun.$`git init -q ${repository}`;
+  await Bun.$`git init -q -b main ${repository}`;
   await Bun.$`git -C ${repository} config user.name test`;
   await Bun.$`git -C ${repository} config user.email test@example.com`;
   await writeFile(join(repository, "README.md"), "initial\n");
