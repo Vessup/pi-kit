@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
 /**
  * Ownership decisions about the machine-wide Pi web daemon. A daemon is only
@@ -33,7 +34,15 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
+/** Read a pid's command line; /proc first (containers without procps), then ps. */
 async function processCommand(pid: number): Promise<string | undefined> {
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    const joined = cmdline.replace(/\0/g, " ").trim();
+    if (joined) return joined;
+  } catch {
+    // No /proc (macOS) or unreadable pid; fall through to ps.
+  }
   try {
     const child = Bun.spawn({
       cmd: ["ps", "-p", String(pid), "-o", "command="],

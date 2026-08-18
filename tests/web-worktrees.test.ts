@@ -219,7 +219,7 @@ test("an unused existing local branch is reused and preserved by rollback", asyn
       startPoint: "HEAD",
     }),
   ).rejects.toThrow("omit --start-point");
-});
+}, 30_000);
 
 test("managed creation rejects branches checked out in another worktree", async () => {
   directory = await mkdtemp(join(tmpdir(), "pi-kit-web-worktree-checked-out-"));

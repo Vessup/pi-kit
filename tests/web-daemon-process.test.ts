@@ -7,6 +7,7 @@ import {
   daemonIsEvictable,
   daemonServesWebApps,
   isPidAlive,
+  isPiWebDaemonPid,
 } from "../web/server/daemon-process.ts";
 
 function health(overrides: Partial<DaemonHealth> = {}): DaemonHealth {
@@ -55,4 +56,11 @@ test("isPidAlive accepts the current process and rejects pids that cannot exist"
   expect(isPidAlive(0)).toBe(false);
   expect(isPidAlive(-1)).toBe(false);
   expect(isPidAlive(999_999_999)).toBe(false);
+});
+
+test("pid verification reads a real command line and only matches Pi web daemons", async () => {
+  // The test runner is a real, readable process: verification must read its
+  // command line (via /proc or ps) and correctly report it is not a daemon.
+  expect(await isPiWebDaemonPid(process.pid)).toBe(false);
+  expect(await isPiWebDaemonPid(999_999_999)).toBe(false);
 });
