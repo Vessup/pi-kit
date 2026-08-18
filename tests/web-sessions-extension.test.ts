@@ -1,11 +1,58 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   abortSessionAndSubagents,
   applySubagentStatusToSession,
   applyTailscaleSettingTransaction,
+  daemonBuildIsBroken,
+  daemonCanServeWebApp,
   isScopedModelAllowed,
+  parseDaemonHealth,
   splitWebWorktreeCommandArgs,
 } from "../extensions/web-sessions.ts";
+
+test("the bridge only adopts daemons that can serve the web app", () => {
+  const state = { pid: 7, port: 31415, startedAt: 1, version: 1 };
+  expect(parseDaemonHealth({ ok: true, pid: 7 }, state)).toEqual({
+    ok: true,
+    pid: 7,
+  });
+  expect(parseDaemonHealth({ ok: true, pid: 8 }, state)).toBeUndefined();
+  expect(parseDaemonHealth({ ok: false, pid: 7 }, state)).toBeUndefined();
+  expect(
+    parseDaemonHealth({ ok: true, pid: 7, assets: true, root: "/a" }, state),
+  ).toMatchObject({ assets: true });
+  expect(daemonCanServeWebApp({ ok: true, pid: 7, assets: true })).toBe(true);
+  expect(daemonCanServeWebApp({ ok: true, pid: 7 })).toBe(false);
+  expect(daemonCanServeWebApp({ ok: true, pid: 7, assets: false })).toBe(false);
+});
+
+test("a daemon with a missing build over an existing checkout is reported, not respawned", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "pi-kit-daemon-health-"));
+  try {
+    const checkout = join(tempDir, "checkout");
+    await Bun.write(join(checkout, "keep"), "");
+    expect(
+      daemonBuildIsBroken({ ok: true, pid: 7, assets: false, root: checkout }),
+    ).toBe(true);
+    // A vanished checkout is handled by daemon eviction instead.
+    expect(
+      daemonBuildIsBroken({
+        ok: true,
+        pid: 7,
+        assets: false,
+        root: join(tempDir, "gone"),
+      }),
+    ).toBe(false);
+    expect(daemonBuildIsBroken({ ok: true, pid: 7, assets: false })).toBe(
+      false,
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("web Stop aborts the main session and waits for subagent propagation", async () => {
   let releaseSubagents!: () => void;

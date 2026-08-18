@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -312,23 +313,69 @@ async function updateTailscaleServer(
   return payload.tailscale as NonNullable<ServerStateFile["tailscale"]>;
 }
 
-async function isHealthy(state: ServerStateFile): Promise<boolean> {
+/** The /api/health fields the bridge cares about when adopting a daemon. */
+export type DaemonHealthPayload = {
+  ok: true;
+  pid: number;
+  assets?: boolean;
+  root?: string;
+};
+
+/** Parse a /api/health body only when it names the state file's daemon. */
+export function parseDaemonHealth(
+  payload: unknown,
+  state: ServerStateFile,
+): DaemonHealthPayload | undefined {
+  if (!isRecord(payload) || payload.ok !== true || payload.pid !== state.pid)
+    return undefined;
+  return payload as DaemonHealthPayload;
+}
+
+/** Healthy enough to adopt: a daemon that can actually serve the web app. */
+export function daemonCanServeWebApp(payload: DaemonHealthPayload): boolean {
+  return payload.assets === true;
+}
+
+/**
+ * A daemon reporting a missing build over a checkout that still exists cannot
+ * be repaired by respawning; surface its root so the user can rebuild.
+ */
+export function daemonBuildIsBroken(payload: DaemonHealthPayload): boolean {
+  return (
+    payload.assets === false &&
+    typeof payload.root === "string" &&
+    payload.root.length > 0 &&
+    existsSync(payload.root)
+  );
+}
+
+async function fetchDaemonHealth(
+  state: ServerStateFile,
+): Promise<DaemonHealthPayload | undefined> {
   try {
     const url = new URL("/api/health", serverBase(state));
     const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
-    if (!response.ok) return false;
-    const payload: unknown = await response.json();
-    return (
-      isRecord(payload) && payload.ok === true && payload.pid === state.pid
-    );
+    if (!response.ok) return undefined;
+    return parseDaemonHealth(await response.json(), state);
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+function assertServable(payload: DaemonHealthPayload | undefined): void {
+  if (payload && daemonBuildIsBroken(payload))
+    throw new Error(
+      `Pi web server is running but cannot serve its web app from ${payload.root}. Run 'bun run webBuild' in that checkout (or reinstall the pi package) and restart this session.`,
+    );
 }
 
 async function ensureServer(): Promise<ServerStateFile> {
   const current = await readServerState();
-  if (current && (await isHealthy(current))) return current;
+  if (current) {
+    const payload = await fetchDaemonHealth(current);
+    if (payload && daemonCanServeWebApp(payload)) return current;
+    assertServable(payload);
+  }
 
   const child = spawn("bun", ["run", SERVER_ENTRY], {
     cwd: PACKAGE_ROOT,
@@ -346,7 +393,10 @@ async function ensureServer(): Promise<ServerStateFile> {
   while (Date.now() < deadline) {
     await delay(100);
     const state = await readServerState();
-    if (state && (await isHealthy(state))) return state;
+    if (!state) continue;
+    const payload = await fetchDaemonHealth(state);
+    if (payload && daemonCanServeWebApp(payload)) return state;
+    assertServable(payload);
   }
   throw new Error(
     "Pi web server did not become ready. Make sure Bun is installed and web assets are built.",

@@ -4874,3 +4874,138 @@ test("native Pi sessions expose semantic history without replacing their physica
     terminal.close();
   }
 }, 15_000);
+
+test("a second daemon defers to the running daemon instead of stealing discovery", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-web-defer-test-"));
+  const statePath = join(tempDir, "server.json");
+  const serverEnv = () => ({
+    ...process.env,
+    PI_WEB_PORT: "0",
+    PI_WEB_ROOT: process.cwd(),
+    PI_WEB_STATE_FILE: statePath,
+    PI_CODING_AGENT_DIR: join(tempDir, "pi-agent"),
+  });
+  const startServer = () =>
+    Bun.spawn({
+      cmd: ["bun", "run", "web/server/index.ts"],
+      cwd: process.cwd(),
+      env: serverEnv(),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  child = startServer();
+  const first = await waitForState(statePath);
+  const health = (await (
+    await fetch(`http://127.0.0.1:${first.port}/api/health`)
+  ).json()) as { assets?: boolean; root?: string; pid?: number };
+  expect(health.assets).toBe(true);
+  expect(health.root).toBe(process.cwd());
+  expect(health.pid).toBe(first.pid);
+
+  const second = startServer();
+  const outcome = await Promise.race([
+    second.exited.then((code) => code),
+    Bun.sleep(15_000).then(() => "timeout" as const),
+  ]);
+  if (outcome === "timeout") {
+    second.kill("SIGKILL");
+    throw new Error("second daemon did not defer to the running daemon");
+  }
+  expect(outcome).toBe(0);
+  const after = await waitForState(statePath);
+  expect(after.pid).toBe(first.pid);
+  expect(after.port).toBe(first.port);
+  const stillHealthy = await fetch(`http://127.0.0.1:${first.port}/api/health`);
+  expect(stillHealthy.ok).toBe(true);
+}, 30_000);
+
+test("a daemon whose checkout disappeared is replaced by the next spawn", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-web-evict-test-"));
+  const statePath = join(tempDir, "server.json");
+  const agentDir = join(tempDir, "pi-agent");
+  const vanishingRoot = join(tempDir, "vanishing-checkout");
+  await mkdir(vanishingRoot, { recursive: true });
+  const serverEnv = (root: string) => ({
+    ...process.env,
+    PI_WEB_PORT: "0",
+    PI_WEB_ROOT: root,
+    PI_WEB_STATE_FILE: statePath,
+    PI_CODING_AGENT_DIR: agentDir,
+  });
+  const startServer = (root: string) =>
+    Bun.spawn({
+      cmd: ["bun", "run", "web/server/index.ts"],
+      cwd: process.cwd(),
+      env: serverEnv(root),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  child = startServer(vanishingRoot);
+  const doomed = await waitForState(statePath);
+  const doomedHealth = (await (
+    await fetch(`http://127.0.0.1:${doomed.port}/api/health`)
+  ).json()) as { assets?: boolean; root?: string };
+  expect(doomedHealth.assets).toBe(false);
+  expect(doomedHealth.root).toBe(vanishingRoot);
+  const shell = await fetch(`http://127.0.0.1:${doomed.port}/`);
+  expect(shell.status).toBe(404);
+
+  await rm(vanishingRoot, { recursive: true, force: true });
+  const replacement = startServer(process.cwd());
+  child = replacement;
+  let successor: ServerStateFile | undefined;
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      const state = JSON.parse(
+        await readFile(statePath, "utf8"),
+      ) as ServerStateFile;
+      // The evicted daemon deletes the shared state file on exit; the
+      // replacement rewrites it once serving, so ENOENT is an expected window.
+      if (state.pid !== doomed.pid) {
+        successor = state;
+        break;
+      }
+    } catch {
+      // State file is between deletion and rewrite.
+    }
+    await Bun.sleep(50);
+  }
+  if (!successor) throw new Error("replacement daemon never took over");
+  const successorPort = successor.port;
+  const successorPid = successor.pid;
+  const successorHealth = await (async () => {
+    const deadline = Date.now() + 8_000;
+    for (;;) {
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${successorPort}/api/health`,
+        );
+        const payload = (await response.json()) as {
+          assets?: boolean;
+          pid?: number;
+        };
+        if (payload.assets === true) return payload;
+      } catch {
+        // Not listening yet.
+      }
+      if (Date.now() > deadline) throw new Error("successor never served");
+      await Bun.sleep(50);
+    }
+  })();
+  expect(successorHealth.pid).toBe(successorPid);
+  const restoredShell = await fetch(`http://127.0.0.1:${successorPort}/`);
+  expect(restoredShell.status).toBe(200);
+  expect(await restoredShell.text()).toContain('<div id="root"></div>');
+  let doomedStillAlive = true;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      process.kill(doomed.pid, 0);
+      await Bun.sleep(100);
+    } catch {
+      doomedStillAlive = false;
+      break;
+    }
+  }
+  expect(doomedStillAlive).toBe(false);
+}, 60_000);

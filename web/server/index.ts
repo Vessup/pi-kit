@@ -76,6 +76,15 @@ import {
   WORKTREE_USAGE,
 } from "../worktree-command.js";
 import { replacementFromEntries } from "../worktree-replacement.js";
+import {
+  type DaemonHealth,
+  daemonIsEvictable,
+  daemonServesWebApps,
+  isPidAlive,
+  isPiWebDaemonPid,
+  terminatePiWebDaemon,
+  waitForDaemonHealth,
+} from "./daemon-process.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
 import {
   badRequest,
@@ -3182,6 +3191,8 @@ async function handleApi(request: Request): Promise<Response> {
         worktreeRefs: true,
         branchSuggestions: true,
       },
+      assets: webAssetsServable(),
+      root: rootDir,
       tailscale: tailscaleStatus,
     });
   }
@@ -3619,6 +3630,74 @@ async function cleanupAndExit(code = 0): Promise<void> {
   setTimeout(() => process.exit(code), 25).unref();
 }
 
+function webAssetsServable(): boolean {
+  try {
+    return statSync(join(distDir, "index.html")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decide whether this process may own machine-wide discovery (state file and
+ * Tailscale Serve route). A healthy daemon that already exists is deferred to;
+ * a daemon whose checkout no longer exists is replaced. Without this, a
+ * side-port daemon steals the shared Serve route and a daemon from a deleted
+ * checkout serves 404s forever while still passing /api/health.
+ */
+type DaemonOwnership =
+  | { action: "own" }
+  | { action: "defer"; owner: DaemonHealth; republished: boolean };
+
+async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
+  const existing = readStateFile(stateFilePath);
+  if (existing && existing.pid !== process.pid && isPidAlive(existing.pid)) {
+    // Only a verified Pi web daemon may be probed or stopped; a recycled pid
+    // naming an unrelated process must never be signaled.
+    if (await isPiWebDaemonPid(existing.pid)) {
+      const health = await waitForDaemonHealth(
+        existing.port,
+        existing.pid,
+        3_000,
+      );
+      if (!health) {
+        // Verified daemon that never answers: wedged. Replace it.
+        await terminatePiWebDaemon(existing.pid);
+        return { action: "own" };
+      }
+      if (daemonServesWebApps(health))
+        return { action: "defer", owner: health, republished: false };
+      if (daemonIsEvictable(health)) {
+        const stopped = await terminatePiWebDaemon(existing.pid);
+        if (stopped) return { action: "own" };
+        // Could not stop it; never steal discovery from a live daemon.
+        return { action: "defer", owner: health, republished: false };
+      }
+      // Alive with an existing checkout but unservable assets (failed build):
+      // defer so the owner can recover instead of churning replacements.
+      return { action: "defer", owner: health, republished: false };
+    }
+    return { action: "own" };
+  }
+  // Discovery state is missing or points at a dead pid. When the intended
+  // port already has a healthy daemon, adopt it by restoring its state file
+  // instead of racing it for the port; evict it only when provably broken.
+  if (port !== 0) {
+    const health = await waitForDaemonHealth(port, undefined, 1_500);
+    if (
+      health &&
+      isPidAlive(health.pid) &&
+      (await isPiWebDaemonPid(health.pid))
+    ) {
+      if (daemonServesWebApps(health))
+        return { action: "defer", owner: health, republished: true };
+      if (daemonIsEvictable(health) && (await terminatePiWebDaemon(health.pid)))
+        return { action: "own" };
+    }
+  }
+  return { action: "own" };
+}
+
 // web/dist is not checked in; rebuild it on every startup so a long-running
 // server always serves the client assets that match the checked-out source.
 async function buildWebClientAssets(): Promise<void> {
@@ -3637,6 +3716,28 @@ async function buildWebClientAssets(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const ownership = await resolveDaemonOwnership();
+  if (ownership.action === "defer") {
+    // Another daemon already owns machine-wide discovery. Restoring its state
+    // file (when missing) lets Pi sessions find it; never touch its Tailscale
+    // Serve route, never race it for the port. Exit quietly instead.
+    if (ownership.republished) {
+      ensureDir(dirname(stateFilePath));
+      writeStateFileAtomic(stateFilePath, {
+        pid: ownership.owner.pid,
+        port: ownership.owner.port,
+        startedAt: Date.now(),
+        version: WEB_STATE_VERSION,
+        ...(isRecord(ownership.owner.tailscale)
+          ? { tailscale: ownership.owner.tailscale as TailscaleStatus }
+          : {}),
+      });
+    }
+    console.log(
+      `pi web server already running (pid ${ownership.owner.pid} on port ${ownership.owner.port}); deferring`,
+    );
+    process.exit(0);
+  }
   await buildWebClientAssets();
   await recoverStagedSourceSessionDeletions();
   webState = getOrCreateWebState();
