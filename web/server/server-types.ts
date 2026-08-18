@@ -82,4 +82,6 @@ export type SessionRecord = {
   pendingWorktreeSourceDeletion?: { sessionId: string; sessionFile: string };
   catalogReady?: boolean;
   gitMetadataGeneration?: number;
+  /** Models the agent's session is scoped to via --models. Server-internal. */
+  scopedModels?: import("../protocol.js").WebScopedModel[];
 };

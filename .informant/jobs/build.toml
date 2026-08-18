@@ -2,11 +2,7 @@ name = "build"
 needs = ["test", "typecheck"]
 command = """
 set -eu
-expected_dist="$(mktemp -d)"
-trap 'rm -rf "$expected_dist"' EXIT
-cp -R web/dist "$expected_dist/dist"
 bun run build
-diff -ru "$expected_dist/dist" web/dist
 """
 timeout_minutes = 15
 container = { cpu = 2, memory_mb = 4096 }

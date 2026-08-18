@@ -26,6 +26,7 @@ import type {
   WebSession,
 } from "../web/protocol.js";
 import { mergeWebSubagentUpdates, WEB_STATE_VERSION } from "../web/protocol.js";
+import { isConfirmedMissingPath } from "../web/server/file-presence.js";
 import { managedWorktreeFromEntries } from "../web/server/worktrees.js";
 import {
   expandSlashCommand,
@@ -312,23 +313,68 @@ async function updateTailscaleServer(
   return payload.tailscale as NonNullable<ServerStateFile["tailscale"]>;
 }
 
-async function isHealthy(state: ServerStateFile): Promise<boolean> {
+/** The /api/health fields the bridge cares about when adopting a daemon. */
+export type DaemonHealthPayload = {
+  ok: true;
+  pid: number;
+  assets?: boolean;
+  root?: string;
+};
+
+/** Parse a /api/health body only when it names the state file's daemon. */
+export function parseDaemonHealth(
+  payload: unknown,
+  state: ServerStateFile,
+): DaemonHealthPayload | undefined {
+  if (!isRecord(payload) || payload.ok !== true || payload.pid !== state.pid)
+    return undefined;
+  return payload as DaemonHealthPayload;
+}
+
+/** Healthy enough to adopt: the CLI↔daemon bridge only needs the WS/API
+ * surface, not the browser bundle. A daemon is rejected only when its own
+ * checkout is confirmed gone, since that daemon can never serve anything
+ * again — blocking adoption on a stale web/dist would break /web, session
+ * mirroring, and /web-tailscale for otherwise-healthy daemons. */
+export function daemonIsAdoptable(payload: DaemonHealthPayload): boolean {
+  const root = payload.root ?? "";
+  return !(root !== "" && isConfirmedMissingPath(root));
+}
+
+/** A degraded (stale/failed) browser build over a live checkout. */
+export function daemonBuildIsDegraded(payload: DaemonHealthPayload): boolean {
+  return payload.assets === false;
+}
+
+function warnIfDegraded(payload: DaemonHealthPayload | undefined): void {
+  if (payload && daemonBuildIsDegraded(payload))
+    console.warn(
+      `Pi web server cannot serve its web app (run 'bun run webBuild' in ${payload.root || "its checkout"} and restart it); session bridging continues normally.`,
+    );
+}
+
+async function fetchDaemonHealth(
+  state: ServerStateFile,
+): Promise<DaemonHealthPayload | undefined> {
   try {
     const url = new URL("/api/health", serverBase(state));
     const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
-    if (!response.ok) return false;
-    const payload: unknown = await response.json();
-    return (
-      isRecord(payload) && payload.ok === true && payload.pid === state.pid
-    );
+    if (!response.ok) return undefined;
+    return parseDaemonHealth(await response.json(), state);
   } catch {
-    return false;
+    return undefined;
   }
 }
 
 async function ensureServer(): Promise<ServerStateFile> {
   const current = await readServerState();
-  if (current && (await isHealthy(current))) return current;
+  if (current) {
+    const payload = await fetchDaemonHealth(current);
+    if (payload && daemonIsAdoptable(payload)) {
+      warnIfDegraded(payload);
+      return current;
+    }
+  }
 
   const child = spawn("bun", ["run", SERVER_ENTRY], {
     cwd: PACKAGE_ROOT,
@@ -346,7 +392,12 @@ async function ensureServer(): Promise<ServerStateFile> {
   while (Date.now() < deadline) {
     await delay(100);
     const state = await readServerState();
-    if (state && (await isHealthy(state))) return state;
+    if (!state) continue;
+    const payload = await fetchDaemonHealth(state);
+    if (payload && daemonIsAdoptable(payload)) {
+      warnIfDegraded(payload);
+      return state;
+    }
   }
   throw new Error(
     "Pi web server did not become ready. Make sure Bun is installed and web assets are built.",
@@ -1058,6 +1109,13 @@ async function connect(pi: ExtensionAPI, state: BridgeState): Promise<void> {
         entries: boundedWebHistory(
           state.ctx.sessionManager.buildContextEntries(),
         ),
+        // Forward the session's --models scope so the daemon's model picker
+        // shows the same list the TUI would.
+        scopedModels: state.ctx.scopedModels.map((item) => ({
+          provider: item.model.provider,
+          id: item.model.id,
+          thinkingLevel: item.thinkingLevel,
+        })),
       };
       socket.send(JSON.stringify(hello));
       if (state.sourceReplacement) {

@@ -2,9 +2,12 @@ node_modules/
 .tmp/
 web/.pi-web-state.json
 web/dist/
+# Managed pi worktrees are ephemeral checkouts, not repo content.
+.pi/worktrees/
 .staffreview/diffs/
 .staffreview/attachments/
 .staffreview/active.json
 .staffreview/section-cache.json
 .DS_Store
 *.log
+.claude/worktrees

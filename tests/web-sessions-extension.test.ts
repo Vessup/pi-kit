@@ -1,11 +1,77 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   abortSessionAndSubagents,
   applySubagentStatusToSession,
   applyTailscaleSettingTransaction,
+  daemonBuildIsDegraded,
+  daemonIsAdoptable,
   isScopedModelAllowed,
+  parseDaemonHealth,
   splitWebWorktreeCommandArgs,
 } from "../extensions/web-sessions.ts";
+import type { ServerStateFile } from "../web/protocol.ts";
+
+test("the bridge only adopts daemons that can serve the web app", () => {
+  const state: ServerStateFile = {
+    pid: 7,
+    port: 31415,
+    startedAt: 1,
+    version: 1,
+  };
+  expect(parseDaemonHealth({ ok: true, pid: 7 }, state)).toEqual({
+    ok: true,
+    pid: 7,
+  });
+  expect(parseDaemonHealth({ ok: true, pid: 8 }, state)).toBeUndefined();
+  expect(parseDaemonHealth({ ok: false, pid: 7 }, state)).toBeUndefined();
+  expect(
+    parseDaemonHealth({ ok: true, pid: 7, assets: true, root: "/a" }, state),
+  ).toMatchObject({ assets: true });
+});
+
+test("the bridge adopts every healthy daemon except one whose checkout is gone", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "pi-kit-daemon-adopt-"));
+  try {
+    const checkout = join(tempDir, "checkout");
+    await Bun.write(join(checkout, "keep"), "");
+    // Full health: adoptable.
+    expect(
+      daemonIsAdoptable({ ok: true, pid: 7, assets: true, root: checkout }),
+    ).toBe(true);
+    // Degraded browser build over a live checkout: the WS bridge still works,
+    // so the daemon stays adoptable (and is flagged degraded for a warning).
+    expect(
+      daemonIsAdoptable({ ok: true, pid: 7, assets: false, root: checkout }),
+    ).toBe(true);
+    expect(
+      daemonBuildIsDegraded({
+        ok: true,
+        pid: 7,
+        assets: false,
+        root: checkout,
+      }),
+    ).toBe(true);
+    expect(
+      daemonBuildIsDegraded({ ok: true, pid: 7, assets: true, root: checkout }),
+    ).toBe(false);
+    // Legacy daemons report neither field: adoptable (pre-change behavior).
+    expect(daemonIsAdoptable({ ok: true, pid: 7 })).toBe(true);
+    // A daemon whose checkout is confirmed gone can never serve again.
+    expect(
+      daemonIsAdoptable({
+        ok: true,
+        pid: 7,
+        assets: false,
+        root: join(tempDir, "gone"),
+      }),
+    ).toBe(false);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("web Stop aborts the main session and waits for subagent propagation", async () => {
   let releaseSubagents!: () => void;

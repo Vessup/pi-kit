@@ -1,0 +1,219 @@
+import { readFile } from "node:fs/promises";
+import { isConfirmedMissingPath } from "./file-presence.js";
+
+/**
+ * Ownership decisions about the machine-wide Pi web daemon. A daemon is only
+ * "the" daemon when the shared state file points at it, so a second process
+ * must never blindly steal the port, the state file, or the Tailscale Serve
+ * route. These helpers probe and (with process-identity verification) stop a
+ * daemon that is provably broken, e.g. one whose checkout directory was
+ * deleted out from under it.
+ */
+
+/** The subset of /api/health used for ownership decisions. */
+export type DaemonHealth = {
+  ok: true;
+  pid: number;
+  port: number;
+  /** Whether the daemon can serve the web app shell from its own checkout. */
+  assets: boolean;
+  /** The checkout root the daemon serves from; empty when unreported. */
+  root: string;
+  /** Raw tailscale status echoed back when restoring discovery state. */
+  tailscale?: unknown;
+};
+
+export function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but is owned by someone else.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Read a pid's command line; /proc first (containers without procps), then ps. */
+async function processCommand(pid: number): Promise<string | undefined> {
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    const joined = cmdline.replace(/\0/g, " ").trim();
+    if (joined) return joined;
+  } catch {
+    // No /proc (macOS) or unreadable pid; fall through to ps.
+  }
+  try {
+    const child = Bun.spawn({
+      cmd: ["ps", "-ww", "-p", String(pid), "-o", "command="],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    // ps is only a fallback on the ownership critical path; never let a hung
+    // invocation block daemon startup.
+    const timeout = setTimeout(() => child.kill(), 2_000);
+    try {
+      const [output, code] = await Promise.all([
+        new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+        child.exited,
+      ]);
+      return code === 0 ? output.trim() : undefined;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a command line names a Pi web daemon. The executable must be bun
+ * itself, so a recycled pid running an unrelated command that merely mentions
+ * the entrypoint path (an editor, a search tool) is never treated as ours and
+ * never signaled.
+ */
+export function matchesPiWebDaemonCommand(command: string): boolean {
+  const executable = command.trim().split(/\s+/, 1)[0] ?? "";
+  if (!/(^|\/)bun(-[^/\s]+)?$/.test(executable)) return false;
+  // Match both the direct entrypoint and the package "webServer" script so a
+  // daemon started either way is recognized as ours.
+  return (
+    command.includes("web/server/index.ts") || /\bwebServer\b/.test(command)
+  );
+}
+
+/** Verify a pid still belongs to a Pi web daemon before signaling it. */
+export async function isPiWebDaemonPid(pid: number): Promise<boolean> {
+  const command = await processCommand(pid);
+  return command !== undefined && matchesPiWebDaemonCommand(command);
+}
+
+export async function probeDaemonHealth(
+  port: number,
+  timeoutMs = 1_500,
+): Promise<DaemonHealth | undefined> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+    if (!response.ok) return undefined;
+    const value = (await response.json()) as Partial<DaemonHealth>;
+    if (
+      !value ||
+      value.ok !== true ||
+      typeof value.pid !== "number" ||
+      typeof value.port !== "number"
+    )
+      return undefined;
+    return {
+      ok: true,
+      pid: value.pid,
+      port: value.port,
+      assets: value.assets === true,
+      root: typeof value.root === "string" ? value.root : "",
+      tailscale: value.tailscale,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Poll until the daemon answers health with the expected pid, or give up. */
+export async function waitForDaemonHealth(
+  port: number,
+  expectedPid: number | undefined,
+  budgetMs: number,
+): Promise<DaemonHealth | undefined> {
+  const deadline = Date.now() + budgetMs;
+  do {
+    const health = await probeDaemonHealth(port);
+    if (health && (!expectedPid || health.pid === expectedPid)) return health;
+    await Bun.sleep(100);
+  } while (Date.now() < deadline);
+  return undefined;
+}
+
+/** A daemon that fully serves web apps must be deferred to, never replaced. */
+export function daemonServesWebApps(health: DaemonHealth): boolean {
+  return health.assets === true;
+}
+
+/**
+ * A daemon is evictable when its own checkout no longer exists, so it can
+ * never serve the app shell again. Only a filesystem-confirmed absence
+ * (ENOENT) counts: a transient EACCES/EIO on the checkout root must never
+ * read as "deleted" and get a healthy daemon killed. Daemons that predate
+ * asset reporting cannot prove they serve the web app either; a newer spawn
+ * replaces them once, after which the replacement reports its own assets. A
+ * daemon reporting a missing build over an existing checkout is NOT evictable
+ * — respawning from the same checkout would fail the same way.
+ */
+export function daemonIsEvictable(health: DaemonHealth): boolean {
+  if (health.root) return isConfirmedMissingPath(health.root);
+  return health.assets !== true;
+}
+
+/** What a newly starting daemon should do with a verified incumbent. */
+export type IncumbentDisposition = "serve" | "evict" | "keep";
+
+/**
+ * The single decision shared by both ownership paths (state-file and
+ * port-probe): a serving incumbent is deferred to, a provably dead one is
+ * evicted, and anything else (failed build over an existing checkout) is kept
+ * in place. Duplicating this logic is how the two paths previously disagreed.
+ */
+export function incumbentDisposition(
+  health: DaemonHealth,
+): IncumbentDisposition {
+  if (daemonServesWebApps(health)) return "serve";
+  if (daemonIsEvictable(health)) return "evict";
+  return "keep";
+}
+
+async function waitForPidExit(
+  pid: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await Bun.sleep(100);
+  }
+  return !isPidAlive(pid);
+}
+
+/**
+ * Stop a Pi web daemon after verifying the pid still names one. Returns false
+ * when the pid could not be verified or did not exit; callers must then leave
+ * shared discovery state untouched rather than steal it.
+ */
+// A daemon under eviction may be mid-turn on managed sessions; its own
+// shutdown policy waits for them. Give it a generous graceful window before
+// escalating — bounded, because a new daemon's startup must not hang forever —
+// and re-verify the pid still names our daemon before the uncatchable signal.
+const GRACEFUL_TERMINATION_MS = 30_000;
+
+export async function terminatePiWebDaemon(
+  pid: number,
+  timeoutMs = GRACEFUL_TERMINATION_MS,
+): Promise<boolean> {
+  if (!isPidAlive(pid)) return true;
+  if (!(await isPiWebDaemonPid(pid))) return false;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return !isPidAlive(pid);
+  }
+  if (await waitForPidExit(pid, timeoutMs)) return true;
+  // The pid may have exited and been recycled between the wait and now; the
+  // uncatchable signal must never reach an unrelated process.
+  if (!(await isPiWebDaemonPid(pid))) return false;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+  await Bun.sleep(200);
+  return !isPidAlive(pid);
+}

@@ -33,6 +33,7 @@ import type {
   AgentHelloMessage,
   AgentHistoryMessage,
   AgentResponseMessage,
+  AgentScopeMessage,
   AgentSessionReplacedMessage,
   AgentSubagentsMessage,
   AgentToServerMessage,
@@ -75,6 +76,14 @@ import {
   WORKTREE_USAGE,
 } from "../worktree-command.js";
 import { replacementFromEntries } from "../worktree-replacement.js";
+import {
+  type DaemonHealth,
+  incumbentDisposition,
+  isPidAlive,
+  isPiWebDaemonPid,
+  terminatePiWebDaemon,
+  waitForDaemonHealth,
+} from "./daemon-process.js";
 import { isConfirmedMissingPath } from "./file-presence.js";
 import {
   badRequest,
@@ -121,11 +130,14 @@ import {
 } from "./shutdown-policy.js";
 import { SlashCommandService } from "./slash-command-service.js";
 import { createStaticAssetResponder } from "./static-assets.js";
+import { listDirectorySuggestions } from "./suggestions.js";
 import {
   createWebWorktree,
   hasOtherSessionInWorktree,
   inheritManagedBranchOwnership,
+  listRepositoryBranches,
   managedWorktreeFromEntries,
+  type RepositoryBranches,
   removeManagedWorktree,
   removeManagedWorktreeAsync,
   WORKTREE_SESSION_ENTRY,
@@ -1409,12 +1421,14 @@ async function recoverStagedSourceSessionDeletions(): Promise<void> {
             );
           })
         : undefined;
-      if (!replacement) {
+      if (!sourceId || !replacement) {
         if (!existsSync(staged.source))
           renameSync(staged.tombstone, staged.source);
         continue;
       }
-      const sourceQueue = persistedQueues.get(sourceId);
+      // replacement is only defined when sourceId is, but the find callback
+      // above loses that narrowing across the closure boundary.
+      const sourceQueue = sourceId ? persistedQueues.get(sourceId) : undefined;
       const replacementQueue = persistedQueues.get(replacement.session.id);
       if (sourceQueue?.length) {
         const ids = new Set<string>();
@@ -2331,14 +2345,27 @@ async function routeCommandCore(
             location: "temporary",
           });
         }
+        const scoped = record.scopedModels ?? [];
+        const scopedByKey = new Map(
+          scoped.map((s) => [`${s.provider}/${s.id}`, s]),
+        );
+        const filterByScope = scopedByKey.size > 0;
         return {
-          models: models.map((model) => ({
-            provider: String(model.provider ?? ""),
-            id: String(model.id ?? ""),
-            name: String(model.name ?? model.id ?? ""),
-            reasoning: model.reasoning === true,
-            thinkingLevels: levels,
-          })),
+          models: models
+            .filter((model) =>
+              filterByScope
+                ? scopedByKey.has(
+                    `${String(model.provider ?? "")}/${String(model.id ?? "")}`,
+                  )
+                : true,
+            )
+            .map((model) => ({
+              provider: String(model.provider ?? ""),
+              id: String(model.id ?? ""),
+              name: String(model.name ?? model.id ?? ""),
+              reasoning: model.reasoning === true,
+              thinkingLevels: levels,
+            })),
           thinkingLevels: levels,
           commands: webCommands,
         };
@@ -2544,6 +2571,11 @@ async function handleAgentMessage(
     record.preview =
       extractPreviewFromHistory(record.history) ?? record.preview;
     record.managedWorktree = helloManagedWorktree ?? record.managedWorktree;
+    // Carry the agent's --models scope onto the record so the model picker
+    // mirrors what the TUI would show. Empty array means no scope.
+    record.scopedModels = Array.isArray(hello.scopedModels)
+      ? hello.scopedModels
+      : undefined;
     record.agentSockets.add(socket);
     record.active = true;
     record.status = hello.session.status;
@@ -2574,6 +2606,13 @@ async function handleAgentMessage(
     return;
   }
   if (!socket.data.authed) throw new Error("Agent must send agent.hello first");
+  if (message.type === "agent.scope") {
+    const update = message as AgentScopeMessage;
+    const record = sessions.get(update.sessionId);
+    if (!record || !record.agentSockets.has(socket)) return;
+    record.scopedModels = update.scopedModels;
+    return;
+  }
   if (message.type === "agent.history") {
     const update = message as AgentHistoryMessage;
     const record = sessions.get(update.sessionId);
@@ -3153,6 +3192,25 @@ async function deleteSession(sessionId: string): Promise<void> {
     scheduleManagedWorktreeCleanup(sessionId, sessionFile, managedWorktree);
 }
 
+/** Drop a not-yet-activated initial session file and its registrations. */
+function cleanupInitialSessionFile(initialSessionFile?: string): void {
+  if (!initialSessionFile) return;
+  const key = sessionFileKey(initialSessionFile);
+  const stale = sessionsByFile.get(key);
+  if (stale?.file && sessionFileKey(stale.file) === key) {
+    sessions.delete(stale.id);
+    sessionsByFile.delete(key);
+  }
+  if (isManagedSessionFile(initialSessionFile)) {
+    try {
+      deleteManagedSessionFile(initialSessionFile);
+    } catch {
+      /* preserve the original startup error */
+    }
+  }
+  rmSync(initialSessionFile, { force: true });
+}
+
 async function handleApi(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (
@@ -3177,9 +3235,48 @@ async function handleApi(request: Request): Promise<Response> {
         commandHello: true,
         queueSteer: true,
         worktreeRefs: true,
+        branchSuggestions: true,
       },
+      assets: webAssetsServable(),
+      root: rootDir,
       tailscale: tailscaleStatus,
     });
+  }
+  if (request.method === "GET" && url.pathname === "/api/directories") {
+    return jsonResponse({
+      directories: listDirectorySuggestions(url.searchParams.get("q") ?? "", {
+        baseDir: rootDir,
+      }),
+    });
+  }
+  if (request.method === "GET" && url.pathname === "/api/branches") {
+    const requestedCwd = (url.searchParams.get("cwd") ?? "").trim();
+    if (!requestedCwd) return badRequest("Missing cwd");
+    let cwd: string;
+    try {
+      cwd = resolveWebCwd(requestedCwd, { baseDir: rootDir });
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+    try {
+      if (!statSync(cwd).isDirectory())
+        return badRequest(`cwd is not a directory: ${cwd}`);
+    } catch {
+      return badRequest(`cwd does not exist: ${cwd}`);
+    }
+    let branches: RepositoryBranches;
+    try {
+      branches = listRepositoryBranches(cwd);
+    } catch (error) {
+      // Not a Git repository (or Git is unavailable): the browser just shows
+      // no suggestions instead of surfacing an error mid-typing.
+      return jsonResponse({
+        local: [],
+        remote: [],
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return jsonResponse(branches);
   }
   if (request.method === "POST" && url.pathname === "/api/tailscale") {
     const body = (await request.json().catch(() => undefined)) as
@@ -3310,10 +3407,14 @@ async function handleApi(request: Request): Promise<Response> {
           branch: worktreeBranch || undefined,
           startPoint: worktreeStartPoint || undefined,
         });
-        worktree = inheritManagedBranchOwnership(
-          worktree,
-          [...sessions.values()].map((candidate) => candidate.managedWorktree),
-        );
+        if (!worktree.existingCheckout) {
+          worktree = inheritManagedBranchOwnership(
+            worktree,
+            [...sessions.values()].map(
+              (candidate) => candidate.managedWorktree,
+            ),
+          );
+        }
         cwd = worktree.path;
       } catch (error) {
         return badRequest(
@@ -3326,42 +3427,39 @@ async function handleApi(request: Request): Promise<Response> {
     try {
       const manager = SessionManager.create(cwd);
       if (worktree) {
-        manager.appendCustomEntry(WORKTREE_SESSION_ENTRY, {
-          path: worktree.path,
-          repoRoot: worktree.repoRoot,
-          name: worktree.name,
-          branch: worktree.branch,
-          branchCreated: worktree.branchCreated,
-        });
+        manager.appendCustomEntry(
+          WORKTREE_SESSION_ENTRY,
+          worktree.existingCheckout
+            ? { managed: false }
+            : {
+                path: worktree.path,
+                repoRoot: worktree.repoRoot,
+                name: worktree.name,
+                branch: worktree.branch,
+                branchCreated: worktree.branchCreated,
+              },
+        );
       }
       if (body.name?.trim()) manager.appendSessionInfo(body.name.trim());
       initialSessionFile = persistInitialSession(manager);
       session = await createManagedSession(cwd, body.name, initialSessionFile);
-      if (worktree) session.managedWorktree = worktree;
+      if (worktree && !worktree.existingCheckout)
+        session.managedWorktree = worktree;
     } catch (error) {
+      const startupMessage =
+        error instanceof Error ? error.message : String(error);
       if (worktree) {
-        const startupMessage =
-          error instanceof Error ? error.message : String(error);
+        // An entered pre-existing checkout was not created here; clean up the
+        // stale initial session instead of retaining it for inspection.
+        if (worktree.existingCheckout) {
+          cleanupInitialSessionFile(initialSessionFile);
+          throw new Error(startupMessage);
+        }
         throw new Error(
           `${startupMessage}; initialized worktree retained at ${worktree.path} for inspection`,
         );
       }
-      if (initialSessionFile) {
-        const key = sessionFileKey(initialSessionFile);
-        const stale = sessionsByFile.get(key);
-        if (stale?.file && sessionFileKey(stale.file) === key) {
-          sessions.delete(stale.id);
-          sessionsByFile.delete(key);
-        }
-        if (isManagedSessionFile(initialSessionFile)) {
-          try {
-            deleteManagedSessionFile(initialSessionFile);
-          } catch {
-            /* preserve startup error */
-          }
-        }
-        rmSync(initialSessionFile, { force: true });
-      }
+      cleanupInitialSessionFile(initialSessionFile);
       throw error;
     }
     return jsonResponse(
@@ -3548,13 +3646,21 @@ async function cleanupAndExit(code = 0): Promise<void> {
   // Stop admitting queue work and drain each per-session mutation tail before the
   // final snapshot. This prevents a late mutation from racing or following flush.
   const records = [...sessions.values()];
-  await Promise.all(records.map((record) => quiesceQueueMutations(record)));
+  // A single rejected mutation tail must not skip the remaining cleanup or the
+  // final exit; each step is individually best-effort.
+  await Promise.all(
+    records.map((record) =>
+      quiesceQueueMutations(record).catch(() => undefined),
+    ),
+  );
   // Accepted queue items are removed in memory before their durable snapshot may
   // finish. Drain any existing write before the final write, all within one bound.
   await Promise.all(
     records.map(async (record) => {
       if (record.queueDirtyWorker)
-        await record.queueDirtyWorker.flushAndCancel(1_000);
+        await record.queueDirtyWorker
+          .flushAndCancel(1_000)
+          .catch(() => undefined);
     }),
   );
   for (const record of sessions.values()) {
@@ -3579,6 +3685,90 @@ async function cleanupAndExit(code = 0): Promise<void> {
   setTimeout(() => process.exit(code), 25).unref();
 }
 
+function webAssetsServable(): boolean {
+  try {
+    return statSync(join(distDir, "index.html")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decide whether this process may own machine-wide discovery (state file and
+ * Tailscale Serve route). A healthy daemon that already exists is deferred to;
+ * a daemon whose checkout no longer exists is replaced. Without this, a
+ * side-port daemon steals the shared Serve route and a daemon from a deleted
+ * checkout serves 404s forever while still passing /api/health.
+ */
+type DaemonOwnership =
+  | { action: "own" }
+  | { action: "abort"; reason: string }
+  | { action: "defer"; owner: DaemonHealth; republished: boolean };
+
+async function ownershipForIncumbent(
+  health: DaemonHealth,
+  republished: boolean,
+): Promise<DaemonOwnership> {
+  switch (incumbentDisposition(health)) {
+    case "serve":
+    case "keep":
+      // Defer to the incumbent (keep = failed build over an existing
+      // checkout; respawning from the same checkout would fail identically).
+      return { action: "defer", owner: health, republished };
+    case "evict": {
+      const stopped = await terminatePiWebDaemon(health.pid);
+      if (stopped) return { action: "own" };
+      // The incumbent still holds the port; never race it for the listener.
+      return {
+        action: "abort",
+        reason: `pid ${health.pid} still holds port ${health.port} and could not be stopped`,
+      };
+    }
+  }
+}
+
+async function resolveDaemonOwnership(): Promise<DaemonOwnership> {
+  const existing = readStateFile(stateFilePath);
+  if (existing && existing.pid !== process.pid && isPidAlive(existing.pid)) {
+    // Only a verified Pi web daemon may be probed or stopped; a recycled pid
+    // naming an unrelated process must never be signaled.
+    if (await isPiWebDaemonPid(existing.pid)) {
+      const health = await waitForDaemonHealth(
+        existing.port,
+        existing.pid,
+        3_000,
+      );
+      if (!health) {
+        // Verified daemon that never answers: wedged. Replace it, but only
+        // claim ownership when it actually stopped; otherwise another process
+        // still holds the port and Bun.serve would fail to listen.
+        if (await terminatePiWebDaemon(existing.pid)) return { action: "own" };
+        return {
+          action: "abort",
+          reason: `pid ${existing.pid} still holds port ${existing.port} and could not be stopped`,
+        };
+      }
+      // The state file already names the incumbent, so it needs no rewrite.
+      return ownershipForIncumbent(health, false);
+    }
+    return { action: "own" };
+  }
+  // Discovery state is missing or points at a dead pid. When the intended
+  // port already has a healthy daemon, adopt it by restoring its state file
+  // instead of racing it for the port; evict it only when provably broken.
+  if (port !== 0) {
+    const health = await waitForDaemonHealth(port, undefined, 1_500);
+    if (
+      health &&
+      isPidAlive(health.pid) &&
+      (await isPiWebDaemonPid(health.pid))
+    ) {
+      return ownershipForIncumbent(health, true);
+    }
+  }
+  return { action: "own" };
+}
+
 // web/dist is not checked in; rebuild it on every startup so a long-running
 // server always serves the client assets that match the checked-out source.
 async function buildWebClientAssets(): Promise<void> {
@@ -3597,6 +3787,45 @@ async function buildWebClientAssets(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // Signals must be handled before ownership resolution: eviction can wait a
+  // long time for the incumbent's graceful exit, and an interrupt during that
+  // window would otherwise kill this process with default handlers mid-eviction.
+  process.on("SIGINT", () => void cleanupAndExit(0));
+  process.on("SIGTERM", () => void cleanupAndExit(0));
+  process.on("exit", () => {
+    try {
+      if (readStateFile(stateFilePath)?.pid === process.pid)
+        rmSync(stateFilePath, { force: true });
+    } catch {
+      // ignore
+    }
+  });
+  const ownership = await resolveDaemonOwnership();
+  if (ownership.action === "abort") {
+    console.error(`pi web server could not start: ${ownership.reason}`);
+    process.exit(1);
+  }
+  if (ownership.action === "defer") {
+    // Another daemon already owns machine-wide discovery. Restoring its state
+    // file (when missing) lets Pi sessions find it; never touch its Tailscale
+    // Serve route, never race it for the port. Exit quietly instead.
+    if (ownership.republished) {
+      ensureDir(dirname(stateFilePath));
+      writeStateFileAtomic(stateFilePath, {
+        pid: ownership.owner.pid,
+        port: ownership.owner.port,
+        startedAt: Date.now(),
+        version: WEB_STATE_VERSION,
+        ...(isRecord(ownership.owner.tailscale)
+          ? { tailscale: ownership.owner.tailscale as TailscaleStatus }
+          : {}),
+      });
+    }
+    console.log(
+      `pi web server already running (pid ${ownership.owner.pid} on port ${ownership.owner.port}); deferring`,
+    );
+    process.exit(0);
+  }
   await buildWebClientAssets();
   await recoverStagedSourceSessionDeletions();
   webState = getOrCreateWebState();
@@ -3682,16 +3911,6 @@ async function main(): Promise<void> {
   // state with the final tailnet URL. Simultaneous startup losers never acquire
   // the port and therefore cannot overwrite the winning server's state.
   await configureTailscaleServe();
-  process.on("SIGINT", () => void cleanupAndExit(0));
-  process.on("SIGTERM", () => void cleanupAndExit(0));
-  process.on("exit", () => {
-    try {
-      if (readStateFile(stateFilePath)?.pid === process.pid)
-        rmSync(stateFilePath, { force: true });
-    } catch {
-      // ignore
-    }
-  });
   console.log(`pi web server listening on http://${host}:${port}`);
   missingSessionReconcileTimer = setInterval(
     () => void reconcileMissingSessionFiles(),

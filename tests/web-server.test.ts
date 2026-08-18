@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   appendFile,
   chmod,
@@ -31,6 +32,9 @@ import {
 } from "../web/server/worktrees.ts";
 
 let child: Bun.Subprocess | undefined;
+// A daemon this test expects another process to evict; reaped unconditionally
+// in afterEach so a failed eviction cannot leak it into later tests.
+let evictedDaemon: Bun.Subprocess | undefined;
 let tempDir: string | undefined;
 
 function session(
@@ -154,6 +158,15 @@ afterEach(async () => {
     child.kill("SIGTERM");
     await child.exited.catch(() => undefined);
     child = undefined;
+  }
+  if (evictedDaemon) {
+    try {
+      evictedDaemon.kill("SIGKILL");
+      await evictedDaemon.exited.catch(() => undefined);
+    } catch {
+      // Already gone via eviction.
+    }
+    evictedDaemon = undefined;
   }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
@@ -3709,6 +3722,98 @@ for await (const line of lines) {
   ).toContain("startup-fails");
 }, 15_000);
 
+test("entered checkout startup failure cleans up the stale initial session", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-worktree-entered-fail-test-"));
+  const repository = join(tempDir, "repository");
+  const fakeBin = join(tempDir, "bin");
+  const agentDir = join(tempDir, "pi-agent");
+  await mkdir(repository, { recursive: true });
+  await mkdir(fakeBin, { recursive: true });
+  await Bun.$`git -C ${repository} init -q -b main`;
+  await Bun.$`git -C ${repository} config user.name test`;
+  await Bun.$`git -C ${repository} config user.email test@example.com`;
+  await writeFile(join(repository, "README.md"), "base\n");
+  await Bun.$`git -C ${repository} add README.md`;
+  await Bun.$`git -C ${repository} commit -qm initial`;
+  const fakePi = join(fakeBin, "pi");
+  const piStartedMarker = join(tempDir, "base-pi-started");
+  await writeFile(
+    fakePi,
+    `#!/usr/bin/env bun
+import { existsSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const marker = ${JSON.stringify(piStartedMarker)};
+const fail = existsSync(marker);
+if (!fail) writeFileSync(marker, "started");
+const lines = createInterface({ input: process.stdin });
+for await (const line of lines) {
+  const request = JSON.parse(line);
+  if (fail && request.type === "get_state") {
+    process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: false, error: "worktree startup failed" }) + "\\n");
+    continue;
+  }
+  let data;
+  if (request.type === "get_state") data = { sessionId: "base-session", messageCount: 0, isStreaming: false };
+  else if (request.type === "get_entries") data = { entries: [], leafId: null };
+  else if (request.type === "get_session_stats") data = {};
+  process.stdout.write(JSON.stringify({ id: request.id, type: "response", command: request.type, success: true, data }) + "\\n");
+}
+`,
+  );
+  await chmod(fakePi, 0o755);
+  const statePath = join(tempDir, "server.json");
+  child = Bun.spawn({
+    cmd: ["bun", "web/server/index.ts"],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_PORT: "0",
+      PI_WEB_ROOT: process.cwd(),
+      PI_WEB_STATE_FILE: statePath,
+      PI_CODING_AGENT_DIR: agentDir,
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const { port } = await waitForState(statePath);
+  const origin = `http://127.0.0.1:${port}`;
+  const baseResponse = await fetch(`${origin}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", Origin: origin },
+    body: JSON.stringify({ cwd: repository }),
+  });
+  expect(baseResponse.status).toBe(201);
+  const base = (await baseResponse.json()) as { session: { id: string } };
+  expect(await readFile(piStartedMarker, "utf8")).toBe("started");
+  // main is already checked out in the primary checkout, so this enters it.
+  const failed = await fetch(`${origin}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", Origin: origin },
+    body: JSON.stringify({
+      cwd: repository,
+      worktreeName: "entered",
+      worktreeBranch: "main",
+    }),
+  });
+  expect(failed.status).toBe(500);
+  const body = await failed.text();
+  expect(body).toContain("worktree startup failed");
+  expect(body).not.toContain("retained at");
+  expect(existsSync(join(repository, ".pi", "worktrees"))).toBe(false);
+  const listed = await fetch(`${origin}/api/sessions`, {
+    headers: { Origin: origin },
+  });
+  const payload = (await listed.json()) as {
+    sessions: Array<{ id: string }>;
+  };
+  // The stale initial session for the failed entry is cleaned up; only the
+  // base session survives.
+  expect(payload.sessions.map((session) => session.id)).toEqual([
+    base.session.id,
+  ]);
+}, 15_000);
+
 test("native sessions route the web /compact command with optional instructions", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "pi-kit-native-compact-test-"));
   const statePath = join(tempDir, "server.json");
@@ -4934,3 +5039,141 @@ test("native Pi sessions expose semantic history without replacing their physica
     terminal.close();
   }
 }, 15_000);
+
+test("a second daemon defers to the running daemon instead of stealing discovery", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-web-defer-test-"));
+  const statePath = join(tempDir, "server.json");
+  const serverEnv = () => ({
+    ...process.env,
+    PI_WEB_PORT: "0",
+    PI_WEB_ROOT: process.cwd(),
+    PI_WEB_STATE_FILE: statePath,
+    PI_CODING_AGENT_DIR: join(tempDir, "pi-agent"),
+  });
+  const startServer = () =>
+    Bun.spawn({
+      cmd: ["bun", "run", "web/server/index.ts"],
+      cwd: process.cwd(),
+      env: serverEnv(),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  child = startServer();
+  const first = await waitForState(statePath);
+  const health = (await (
+    await fetch(`http://127.0.0.1:${first.port}/api/health`)
+  ).json()) as { assets?: boolean; root?: string; pid?: number };
+  expect(health.assets).toBe(true);
+  expect(health.root).toBe(process.cwd());
+  expect(health.pid).toBe(first.pid);
+
+  const second = startServer();
+  const outcome = await Promise.race([
+    second.exited.then((code) => code),
+    Bun.sleep(15_000).then(() => "timeout" as const),
+  ]);
+  if (outcome === "timeout") {
+    second.kill("SIGKILL");
+    throw new Error("second daemon did not defer to the running daemon");
+  }
+  expect(outcome).toBe(0);
+  const after = await waitForState(statePath);
+  expect(after.pid).toBe(first.pid);
+  expect(after.port).toBe(first.port);
+  const stillHealthy = await fetch(`http://127.0.0.1:${first.port}/api/health`);
+  expect(stillHealthy.ok).toBe(true);
+}, 30_000);
+
+test("a daemon whose checkout disappeared is replaced by the next spawn", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-web-evict-test-"));
+  const statePath = join(tempDir, "server.json");
+  const agentDir = join(tempDir, "pi-agent");
+  const vanishingRoot = join(tempDir, "vanishing-checkout");
+  await mkdir(vanishingRoot, { recursive: true });
+  const serverEnv = (root: string) => ({
+    ...process.env,
+    PI_WEB_PORT: "0",
+    PI_WEB_ROOT: root,
+    PI_WEB_STATE_FILE: statePath,
+    PI_CODING_AGENT_DIR: agentDir,
+  });
+  const startServer = (root: string) =>
+    Bun.spawn({
+      cmd: ["bun", "run", "web/server/index.ts"],
+      cwd: process.cwd(),
+      env: serverEnv(root),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  child = startServer(vanishingRoot);
+  const doomed = await waitForState(statePath);
+  const doomedHealth = (await (
+    await fetch(`http://127.0.0.1:${doomed.port}/api/health`)
+  ).json()) as { assets?: boolean; root?: string };
+  expect(doomedHealth.assets).toBe(false);
+  expect(doomedHealth.root).toBe(vanishingRoot);
+  const shell = await fetch(`http://127.0.0.1:${doomed.port}/`);
+  expect(shell.status).toBe(404);
+
+  await rm(vanishingRoot, { recursive: true, force: true });
+  // Keep an explicit handle on the doomed daemon: if eviction does not
+  // happen, afterEach must still reap it instead of leaking the process.
+  evictedDaemon = child;
+  const replacement = startServer(process.cwd());
+  child = replacement;
+  let successor: ServerStateFile | undefined;
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      const state = JSON.parse(
+        await readFile(statePath, "utf8"),
+      ) as ServerStateFile;
+      // The evicted daemon deletes the shared state file on exit; the
+      // replacement rewrites it once serving, so ENOENT is an expected window.
+      if (state.pid !== doomed.pid) {
+        successor = state;
+        break;
+      }
+    } catch {
+      // State file is between deletion and rewrite.
+    }
+    await Bun.sleep(50);
+  }
+  if (!successor) throw new Error("replacement daemon never took over");
+  const successorPort = successor.port;
+  const successorPid = successor.pid;
+  const successorHealth = await (async () => {
+    const deadline = Date.now() + 8_000;
+    for (;;) {
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${successorPort}/api/health`,
+        );
+        const payload = (await response.json()) as {
+          assets?: boolean;
+          pid?: number;
+        };
+        if (payload.assets === true) return payload;
+      } catch {
+        // Not listening yet.
+      }
+      if (Date.now() > deadline) throw new Error("successor never served");
+      await Bun.sleep(50);
+    }
+  })();
+  expect(successorHealth.pid).toBe(successorPid);
+  const restoredShell = await fetch(`http://127.0.0.1:${successorPort}/`);
+  expect(restoredShell.status).toBe(200);
+  expect(await restoredShell.text()).toContain('<div id="root"></div>');
+  let doomedStillAlive = true;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      process.kill(doomed.pid, 0);
+      await Bun.sleep(100);
+    } catch {
+      doomedStillAlive = false;
+      break;
+    }
+  }
+  expect(doomedStillAlive).toBe(false);
+}, 60_000);

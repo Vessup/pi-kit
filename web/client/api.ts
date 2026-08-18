@@ -134,6 +134,37 @@ export async function listSessions(): Promise<WebSession[]> {
   return Array.isArray(data) ? data : data.sessions;
 }
 
+export type BranchSuggestions = { local: string[]; remote: string[] };
+
+/** Autocomplete directories under home; returns [] when the daemon is older or the path is unreadable. */
+export async function listDirectorySuggestions(
+  query: string,
+): Promise<string[]> {
+  try {
+    const data = await fetchJson<{ directories: string[] }>(
+      `/api/directories?q=${encodeURIComponent(query)}`,
+      { cache: "no-store" },
+    );
+    return data.directories;
+  } catch {
+    return [];
+  }
+}
+
+/** Autocomplete local and remote branches for a repository; returns empty lists on failure. */
+export async function listBranchSuggestions(
+  cwd: string,
+): Promise<BranchSuggestions> {
+  try {
+    return await fetchJson<BranchSuggestions>(
+      `/api/branches?cwd=${encodeURIComponent(cwd)}`,
+      { cache: "no-store" },
+    );
+  } catch {
+    return { local: [], remote: [] };
+  }
+}
+
 export async function createSession(
   request: CreateSessionRequest,
 ): Promise<WebSession> {

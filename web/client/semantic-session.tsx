@@ -661,12 +661,12 @@ function TokenDetails({ session }: { session: WebSession }) {
       </span>
       {(usage?.cacheRead ?? 0) > 0 && (
         <span>
-          Cache read <strong>{formatTokenCount(usage?.cacheRead)}</strong>
+          Cache read <strong>{formatTokenCount(usage?.cacheRead ?? 0)}</strong>
         </span>
       )}
       {(usage?.cacheWrite ?? 0) > 0 && (
         <span>
-          Cache write <strong>{formatTokenCount(usage?.cacheWrite)}</strong>
+          Cache write <strong>{formatTokenCount(usage?.cacheWrite ?? 0)}</strong>
         </span>
       )}
       <span>
@@ -1229,15 +1229,15 @@ function ChangedLine({ row, language }: { row: DiffRow; language?: string }) {
         {pieces.map((piece, index) => {
           const highlighted =
             row.kind === "added"
-              ? piece.added
+              ? (piece.added ?? false)
               : row.kind === "removed"
-                ? piece.removed
+                ? (piece.removed ?? false)
                 : false;
           const hidden =
             row.kind === "added"
-              ? piece.removed
+              ? (piece.removed ?? false)
               : row.kind === "removed"
-                ? piece.added
+                ? (piece.added ?? false)
                 : false;
           return hidden ? null : (
             <HighlightedPiece

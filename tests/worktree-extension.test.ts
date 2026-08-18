@@ -708,6 +708,37 @@ test("existing worktree migration activates the replacement and rollback restore
       { name: "pr-30", branch: "tembo/cancel-builds", branchCreated: false },
     ]);
     expect(notifications.at(-1)).toContain("Returning to the original session");
+
+    // A checkout entered because its branch was already checked out elsewhere
+    // is never owned: verification failure rolls the session back without
+    // touching that checkout.
+    rollbackRequested = false;
+    dependencies.createWorktree = async () => ({
+      path: await realpath(targetCwd),
+      repoRoot: sourceCwd,
+      name: "pr-31",
+      branch: "tembo/cancel-builds",
+      branchCreated: false,
+      startPoint: "refs/heads/tembo/cancel-builds",
+      setupRan: false,
+      existingCheckout: true,
+    });
+    const existingRollback = await runWorktreeCommand(
+      'pr-31 --branch "tembo/cancel-builds"',
+      ctx,
+      dependencies,
+      "Must not roll back an entered checkout.",
+    );
+    expect(existingRollback.cancelled).toBe(true);
+    expect(rollbackRequested).toBe(true);
+    expect(rolledBackWorktrees).toEqual([
+      { name: "pr-30", branch: "tembo/cancel-builds", branchCreated: false },
+    ]);
+    expect(
+      notifications.some((message) =>
+        message.includes("already checked out at"),
+      ),
+    ).toBe(true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
