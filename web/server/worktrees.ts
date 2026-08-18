@@ -251,6 +251,12 @@ export type CreatedWebWorktree = {
   initialCommit?: string;
   /** Remote-tracking branch configured as upstream when one was requested. */
   upstream?: string;
+  /**
+   * True when the requested branch was already checked out in another
+   * registered worktree and that checkout is returned for entry instead of
+   * creating a managed one. Pi never owns, rolls back, or removes it.
+   */
+  existingCheckout?: boolean;
   setupRan: boolean;
 };
 export type ManagedWorktree = Pick<
@@ -460,6 +466,73 @@ function primaryRepositoryRoot(cwd: string): string {
 }
 
 type ResolvedStartPoint = { value: string; commit: string; upstream?: string };
+
+function revParseCommitOrNull(cwd: string, ref: string): string | undefined {
+  const result = spawnGit([
+    "-C",
+    cwd,
+    "rev-parse",
+    "--verify",
+    "--end-of-options",
+    `${ref}^{commit}`,
+  ]);
+  if (result.status !== 0) return undefined;
+  const commit = (result.stdout ?? "").trim().toLowerCase();
+  return /^[0-9a-f]{40,64}$/.test(commit) ? commit : undefined;
+}
+
+/** Ordered candidate refs for basing newly created branches on the default branch. */
+export function defaultStartPointRefs(
+  remoteDefaultBranch: string | undefined,
+): string[] {
+  return [remoteDefaultBranch, "refs/heads/main", "refs/heads/master"].filter(
+    (ref): ref is string => Boolean(ref),
+  );
+}
+
+function remoteDefaultBranch(repoRoot: string): string | undefined {
+  const symbolic = spawnGit([
+    "-C",
+    repoRoot,
+    "symbolic-ref",
+    "--quiet",
+    "refs/remotes/origin/HEAD",
+  ]);
+  if (symbolic.status !== 0) return undefined;
+  const target = (symbolic.stdout ?? "").trim();
+  if (!target.startsWith("refs/remotes/") || target.endsWith("/HEAD"))
+    return undefined;
+  return target.slice("refs/remotes/".length);
+}
+
+/**
+ * Resolve where a newly created branch starts when no start point was
+ * requested: the remote default branch (origin/HEAD), then local main, then
+ * local master. Repositories without a resolvable default branch fall back
+ * to the primary checkout's HEAD.
+ */
+export function resolveDefaultStartPoint(repoRoot: string): {
+  value: string;
+  commit: string;
+} {
+  for (const ref of defaultStartPointRefs(remoteDefaultBranch(repoRoot))) {
+    const commit = revParseCommitOrNull(repoRoot, ref);
+    if (commit) {
+      const value = ref.startsWith("refs/heads/")
+        ? ref.slice("refs/heads/".length)
+        : ref;
+      return { value, commit };
+    }
+  }
+  const head = gitOutput(repoRoot, [
+    "rev-parse",
+    "--verify",
+    "HEAD^{commit}",
+  ]).toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/.test(head))
+    throw new Error(`Invalid default start point HEAD: ${head}`);
+  return { value: head, commit: head };
+}
 
 function localBranchExists(cwd: string, branch: string): boolean {
   const result = spawnGit([
@@ -859,6 +932,10 @@ export async function removeManagedWorktreeAsync(
 
 /** Remove an operation-owned checkout and only the local branch created with it. */
 export function rollbackWebWorktree(worktree: CreatedWebWorktree): void {
+  if (worktree.existingCheckout)
+    throw new Error(
+      "Refusing to roll back a checkout entered because its branch was already checked out elsewhere",
+    );
   const verified = verifiedManagedWorktreeLocation(worktree);
   const dirty = gitOutput(verified.path, [
     "status",
@@ -973,11 +1050,38 @@ export async function createWebWorktree(
         `Local branch ${branch} already exists; omit --start-point to reuse it without moving it`,
       );
     const checkedOutAt = checkedOutBranchPath(repoRoot, branch);
-    if (checkedOutAt)
-      throw new Error(
-        `Local branch ${branch} is already checked out at ${checkedOutAt}`,
-      );
+    if (checkedOutAt) {
+      // The branch already lives in another registered worktree (possibly the
+      // primary checkout). Enter that checkout instead of creating a duplicate;
+      // it is never owned, rolled back, or removed by Pi.
+      const existing = inspectExistingWorktree(repoRoot, checkedOutAt);
+      if (existing.ref.kind !== "branch" || existing.ref.value !== branch) {
+        throw new Error(
+          `Local branch ${branch} is checked out at ${existing.path} but could not be entered safely`,
+        );
+      }
+      const head = gitOutput(existing.path, [
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+      ]).toLowerCase();
+      return {
+        path: existing.path,
+        repoRoot,
+        name,
+        branch,
+        branchCreated: false,
+        startPoint: `refs/heads/${branch}`,
+        initialCommit: head,
+        setupRan: false,
+        existingCheckout: true,
+      };
+    }
   }
+  const defaultStart =
+    branchExists || explicitStart
+      ? undefined
+      : resolveDefaultStartPoint(repoRoot);
   const branchStart = branchExists
     ? gitOutput(repoRoot, [
         "rev-parse",
@@ -985,11 +1089,12 @@ export async function createWebWorktree(
         "--end-of-options",
         `refs/heads/${branch}^{commit}`,
       ]).toLowerCase()
-    : (explicitStart?.commit ??
-      gitOutput(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase());
+    : (explicitStart?.commit ?? defaultStart?.commit);
+  if (!branchStart)
+    throw new Error("Could not resolve a start point for the new branch");
   const startPoint = branchExists
     ? `refs/heads/${branch}`
-    : (explicitStart?.value ?? branchStart);
+    : (explicitStart?.value ?? defaultStart?.value ?? branchStart);
   const worktree: CreatedWebWorktree = {
     path,
     repoRoot,

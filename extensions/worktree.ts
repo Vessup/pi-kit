@@ -719,11 +719,19 @@ async function runWorktreeCommandUnlocked(
         branch: input.branch,
         startPoint: input.startPoint,
       });
+      if (created.existingCheckout) {
+        ctx.ui.notify(
+          `Branch ${created.branch} is already checked out at ${created.path}; moving this conversation there instead.`,
+          "info",
+        );
+      }
       target = {
         path: created.path,
         repoRoot: created.repoRoot,
         ref: { kind: "branch", value: created.branch },
-        managed: created,
+        // A checkout entered because its branch was already checked out
+        // elsewhere is never owned, rolled back, or cleaned up by Pi.
+        managed: created.existingCheckout ? undefined : created,
       };
     }
   } catch (error) {
@@ -1002,6 +1010,7 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use the worktree tool when the user asks to create and enter a managed worktree or to enter an existing registered worktree; do not ask the user to type /worktree.",
       "For a pull request URL, resolve its actual head branch and available remote-tracking ref first; pass a safe directory name (for example pr-30) and the local branch (for example tembo/cancel-builds), plus the remote startPoint (for example origin/tembo/cancel-builds) only when that local branch does not already exist. Never infer the branch from the PR number.",
+      "New branches start at the repository's default branch (origin/HEAD, otherwise main) unless a start point is given. If the requested branch is already checked out in another worktree, the conversation simply moves into that checkout.",
       "When the user explicitly asks only to create a checkout without entering it, honor that as an ordinary Git operation without replacing the conversation.",
       "Call the worktree tool as the final tool for the current run and provide a self-contained continuation prompt for the replacement session.",
     ],

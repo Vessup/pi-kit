@@ -3156,6 +3156,25 @@ async function deleteSession(sessionId: string): Promise<void> {
     scheduleManagedWorktreeCleanup(sessionId, sessionFile, managedWorktree);
 }
 
+/** Drop a not-yet-activated initial session file and its registrations. */
+function cleanupInitialSessionFile(initialSessionFile?: string): void {
+  if (!initialSessionFile) return;
+  const key = sessionFileKey(initialSessionFile);
+  const stale = sessionsByFile.get(key);
+  if (stale?.file && sessionFileKey(stale.file) === key) {
+    sessions.delete(stale.id);
+    sessionsByFile.delete(key);
+  }
+  if (isManagedSessionFile(initialSessionFile)) {
+    try {
+      deleteManagedSessionFile(initialSessionFile);
+    } catch {
+      /* preserve the original startup error */
+    }
+  }
+  rmSync(initialSessionFile, { force: true });
+}
+
 async function handleApi(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (
@@ -3350,10 +3369,14 @@ async function handleApi(request: Request): Promise<Response> {
           branch: worktreeBranch || undefined,
           startPoint: worktreeStartPoint || undefined,
         });
-        worktree = inheritManagedBranchOwnership(
-          worktree,
-          [...sessions.values()].map((candidate) => candidate.managedWorktree),
-        );
+        if (!worktree.existingCheckout) {
+          worktree = inheritManagedBranchOwnership(
+            worktree,
+            [...sessions.values()].map(
+              (candidate) => candidate.managedWorktree,
+            ),
+          );
+        }
         cwd = worktree.path;
       } catch (error) {
         return badRequest(
@@ -3366,42 +3389,39 @@ async function handleApi(request: Request): Promise<Response> {
     try {
       const manager = SessionManager.create(cwd);
       if (worktree) {
-        manager.appendCustomEntry(WORKTREE_SESSION_ENTRY, {
-          path: worktree.path,
-          repoRoot: worktree.repoRoot,
-          name: worktree.name,
-          branch: worktree.branch,
-          branchCreated: worktree.branchCreated,
-        });
+        manager.appendCustomEntry(
+          WORKTREE_SESSION_ENTRY,
+          worktree.existingCheckout
+            ? { managed: false }
+            : {
+                path: worktree.path,
+                repoRoot: worktree.repoRoot,
+                name: worktree.name,
+                branch: worktree.branch,
+                branchCreated: worktree.branchCreated,
+              },
+        );
       }
       if (body.name?.trim()) manager.appendSessionInfo(body.name.trim());
       initialSessionFile = persistInitialSession(manager);
       session = await createManagedSession(cwd, body.name, initialSessionFile);
-      if (worktree) session.managedWorktree = worktree;
+      if (worktree && !worktree.existingCheckout)
+        session.managedWorktree = worktree;
     } catch (error) {
+      const startupMessage =
+        error instanceof Error ? error.message : String(error);
       if (worktree) {
-        const startupMessage =
-          error instanceof Error ? error.message : String(error);
+        // An entered pre-existing checkout was not created here; clean up the
+        // stale initial session instead of retaining it for inspection.
+        if (worktree.existingCheckout) {
+          cleanupInitialSessionFile(initialSessionFile);
+          throw new Error(startupMessage);
+        }
         throw new Error(
           `${startupMessage}; initialized worktree retained at ${worktree.path} for inspection`,
         );
       }
-      if (initialSessionFile) {
-        const key = sessionFileKey(initialSessionFile);
-        const stale = sessionsByFile.get(key);
-        if (stale?.file && sessionFileKey(stale.file) === key) {
-          sessions.delete(stale.id);
-          sessionsByFile.delete(key);
-        }
-        if (isManagedSessionFile(initialSessionFile)) {
-          try {
-            deleteManagedSessionFile(initialSessionFile);
-          } catch {
-            /* preserve startup error */
-          }
-        }
-        rmSync(initialSessionFile, { force: true });
-      }
+      cleanupInitialSessionFile(initialSessionFile);
       throw error;
     }
     return jsonResponse(
