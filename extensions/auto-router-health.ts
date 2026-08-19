@@ -301,11 +301,23 @@ export class AutoRouterHealthStore {
   private state: AutoRouterHealthState = {};
   private classifications: ClassificationLogEntry[] = [];
   private writeTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Resolved once, at construction, rather than fresh on every `flush()` - a real Pi process's
+   * agent dir never changes mid-life, and re-resolving `PI_CODING_AGENT_DIR` on each debounced
+   * flush instead means *any* code that touches that env var while a save is still pending (not
+   * just this instance's own caller) silently redirects an in-flight write to wherever the env
+   * var happens to point at that later moment - verified: this is exactly how a test suite's
+   * fixture data ended up in the real global `auto-router-state.json` on disk, repeatedly, even
+   * after each individual test file was fixed to wait out its own debounce window before its own
+   * teardown - a *different* file's `beforeEach` changing the same process-wide env var while an
+   * earlier file's save was still in flight was enough on its own.
+   */
+  private readonly path: string = statePath();
 
   async load(): Promise<void> {
     try {
       const parsed = parsePersisted(
-        JSON.parse(await readFile(statePath(), "utf8")),
+        JSON.parse(await readFile(this.path, "utf8")),
       );
       this.state = parsed.models;
       this.classifications = parsed.classifications;
@@ -392,7 +404,7 @@ export class AutoRouterHealthStore {
   }
 
   async flush(): Promise<void> {
-    const dir = dirname(statePath());
+    const dir = dirname(this.path);
     await mkdir(dir, { recursive: true });
     const tempPath = join(
       dir,
@@ -404,7 +416,7 @@ export class AutoRouterHealthStore {
         `${JSON.stringify({ models: this.state, classifications: this.classifications }, null, 2)}\n`,
         "utf8",
       );
-      await rename(tempPath, statePath());
+      await rename(tempPath, this.path);
     } finally {
       await rm(tempPath, { force: true }).catch(() => undefined);
     }

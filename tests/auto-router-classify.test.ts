@@ -15,6 +15,10 @@ const UNLISTED_API_MODEL = {
   id: "classifier",
   api: "anthropic-messages",
 } as unknown as Model<Api>;
+const CODEX_MODEL_WITH_MAX_SUPPORT = {
+  ...CODEX_MODEL,
+  thinkingLevelMap: { max: "max" },
+} as unknown as Model<Api>;
 
 function registryReplying(
   text: string,
@@ -230,11 +234,32 @@ test("classifyTurnComplexity caps output at CLASSIFY_MAX_TOKENS", async () => {
 test("classifyTurnComplexity passes the requested reasoningEffort through for a model on a known-safe API", async () => {
   const { registry, options } = registryCapturingOptions("medium");
 
-  await classifyTurnComplexity(registry, CODEX_MODEL, "do something", false, "max");
+  await classifyTurnComplexity(registry, CODEX_MODEL, "do something", false, "high");
 
   // This is the whole point of threading an effort through at all: a model configured with
-  // effort: "max" for its tier should actually reason at max here too, not some unrelated
+  // effort: "high" for its tier should actually reason at high here too, not some unrelated
   // provider default.
+  expect(options()?.reasoningEffort).toBe("high");
+});
+
+test("classifyTurnComplexity clamps \"max\" to \"xhigh\" when the model's thinkingLevelMap doesn't confirm support for it", async () => {
+  const { registry, options } = registryCapturingOptions("medium");
+
+  // CODEX_MODEL has no thinkingLevelMap at all - exactly the real-world case that produced empty
+  // classifier replies: "max" type-checks but isn't necessarily a level this specific model
+  // understands, unlike the standard low/medium/high/xhigh scale most providers recognize
+  // directly. Pi's own real-turn dispatch already clamps such a model down to "xhigh" - this
+  // mirrors that instead of blindly forwarding an unconfirmed value.
+  await classifyTurnComplexity(registry, CODEX_MODEL, "do something", false, "max");
+
+  expect(options()?.reasoningEffort).toBe("xhigh");
+});
+
+test("classifyTurnComplexity does not clamp \"max\" when the model's thinkingLevelMap explicitly confirms support for it", async () => {
+  const { registry, options } = registryCapturingOptions("medium");
+
+  await classifyTurnComplexity(registry, CODEX_MODEL_WITH_MAX_SUPPORT, "do something", false, "max");
+
   expect(options()?.reasoningEffort).toBe("max");
 });
 

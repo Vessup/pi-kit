@@ -12,7 +12,6 @@ import {
   modelKey,
   parseRetryAfterMs,
   pickHealthy,
-  SAVE_DEBOUNCE_MS,
 } from "../extensions/auto-router-health.ts";
 
 const NOW = 1_000_000_000_000;
@@ -21,13 +20,13 @@ const ENV_VAR = "PI_CODING_AGENT_DIR";
 let agentDir: string | undefined;
 const usedDirs: string[] = [];
 
-// AutoRouterHealthStore debounces its writes (~2s after the last record call), so a save
-// scheduled by one test can fire well after that test's own teardown - if `afterEach` restored
-// PI_CODING_AGENT_DIR to its prior (usually unset) value in the meantime, that late write would
-// land in the real global agent directory instead of a test's temp one. So the env var is never
-// restored to anything other than a temp dir for the whole run - only ever moved to a new one -
-// and every temp dir used stays on disk until all tests finish, so even a very late write can
-// only ever land somewhere harmless.
+// Each `AutoRouterHealthStore` instance pins its target path at construction rather than
+// re-resolving PI_CODING_AGENT_DIR on every debounced flush, so a save scheduled by one test stays
+// pointed at that test's own temp dir no matter what this (process-wide) env var is set to by the
+// time the write actually fires - including by an unrelated later test or file. No teardown
+// coordination needed as a result; the temp dirs themselves are still kept around until the whole
+// run finishes and cleaned up together, purely so a slightly-delayed write always has somewhere
+// valid to land.
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), "pi-kit-auto-router-health-"));
   usedDirs.push(agentDir);
@@ -35,18 +34,6 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  // The debounced save timer is unref'd, so it never blocks the process from exiting - but if
-  // this suite's own run happens to keep the process alive past SAVE_DEBOUNCE_MS anyway (e.g. a
-  // larger `bun test` invocation still running other files), a timer scheduled by one of this
-  // file's last tests can still fire *after* this hook would otherwise have already deleted
-  // PI_CODING_AGENT_DIR and removed its temp dir - at which point `statePath()` falls back to the
-  // real default `~/.pi/agent`, and the save actually corrupts the developer's real global
-  // auto-router-state.json with this suite's fixture data (verified: it happened - twice, since
-  // this file duplicates the same env-var isolation as auto-router-extension.test.ts but didn't
-  // get this fix the first time). Waiting out the debounce window here first, before touching the
-  // env var or any directory, guarantees every such timer fires while it's still pointed at a
-  // real (about-to-be-removed) temp dir.
-  await new Promise((resolve) => setTimeout(resolve, SAVE_DEBOUNCE_MS + 500));
   delete process.env[ENV_VAR];
   await Promise.all(usedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });

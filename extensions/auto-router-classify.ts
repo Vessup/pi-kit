@@ -111,10 +111,23 @@ export async function classifyTurnComplexity(
     // "off" isn't a valid raw reasoningEffort value on any API observed (that's the bug this
     // whole thing started from), and only route it through at all on APIs verified to accept our
     // effort vocabulary - see REASONING_EFFORT_SAFE_APIS.
-    const rawReasoningEffort =
+    const safeEffort =
       reasoningEffort !== "off" && REASONING_EFFORT_SAFE_APIS.has(model.api)
         ? reasoningEffort
         : undefined;
+    // `Model.thinkingLevelMap`'s own doc: "Missing keys use provider defaults. null marks a level
+    // as unsupported." In practice that means an unmapped level gets forwarded to the API as its
+    // own literal name - fine for the standard low/medium/high/xhigh scale most providers
+    // recognize directly, but "max" is the one level several models (verified: this is exactly
+    // what was happening) don't actually understand even though it type-checks, since it only
+    // exists as pi's own extended vocabulary. Pi's own real-turn dispatch already knows this and
+    // clamps such a model down to whatever it actually supports (observably "xhigh" here) - this
+    // mirrors that, but only for "max" specifically and only when the model's own map doesn't
+    // explicitly confirm support for it, rather than guessing at every model's real ceiling.
+    const rawReasoningEffort =
+      safeEffort === "max" && model.thinkingLevelMap?.max == null
+        ? "xhigh"
+        : safeEffort;
     const response = await modelRegistry.complete(
       model,
       {
