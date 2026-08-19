@@ -10,10 +10,15 @@ const CLASSIFY_TIMEOUT_MS = 15_000;
  * answer, and the previous fixed cap of 20 starved that to nothing (verified). Uncapped isn't the
  * right fix either though - `CLASSIFY_TIMEOUT_MS` only bounds wall-clock time, not tokens, so a
  * model that reasons at length but still finishes quickly could otherwise run up real cost on what
- * is supposed to be a cheap per-turn triage call. This leaves room for a few hundred tokens of
- * reasoning plus the answer while still capping the worst case.
+ * is supposed to be a cheap per-turn triage call. There's no explicit `reasoningEffort` set (see
+ * below), so a reasoning model's default reasoning depth for this trivial a prompt is unmeasured -
+ * sized generously to hedge against that uncertainty rather than tuned from real data. Still tiny
+ * next to a real agent turn's own token usage (input context there dwarfs this call's output cap
+ * by orders of magnitude - the two aren't comparable). If replies still come back empty/truncated
+ * at this size, that's a signal to control reasoning effort per-provider instead of just raising
+ * this further.
  */
-export const CLASSIFY_MAX_TOKENS = 2_000;
+export const CLASSIFY_MAX_TOKENS = 8_000;
 const VALID_LEVELS: readonly AutoRouterEffortLevel[] = [
   "minimal",
   "low",
