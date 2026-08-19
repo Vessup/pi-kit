@@ -470,12 +470,66 @@ test("routing to a model whose effort override it doesn't actually support clamp
   // ...but clamps to what the model actually supports rather than sending "max" and getting an
   // empty/broken response back (verified: this is exactly what was happening for real).
   expect(fake.thinkingLevelCalls).toEqual(["xhigh"]);
-  // ...and the mismatch is surfaced, not silently papered over.
-  const warning = ctx.notifications.find(
-    (n) => n.type === "warning" && n.message.includes("gpt-5.3-codex-spark"),
+  // ...and the mismatch is surfaced twice, not silently papered over: once as a whole-config
+  // summary at session start (independent of whether anything routes there yet)...
+  const startupWarning = ctx.notifications.find(
+    (n) => n.type === "warning" && n.message.includes("configured model effort"),
   );
-  expect(warning?.message).toContain('doesn\'t support "max"');
-  expect(warning?.message).toContain("xhigh");
+  expect(startupWarning?.message).toContain("gpt-5.3-codex-spark");
+  expect(startupWarning?.message).toContain('configured for "max"');
+  // ...and again, specifically, at the point this particular turn actually dispatched there.
+  const dispatchWarning = ctx.notifications.find(
+    (n) => n.type === "warning" && n.message.includes('doesn\'t support "max"'),
+  );
+  expect(dispatchWarning?.message).toContain("gpt-5.3-codex-spark");
+  expect(dispatchWarning?.message).toContain("xhigh");
+});
+
+test("session_start warns once per model+effort pair, even when it's configured in multiple tiers", async () => {
+  const spark = {
+    provider: "openai-codex",
+    id: "gpt-5.3-codex-spark",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  } as unknown as Model<Api>;
+  // Same model, same "max" override, configured in both low and medium - exactly the real
+  // gpt-5.3-codex-spark case.
+  await writeConfig({
+    efforts: {
+      low: { models: [{ provider: "openai-codex", id: "gpt-5.3-codex-spark", effort: "max" }] },
+      medium: { models: [{ provider: "openai-codex", id: "gpt-5.3-codex-spark", effort: "max" }] },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [spark] }), currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+
+  const startupWarnings = ctx.notifications.filter((n) => n.message.includes("configured model effort"));
+  expect(startupWarnings).toHaveLength(1);
+  expect(startupWarnings[0]?.message).toContain("1 configured model effort isn't");
+});
+
+test("session_start does not warn when every configured effort override is genuinely supported", async () => {
+  const luna = {
+    provider: "openai-codex",
+    id: "gpt-5.6-luna",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max", minimal: "low" },
+  } as unknown as Model<Api>;
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "openai-codex", id: "gpt-5.6-luna", effort: "max" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [luna] }), currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+
+  expect(ctx.notifications.some((n) => n.message.includes("configured model effort"))).toBe(false);
 });
 
 test("a routed turn's classification is logged and shows up in /usage, so a routing decision can be checked against what the classifier actually said", async () => {

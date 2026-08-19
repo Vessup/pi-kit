@@ -261,6 +261,47 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     return clamped;
   }
 
+  /**
+   * Whole-config check, once per session start: does every model with a configured `effort`
+   * override actually support that effort? `resolveSupportedEffort` above only warns about a
+   * mismatch once a turn happens to route to that specific model - a model configured only in a
+   * rarely-hit tier (or not yet routed to this session at all) could otherwise sit silently
+   * misconfigured indefinitely. This surfaces every mismatch in the config up front, in one
+   * notification, independent of whether anything has actually been routed yet.
+   */
+  function warnAboutUnsupportedConfiguredEfforts(
+    ctx: ExtensionContext,
+    settings: AutoRouterSettings,
+  ): void {
+    if (!ctx.hasUI) return;
+    const mismatches: string[] = [];
+    const seen = new Set<string>();
+    for (const tier of AUTO_ROUTER_EFFORT_ORDER) {
+      for (const ref of settings.efforts[tier]?.models ?? []) {
+        if (!ref.effort) continue;
+        const key = `${ref.provider}/${ref.id}:${ref.effort}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // Unresolvable here (no auth configured, wrong id, provider not registered, ...) is a
+        // separate, pre-existing failure mode already handled elsewhere (pickForTier's own
+        // fallback/notify path) - not this check's job to also report.
+        const model = ctx.modelRegistry.find(ref.provider, ref.id);
+        if (!model) continue;
+        const supported = getSupportedThinkingLevels(model);
+        if (supported.includes(ref.effort)) continue;
+        const clamped = clampThinkingLevel(model, ref.effort);
+        mismatches.push(
+          `${ref.provider}/${ref.id}: configured for "${ref.effort}" but only supports ${supported.join(", ")} (will run at "${clamped}")`,
+        );
+      }
+    }
+    if (mismatches.length === 0) return;
+    ctx.ui.notify(
+      `Auto: ${mismatches.length} configured model effort${mismatches.length === 1 ? "" : "s"} ${mismatches.length === 1 ? "isn't" : "aren't"} actually supported:\n${mismatches.map((line) => `  - ${line}`).join("\n")}`,
+      "warning",
+    );
+  }
+
   /** Pick the best available (resolved + healthy) model for `tier`, escalating to higher configured tiers when everything in `tier` is unhealthy, then falling back to the first available model anywhere as a last resort. */
   function pickForTier(
     ctx: ExtensionContext,
@@ -529,6 +570,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       publishFooter();
     }
     const settings = await readAutoRouterSettings();
+    warnAboutUnsupportedConfiguredEfforts(ctx, settings);
     void reconcileAllProviders(ctx.modelRegistry, settings);
     void ensureAutoModelScopedInGlobalSettings().catch(() => undefined);
   });
