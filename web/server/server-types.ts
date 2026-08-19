@@ -5,7 +5,14 @@ import type {
 } from "../protocol.js";
 import type { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import type { ManagedRpcSession } from "./managed-rpc-session.js";
+import type { createSessionFileCatalog } from "./session-file-catalog.js";
+import type { createSessionQueueCoordinator } from "./session-queue-coordinator.js";
 import type { ManagedWorktree } from "./worktrees.js";
+
+export type SessionFileCatalog = ReturnType<typeof createSessionFileCatalog>;
+export type SessionQueueCoordinator = ReturnType<
+  typeof createSessionQueueCoordinator
+>;
 
 export type WebSocketKind = "client" | "agent";
 export type SessionSource = WebSession["source"];

@@ -12,5 +12,5 @@
     "noEmit": true,
     "strict": true
   },
-  "include": ["./index.ts", "../protocol.ts", "../worktree-command.ts"]
+  "include": ["./**/*.ts", "../protocol.ts", "../worktree-command.ts"]
 }
