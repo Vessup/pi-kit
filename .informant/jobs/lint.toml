@@ -1,0 +1,7 @@
+name = "lint"
+command = """
+set -eu
+bun run lint
+"""
+timeout_minutes = 10
+container = { cpu = 1, memory_mb = 2048 }
