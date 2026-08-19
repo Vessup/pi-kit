@@ -352,10 +352,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       level = "(pinned)";
       classifierReply = `pinned to ${pinnedTier} - not classified`;
     } else {
-      const classifierPool = resolveAvailableModels(
-        ctx.modelRegistry,
-        settings.efforts.medium?.models ?? allConfiguredModels(settings),
-      );
+      const classifierRefs = settings.efforts.medium?.models ?? allConfiguredModels(settings);
+      const classifierPool = resolveAvailableModels(ctx.modelRegistry, classifierRefs);
       const classifierRef = healthStore.pickHealthy(classifierPool);
       const classifierModel = classifierRef
         ? classifierPool.find(
@@ -367,11 +365,16 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       let classifiedLevel: AutoRouterEffortLevel = "medium";
       classifierReply = "(no classifier available)";
       if (classifierModel) {
+        // Same effort this model would actually be dispatched at for real work in the medium
+        // tier - its own configured override, or "medium" itself - so the classify call reasons
+        // at the level the user configured for it rather than an unrelated provider default.
+        const classifierEffort = resolveEffort(classifierRefs, classifierModel, "medium");
         const result = await classifyTurnComplexity(
           ctx.modelRegistry,
           classifierModel,
           prompt,
           hasImages,
+          classifierEffort,
         );
         classifiedLevel = result.level;
         classifierReply = result.reply;

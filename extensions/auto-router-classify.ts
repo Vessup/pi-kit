@@ -29,6 +29,22 @@ const VALID_LEVELS: readonly AutoRouterEffortLevel[] = [
 ];
 const DEFAULT_LEVEL: AutoRouterEffortLevel = "medium";
 
+/**
+ * APIs whose raw `reasoningEffort` field is verified (against each module's own type
+ * declaration) to accept the full `AutoRouterEffortLevel` vocabulary (minus "off", handled
+ * separately below). Passing it to any other API either does nothing - most providers (Anthropic,
+ * Z.ai, MiniMax, OpenCode Go, ...) have no such field at all - or, worse, sends a value invalid
+ * for that API's own narrower enum: Mistral's `reasoningEffort` only accepts "none" | "high", so
+ * "medium" would be exactly the kind of invalid-value bug this allowlist exists to avoid
+ * repeating.
+ */
+const REASONING_EFFORT_SAFE_APIS: ReadonlySet<string> = new Set([
+  "openai-completions",
+  "openai-responses",
+  "azure-openai-responses",
+  "openai-codex-responses",
+]);
+
 const SYSTEM_PROMPT = `You triage the complexity of a single upcoming coding-agent turn so it can be routed to an appropriately capable model. Reply with exactly one word, lowercase, no punctuation: minimal, low, medium, high, xhigh, or max.
 
 - minimal: rote, no real reasoning needed. A one-word answer, a pure formatting pass, a trivial rename, echoing back something already known.
@@ -71,17 +87,20 @@ function numeric(value: unknown): number {
 }
 
 /**
- * Classify a turn's complexity using the given (default/medium-tier) model. Never throws and
- * never blocks indefinitely: a bounded timeout, a provider error, or an unparseable reply all
- * fall back to `medium` so classification can never stall or break the user's turn - but that
- * fallback is reported via `failed: true` rather than silently, so a caller can still tell a real
- * judgment apart from a classifier that never actually answered.
+ * Classify a turn's complexity using the given (default/medium-tier) model, reasoning at
+ * `reasoningEffort` - the same effort this model is actually dispatched at for real work (its own
+ * configured override, or its tier's name), so the classify call doesn't reason at some unrelated
+ * provider default. Never throws and never blocks indefinitely: a bounded timeout, a provider
+ * error, or an unparseable reply all fall back to `medium` so classification can never stall or
+ * break the user's turn - but that fallback is reported via `failed: true` rather than silently,
+ * so a caller can still tell a real judgment apart from a classifier that never actually answered.
  */
 export async function classifyTurnComplexity(
   modelRegistry: ModelRegistry,
   model: Model<Api>,
   prompt: string,
   hasImages: boolean,
+  reasoningEffort: AutoRouterEffortLevel,
 ): Promise<ClassificationResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
@@ -89,6 +108,13 @@ export async function classifyTurnComplexity(
     const text = hasImages
       ? `${prompt}\n\n(This turn also includes attached images.)`
       : prompt;
+    // "off" isn't a valid raw reasoningEffort value on any API observed (that's the bug this
+    // whole thing started from), and only route it through at all on APIs verified to accept our
+    // effort vocabulary - see REASONING_EFFORT_SAFE_APIS.
+    const rawReasoningEffort =
+      reasoningEffort !== "off" && REASONING_EFFORT_SAFE_APIS.has(model.api)
+        ? reasoningEffort
+        : undefined;
     const response = await modelRegistry.complete(
       model,
       {
@@ -103,21 +129,12 @@ export async function classifyTurnComplexity(
       },
       {
         signal: controller.signal,
-        // No `reasoningEffort` here, deliberately: `ModelRegistry.complete()` passes it straight
-        // through to each API module's own raw request builder, and "off" isn't a valid value in
-        // any OpenAI-family reasoningEffort enum (openai-completions/-responses/azure-responses
-        // accept only minimal..max; openai-codex-responses accepts "none" instead of "off"). It
-        // only type-checked here because `model: Model<Api>` is the broad provider union, not the
-        // specific API this model actually uses. Concretely, passing "off" to an
-        // openai-codex-responses model sends a literally invalid `reasoning.effort: "off"` in the
-        // request body - verified: this is why the classifier came back with no text at all every
-        // time it landed on a codex model, silently defaulting every turn to "medium" instead of
-        // ever actually classifying it. Since there's no single sentinel valid across every
-        // provider's raw enum, the safe provider-agnostic choice is to not specify one at all and
-        // let each model use its own default.
         cacheRetention: "none",
         sessionId: uuidv7(),
         maxTokens: CLASSIFY_MAX_TOKENS,
+        ...(rawReasoningEffort !== undefined
+          ? { reasoningEffort: rawReasoningEffort }
+          : {}),
       },
     );
     const reply = response.content
