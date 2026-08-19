@@ -162,12 +162,22 @@ export async function classifyTurnComplexity(
           cost: numeric(response.usage.cost?.total),
         }
       : undefined;
+    // `String.match()` returns `null`, not `undefined`, when nothing matches.
+    const failed = match === null;
+    // `stopReason: "length"` means the model hit CLASSIFY_MAX_TOKENS before finishing - distinct
+    // from a model that finished cleanly but just didn't say a recognizable level word. Naming
+    // the actual cause here means a diagnosis doesn't have to be guessed at: it's directly
+    // actionable (raise CLASSIFY_MAX_TOKENS, or this model needs less reasoning effort) rather
+    // than indistinguishable from any other reason the reply came back empty.
+    const reasonSuffix =
+      failed && response.stopReason === "length"
+        ? ` (hit CLASSIFY_MAX_TOKENS=${CLASSIFY_MAX_TOKENS} before answering)`
+        : "";
     return {
       level,
       usage,
-      reply: reply || "(empty reply)",
-      // `String.match()` returns `null`, not `undefined`, when nothing matches.
-      failed: match === null,
+      reply: `${reply || "(empty reply)"}${reasonSuffix}`,
+      failed,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

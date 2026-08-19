@@ -28,6 +28,19 @@ function registryReplying(
   } as unknown as ModelRegistry;
 }
 
+function registryStoppingAt(
+  text: string,
+  stopReason: string,
+): ModelRegistry {
+  return {
+    complete: async () => ({
+      content: [{ type: "text", text }],
+      usage: undefined,
+      stopReason,
+    }),
+  } as unknown as ModelRegistry;
+}
+
 /** Captures the raw options object passed to `complete()`, so a test can assert on the actual
  * request shape rather than just the parsed result - the only way to catch a regression like the
  * invalid `reasoningEffort: "off"` this suite didn't previously guard against. */
@@ -122,6 +135,33 @@ test("classifyTurnComplexity flags a completely empty reply as failed too, not j
   expect(result.level).toBe("medium");
   expect(result.reply).toBe("(empty reply)");
   expect(result.failed).toBe(true);
+});
+
+test("classifyTurnComplexity names CLASSIFY_MAX_TOKENS truncation specifically, not just \"(empty reply)\"", async () => {
+  // stopReason "length" means the model hit the token cap before finishing - directly actionable
+  // (raise the cap, or this model needs less reasoning effort) rather than indistinguishable from
+  // any other reason the reply came back unusable.
+  const result = await classifyTurnComplexity(
+    registryStoppingAt("", "length"),
+    MODEL,
+    "do something",
+    false,
+    "medium",
+  );
+  expect(result.failed).toBe(true);
+  expect(result.reply).toContain(`CLASSIFY_MAX_TOKENS=${CLASSIFY_MAX_TOKENS}`);
+});
+
+test("classifyTurnComplexity does not claim truncation when the reply is just empty for some other reason", async () => {
+  const result = await classifyTurnComplexity(
+    registryStoppingAt("", "stop"),
+    MODEL,
+    "do something",
+    false,
+    "medium",
+  );
+  expect(result.failed).toBe(true);
+  expect(result.reply).not.toContain("CLASSIFY_MAX_TOKENS");
 });
 
 test("classifyTurnComplexity does not flag a genuine parsed verdict as failed", async () => {

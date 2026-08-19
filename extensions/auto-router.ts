@@ -16,6 +16,7 @@ import {
   type ModelHealthEntry,
   type ModelIdentity,
   modelKey,
+  truncateForLog,
 } from "./auto-router-health.js";
 import { normalizeModelId, reconcileProviderQuota } from "./auto-router-quota.js";
 import {
@@ -386,8 +387,11 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
         // medium verdict otherwise, which is exactly what let a sustained classifier failure go
         // unnoticed. Surface it visibly rather than let it pass as ordinary routing.
         if (result.failed && ctx.hasUI) {
+          // A failed reply can now run up to CLASSIFY_MAX_TOKENS long (e.g. a reasoning model
+          // that never got to its answer) - bound it here the same way it's already bounded for
+          // /usage below, so one long reply can't flood this notification and bury the warning.
           ctx.ui.notify(
-            `Auto: classifier gave no usable answer (${result.reply}); defaulting to ${classifiedLevel} for this turn. Check /usage for details.`,
+            `Auto: classifier gave no usable answer (${truncateForLog(result.reply, 500)}); defaulting to ${classifiedLevel} for this turn. Check /usage for details.`,
             "warning",
           );
         }
