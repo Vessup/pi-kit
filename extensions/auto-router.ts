@@ -1,4 +1,9 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+  type Api,
+  clampThinkingLevel,
+  getSupportedThinkingLevels,
+  type Model,
+} from "@earendil-works/pi-ai";
 import {
   DynamicBorder,
   type ExtensionAPI,
@@ -229,6 +234,33 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     return ref?.effort ?? tier;
   }
 
+  /**
+   * `requested` if `model` genuinely supports it, or the closest level it actually does (via
+   * pi-ai's own `clampThinkingLevel` - the same resolution real turn dispatch already relies on,
+   * not a guess of our own) - warning the user directly whenever a substitution was needed, since
+   * a configured `effort` a model silently can't honor is exactly what turned a "medium (max
+   * effort)" routing decision into an unexplained empty classifier reply, undetected, for two full
+   * PRs. Applies to both the classifier's own reasoning effort and real per-turn dispatch, so
+   * fixing (or leaving) the mismatch is the user's informed choice either way, not something Auto
+   * quietly papers over in only one of the two places it happens.
+   */
+  function resolveSupportedEffort(
+    ctx: ExtensionContext,
+    model: Model<Api>,
+    requested: AutoRouterEffortLevel,
+  ): AutoRouterEffortLevel {
+    const supported = getSupportedThinkingLevels(model);
+    if (supported.includes(requested)) return requested;
+    const clamped = clampThinkingLevel(model, requested) as AutoRouterEffortLevel;
+    if (ctx.hasUI) {
+      ctx.ui.notify(
+        `Auto: ${model.provider}/${model.id} doesn't support "${requested}" effort (configured for it in ~/.pi/agent/settings.json) - it supports ${supported.join(", ")}. Using "${clamped}" instead.`,
+        "warning",
+      );
+    }
+    return clamped;
+  }
+
   /** Pick the best available (resolved + healthy) model for `tier`, escalating to higher configured tiers when everything in `tier` is unhealthy, then falling back to the first available model anywhere as a last resort. */
   function pickForTier(
     ctx: ExtensionContext,
@@ -329,7 +361,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
         }
         return;
       }
-      await pi.setThinkingLevel(effort);
+      await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
     } finally {
       routingInFlight = false;
     }
@@ -369,7 +401,13 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
         // Same effort this model would actually be dispatched at for real work in the medium
         // tier - its own configured override, or "medium" itself - so the classify call reasons
         // at the level the user configured for it rather than an unrelated provider default.
-        const classifierEffort = resolveEffort(classifierRefs, classifierModel, "medium");
+        // resolveSupportedEffort further clamps (and warns) if this model doesn't actually
+        // support that configured level at all.
+        const classifierEffort = resolveSupportedEffort(
+          ctx,
+          classifierModel,
+          resolveEffort(classifierRefs, classifierModel, "medium"),
+        );
         const result = await classifyTurnComplexity(
           ctx.modelRegistry,
           classifierModel,

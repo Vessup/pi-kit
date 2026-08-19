@@ -49,8 +49,17 @@ async function writeConfig(settings: AutoRouterSettings): Promise<void> {
   );
 }
 
+// reasoning: true plus explicit xhigh/max support so fixture models are "fully capable" by
+// default - these tests are about routing/escalation/pinning logic, not about effort-support
+// clamping specifically (that has its own dedicated tests below), and getSupportedThinkingLevels
+// otherwise excludes xhigh/max for any model without an explicit thinkingLevelMap entry for them.
 function model(provider: string, id: string): Model<Api> {
-  return { provider, id } as unknown as Model<Api>;
+  return {
+    provider,
+    id,
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+  } as unknown as Model<Api>;
 }
 
 const AUTO_PLACEHOLDER = model("auto", "auto");
@@ -426,6 +435,47 @@ test("a model's `effort` override sets its own thinking level, independent of th
   const notified = ctx.notifications.at(-1)?.message ?? "";
   expect(notified).toContain("high"); // still grouped under its configured tier
   expect(notified).toContain("at max effort"); // classification log shows the real applied effort
+});
+
+test("routing to a model whose effort override it doesn't actually support clamps to what it does, and warns instead of silently substituting", async () => {
+  // Mirrors the real gpt-5.3-codex-spark case: reasoning-capable, and its own thinkingLevelMap
+  // confirms "xhigh" support but has no entry for "max" at all - so per pi-ai's own
+  // getSupportedThinkingLevels, this model does not actually support "max" despite it type-checking
+  // as a valid AutoRouterEffortLevel.
+  const spark = {
+    provider: "openai-codex",
+    id: "gpt-5.3-codex-spark",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  } as unknown as Model<Api>;
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [{ provider: "openai-codex", id: "gpt-5.3-codex-spark", effort: "max" }],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [spark], classify: () => "medium" });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  // Still routes and dispatches - never blocks the turn over this...
+  expect(fake.setModelCalls).toEqual([spark]);
+  // ...but clamps to what the model actually supports rather than sending "max" and getting an
+  // empty/broken response back (verified: this is exactly what was happening for real).
+  expect(fake.thinkingLevelCalls).toEqual(["xhigh"]);
+  // ...and the mismatch is surfaced, not silently papered over.
+  const warning = ctx.notifications.find(
+    (n) => n.type === "warning" && n.message.includes("gpt-5.3-codex-spark"),
+  );
+  expect(warning?.message).toContain('doesn\'t support "max"');
+  expect(warning?.message).toContain("xhigh");
 });
 
 test("a routed turn's classification is logged and shows up in /usage, so a routing decision can be checked against what the classifier actually said", async () => {
