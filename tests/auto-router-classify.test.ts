@@ -230,11 +230,23 @@ test("classifyTurnComplexity caps output at CLASSIFY_MAX_TOKENS", async () => {
 test("classifyTurnComplexity passes the requested reasoningEffort through for a model on a known-safe API", async () => {
   const { registry, options } = registryCapturingOptions("medium");
 
-  await classifyTurnComplexity(registry, CODEX_MODEL, "do something", false, "max");
+  await classifyTurnComplexity(registry, CODEX_MODEL, "do something", false, "high");
 
   // This is the whole point of threading an effort through at all: a model configured with
-  // effort: "max" for its tier should actually reason at max here too, not some unrelated
+  // effort: "high" for its tier should actually reason at high here too, not some unrelated
   // provider default.
+  expect(options()?.reasoningEffort).toBe("high");
+});
+
+test("classifyTurnComplexity trusts whatever reasoningEffort it's given verbatim, including \"max\"", async () => {
+  // Whether a model genuinely supports the requested level is the caller's job to resolve (via
+  // getSupportedThinkingLevels/clampThinkingLevel in auto-router.ts, which warns the user
+  // directly if their configured effort doesn't match the model's real capabilities) - not
+  // something this function should second-guess or silently substitute on its own.
+  const { registry, options } = registryCapturingOptions("medium");
+
+  await classifyTurnComplexity(registry, CODEX_MODEL, "do something", false, "max");
+
   expect(options()?.reasoningEffort).toBe("max");
 });
 

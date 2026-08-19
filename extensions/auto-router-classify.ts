@@ -108,6 +108,12 @@ export async function classifyTurnComplexity(
     const text = hasImages
       ? `${prompt}\n\n(This turn also includes attached images.)`
       : prompt;
+    // `reasoningEffort` is expected to already be genuinely supported by `model` - the caller
+    // (auto-router.ts) resolves it through pi-ai's own `getSupportedThinkingLevels`/
+    // `clampThinkingLevel` first and warns the user directly if their config asked for something
+    // this model doesn't actually support, rather than this function quietly substituting
+    // something else with no visibility into that mismatch.
+    //
     // "off" isn't a valid raw reasoningEffort value on any API observed (that's the bug this
     // whole thing started from), and only route it through at all on APIs verified to accept our
     // effort vocabulary - see REASONING_EFFORT_SAFE_APIS.

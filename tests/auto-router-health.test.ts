@@ -20,13 +20,13 @@ const ENV_VAR = "PI_CODING_AGENT_DIR";
 let agentDir: string | undefined;
 const usedDirs: string[] = [];
 
-// AutoRouterHealthStore debounces its writes (~2s after the last record call), so a save
-// scheduled by one test can fire well after that test's own teardown - if `afterEach` restored
-// PI_CODING_AGENT_DIR to its prior (usually unset) value in the meantime, that late write would
-// land in the real global agent directory instead of a test's temp one. So the env var is never
-// restored to anything other than a temp dir for the whole run - only ever moved to a new one -
-// and every temp dir used stays on disk until all tests finish, so even a very late write can
-// only ever land somewhere harmless.
+// Each `AutoRouterHealthStore` instance pins its target path at construction rather than
+// re-resolving PI_CODING_AGENT_DIR on every debounced flush, so a save scheduled by one test stays
+// pointed at that test's own temp dir no matter what this (process-wide) env var is set to by the
+// time the write actually fires - including by an unrelated later test or file. No teardown
+// coordination needed as a result; the temp dirs themselves are still kept around until the whole
+// run finishes and cleaned up together, purely so a slightly-delayed write always has somewhere
+// valid to land.
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), "pi-kit-auto-router-health-"));
   usedDirs.push(agentDir);

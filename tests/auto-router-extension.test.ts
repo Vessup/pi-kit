@@ -10,7 +10,6 @@ import type {
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import autoRouter, { escapeTableCell } from "../extensions/auto-router.ts";
-import { SAVE_DEBOUNCE_MS } from "../extensions/auto-router-health.ts";
 import type { AutoRouterSettings } from "../extensions/auto-router-settings.ts";
 
 test("escapeTableCell neutralizes both pipes and line breaks, so one bad reply can't break the rest of the table", () => {
@@ -24,13 +23,13 @@ const ENV_VAR = "PI_CODING_AGENT_DIR";
 let agentDir: string | undefined;
 const usedDirs: string[] = [];
 
-// The extension's internal AutoRouterHealthStore debounces its writes (~2s after the last
-// record call), so a save scheduled by one test can fire well after that test's own teardown -
-// if `afterEach` restored PI_CODING_AGENT_DIR to its prior (usually unset) value in the
-// meantime, that late write would land in the real global agent directory instead of a test's
-// temp one. So the env var is never restored to anything other than a temp dir for the whole
-// run - only ever moved to a new one - and every temp dir used stays on disk until all tests
-// finish, so even a very late write can only ever land somewhere harmless.
+// Each AutoRouterHealthStore instance pins its target path at construction rather than
+// re-resolving PI_CODING_AGENT_DIR on every debounced flush, so a save scheduled by one test
+// stays pointed at that test's own temp dir no matter what this (process-wide) env var is set to
+// by the time the write actually fires - including by an unrelated later test or file. No
+// teardown coordination needed as a result; the temp dirs themselves are still kept around until
+// the whole run finishes and cleaned up together, purely so a slightly-delayed write always has
+// somewhere valid to land.
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), "pi-kit-auto-router-agent-"));
   usedDirs.push(agentDir);
@@ -38,16 +37,6 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  // The debounced save timer is unref'd, so it never blocks the process from exiting - but if
-  // this suite's own run happens to keep the process alive past SAVE_DEBOUNCE_MS anyway (e.g.
-  // a larger `bun test` invocation still running other files), a timer scheduled by one of this
-  // file's last tests can still fire *after* this hook would otherwise have already deleted
-  // PI_CODING_AGENT_DIR and removed its temp dir - at which point `statePath()` falls back to
-  // the real default `~/.pi/agent`, and the save actually corrupts the developer's real global
-  // auto-router-state.json with this suite's fixture data (verified: it happened). Waiting out
-  // the debounce window here first, before touching the env var or any directory, guarantees
-  // every such timer fires while it's still pointed at a real (about-to-be-removed) temp dir.
-  await new Promise((resolve) => setTimeout(resolve, SAVE_DEBOUNCE_MS + 500));
   delete process.env[ENV_VAR];
   await Promise.all(usedDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -60,8 +49,17 @@ async function writeConfig(settings: AutoRouterSettings): Promise<void> {
   );
 }
 
+// reasoning: true plus explicit xhigh/max support so fixture models are "fully capable" by
+// default - these tests are about routing/escalation/pinning logic, not about effort-support
+// clamping specifically (that has its own dedicated tests below), and getSupportedThinkingLevels
+// otherwise excludes xhigh/max for any model without an explicit thinkingLevelMap entry for them.
 function model(provider: string, id: string): Model<Api> {
-  return { provider, id } as unknown as Model<Api>;
+  return {
+    provider,
+    id,
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+  } as unknown as Model<Api>;
 }
 
 const AUTO_PLACEHOLDER = model("auto", "auto");
@@ -437,6 +435,101 @@ test("a model's `effort` override sets its own thinking level, independent of th
   const notified = ctx.notifications.at(-1)?.message ?? "";
   expect(notified).toContain("high"); // still grouped under its configured tier
   expect(notified).toContain("at max effort"); // classification log shows the real applied effort
+});
+
+test("routing to a model whose effort override it doesn't actually support clamps to what it does, and warns instead of silently substituting", async () => {
+  // Mirrors the real gpt-5.3-codex-spark case: reasoning-capable, and its own thinkingLevelMap
+  // confirms "xhigh" support but has no entry for "max" at all - so per pi-ai's own
+  // getSupportedThinkingLevels, this model does not actually support "max" despite it type-checking
+  // as a valid AutoRouterEffortLevel.
+  const spark = {
+    provider: "openai-codex",
+    id: "gpt-5.3-codex-spark",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  } as unknown as Model<Api>;
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [{ provider: "openai-codex", id: "gpt-5.3-codex-spark", effort: "max" }],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const registry = fakeModelRegistry({ models: [spark], classify: () => "medium" });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  // Still routes and dispatches - never blocks the turn over this...
+  expect(fake.setModelCalls).toEqual([spark]);
+  // ...but clamps to what the model actually supports rather than sending "max" and getting an
+  // empty/broken response back (verified: this is exactly what was happening for real).
+  expect(fake.thinkingLevelCalls).toEqual(["xhigh"]);
+  // ...and the mismatch is surfaced twice, not silently papered over: once as a whole-config
+  // summary at session start (independent of whether anything routes there yet)...
+  const startupWarning = ctx.notifications.find(
+    (n) => n.type === "warning" && n.message.includes("configured model effort"),
+  );
+  expect(startupWarning?.message).toContain("gpt-5.3-codex-spark");
+  expect(startupWarning?.message).toContain('configured for "max"');
+  // ...and again, specifically, at the point this particular turn actually dispatched there.
+  const dispatchWarning = ctx.notifications.find(
+    (n) => n.type === "warning" && n.message.includes('doesn\'t support "max"'),
+  );
+  expect(dispatchWarning?.message).toContain("gpt-5.3-codex-spark");
+  expect(dispatchWarning?.message).toContain("xhigh");
+});
+
+test("session_start warns once per model+effort pair, even when it's configured in multiple tiers", async () => {
+  const spark = {
+    provider: "openai-codex",
+    id: "gpt-5.3-codex-spark",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  } as unknown as Model<Api>;
+  // Same model, same "max" override, configured in both low and medium - exactly the real
+  // gpt-5.3-codex-spark case.
+  await writeConfig({
+    efforts: {
+      low: { models: [{ provider: "openai-codex", id: "gpt-5.3-codex-spark", effort: "max" }] },
+      medium: { models: [{ provider: "openai-codex", id: "gpt-5.3-codex-spark", effort: "max" }] },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [spark] }), currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+
+  const startupWarnings = ctx.notifications.filter((n) => n.message.includes("configured model effort"));
+  expect(startupWarnings).toHaveLength(1);
+  expect(startupWarnings[0]?.message).toContain("1 configured model effort isn't");
+});
+
+test("session_start does not warn when every configured effort override is genuinely supported", async () => {
+  const luna = {
+    provider: "openai-codex",
+    id: "gpt-5.6-luna",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max", minimal: "low" },
+  } as unknown as Model<Api>;
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "openai-codex", id: "gpt-5.6-luna", effort: "max" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({ modelRegistry: fakeModelRegistry({ models: [luna] }), currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+
+  expect(ctx.notifications.some((n) => n.message.includes("configured model effort"))).toBe(false);
 });
 
 test("a routed turn's classification is logged and shows up in /usage, so a routing decision can be checked against what the classifier actually said", async () => {
