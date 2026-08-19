@@ -16,6 +16,9 @@ import type {
   SessionRecord,
   SocketData,
 } from "./server-types.js";
+
+const WEB_BUILD_TIMEOUT_MS = 10_000;
+
 import type { WebServerConfig } from "./serverConfig.js";
 import {
   MAX_WEBSOCKET_PAYLOAD_BYTES,
@@ -68,6 +71,7 @@ export function createServerLifecycle(options: {
   const { cancelWebQueueWork } = queue;
 
   async function cleanupAndExit(code = 0): Promise<void> {
+    const managedShutdownTimeoutMs = 15_000;
     // Repeated TERM/INT delivery is common during deploys. Never reinterpret it as
     // permission to abort managed work; an operator can still use SIGKILL for a
     // truly wedged process.
@@ -80,12 +84,14 @@ export function createServerLifecycle(options: {
       [...runtime.sessions.values()]
         .filter(shouldWaitForManagedShutdown)
         .map((record) => record.name ?? record.id);
+    const shutdownStartedAt = Date.now();
     let busy = busyNames();
     if (busy.length > 0)
       console.error(
         `Waiting for active managed sessions before restart: ${busy.join(", ")}`,
       );
     while (shouldContinueManagedShutdownWait(busy.length)) {
+      if (Date.now() - shutdownStartedAt >= managedShutdownTimeoutMs) break;
       await Bun.sleep(100);
       busy = busyNames();
     }
@@ -132,7 +138,7 @@ export function createServerLifecycle(options: {
     } catch {
       // ignore
     }
-    setTimeout(() => process.exit(code), 25).unref();
+    setTimeout(() => process.exit(code), 25);
   }
 
   // web/dist is not checked in; rebuild it on every startup so a long-running
@@ -154,6 +160,7 @@ export function createServerLifecycle(options: {
       cwd: config.rootDir,
       stdout: "inherit",
       stderr: "inherit",
+      timeout: WEB_BUILD_TIMEOUT_MS,
     });
     const code = await build.exited;
     if (code !== 0)
@@ -269,10 +276,8 @@ export function createServerLifecycle(options: {
       },
       websocket: {
         maxPayloadLength: MAX_WEBSOCKET_PAYLOAD_BYTES,
-        open(socket) {
-          gateway.handleWebSocketOpen(
-            socket as Bun.ServerWebSocket<SocketData>,
-          );
+        open() {
+          gateway.handleWebSocketOpen();
         },
         message(socket, data) {
           void gateway.handleWebSocketMessage(
@@ -304,13 +309,12 @@ export function createServerLifecycle(options: {
     // Keep readiness independent from JSONL catalog work, then restore only the
     // browser-owned sessions that were active before the daemon stopped. Native
     // bridge sessions reconnect themselves and are never started in RPC mode here.
-    setTimeout(
-      () =>
-        void launcher.restoreManagedSessions().catch((error) => {
-          console.error("Could not restore managed web sessions:", error);
-        }),
+    setTimeout(() =>
+      void launcher.restoreManagedSessions().catch((error) => {
+        console.error("Could not restore managed web sessions:", error);
+      }),
       250,
-    ).unref();
+    );
   }
 
   return { start, cleanupAndExit };

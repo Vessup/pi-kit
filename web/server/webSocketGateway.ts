@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   AgentToServerMessage,
   ClientToServerMessage,
@@ -41,17 +40,6 @@ export function createWebSocketGateway(options: {
   const { handleClientMessage } = clientMessages;
   const { handleAgentMessage } = agentMessages;
 
-  function attachClientSocket(
-    socket: Bun.ServerWebSocket<ClientSocketData>,
-  ): void {
-    socket.data = { kind: "client", id: randomUUID(), authed: false };
-  }
-
-  function attachAgentSocket(
-    socket: Bun.ServerWebSocket<AgentSocketData>,
-  ): void {
-    socket.data = { kind: "agent", id: randomUUID(), authed: false };
-  }
 
   function parseSocketMessage<T>(data: string | Uint8Array): T | undefined {
     const text = typeof data === "string" ? data : decoder.decode(data);
@@ -62,10 +50,8 @@ export function createWebSocketGateway(options: {
     }
   }
 
-  function handleWebSocketOpen(socket: Bun.ServerWebSocket<SocketData>): void {
-    if (socket.data.kind === "client")
-      attachClientSocket(socket as Bun.ServerWebSocket<ClientSocketData>);
-    else attachAgentSocket(socket as Bun.ServerWebSocket<AgentSocketData>);
+  function handleWebSocketOpen(): void {
+    return;
   }
 
   async function handleWebSocketMessage(

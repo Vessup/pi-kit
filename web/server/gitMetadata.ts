@@ -46,14 +46,10 @@ export function createGitMetadata(options: {
     const generation = (record.gitMetadataGeneration ?? 0) + 1;
     record.gitMetadataGeneration = generation;
     const cwd = record.cwd;
-    const branch = await commandOutput(
-      ["git", "branch", "--show-current"],
-      cwd,
-    );
-    const raw = await commandOutput(
-      ["gh", "pr", "view", "--json", "number,url"],
-      cwd,
-    );
+    const [branch, raw] = await Promise.all([
+      commandOutput(["git", "branch", "--show-current"], cwd),
+      commandOutput(["gh", "pr", "view", "--json", "number,url"], cwd),
+    ]);
     let pullRequest: WebSession["pullRequest"];
     if (raw) {
       try {

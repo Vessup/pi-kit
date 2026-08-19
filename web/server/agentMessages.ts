@@ -93,9 +93,12 @@ export function createAgentMessages(options: {
   async function handleAgentMessage(
     socket: Bun.ServerWebSocket<AgentSocketData>,
     message: AgentToServerMessage,
-  ): Promise<void> {
+    ): Promise<void> {
+    // Trust the /ws/agent upgrade (local-only and rejected when forwarded by
+    // Tailscale Serve) plus per-session socket ownership. agent.hello is the
+    // session-binding handshake: only mark the socket authenticated after the
+    // session record is created or updated and the socket is bound to it.
     if (message.type === "agent.hello") {
-      socket.data.authed = true;
       const hello = message as AgentHelloMessage;
       const kind: SessionKind =
         hello.session.source === "saved"
@@ -114,6 +117,8 @@ export function createAgentMessages(options: {
         kind,
         authoritativeHistory ? helloHistory : [],
       );
+      if (!record) return;
+      socket.data.authed = true;
       if (authoritativeHistory) replaceRecordHistory(record, helloHistory);
       else if (!record.historyReady && record.file) {
         // Bridges loaded before historyMode existed reconnect with an empty hello.
@@ -190,152 +195,145 @@ export function createAgentMessages(options: {
     if (message.type === "agent.event") {
       const event = message as AgentEventMessage;
       const record = runtime.sessions.get(event.sessionId);
-      if (record) {
-        record.updatedAt = Date.now();
-        let lifecycleChanged = false;
-        if (
-          event.event.type === "agent_start" ||
-          event.event.type === "turn_start"
-        ) {
-          record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
-          markAgentActivity(record);
-        }
-        if (
-          event.event.type === "agent_start" ||
-          event.event.type === "turn_start"
-        ) {
-          cancelQueueSettleFallback(record);
-          record.status = "working";
-          record.agentRunning = true;
-          lifecycleChanged = true;
-        }
-        if (event.event.type === "agent_end" && !record.compaction) {
-          markAgentSettling(record);
-          record.status =
-            agentEndTerminalNotice(event.event)?.kind === "error"
-              ? "error"
-              : "idle";
+      if (!record || !record.agentSockets.has(socket)) return;
+      record.updatedAt = Date.now();
+      let lifecycleChanged = false;
+      if (
+        event.event.type === "agent_start" ||
+        event.event.type === "turn_start"
+      ) {
+        record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
+        markAgentActivity(record);
+        cancelQueueSettleFallback(record);
+        record.status = "working";
+        record.agentRunning = true;
+        lifecycleChanged = true;
+      }
+      if (event.event.type === "agent_end" && !record.compaction) {
+        markAgentSettling(record);
+        record.status =
+          agentEndTerminalNotice(event.event)?.kind === "error"
+            ? "error"
+            : "idle";
+        record.agentRunning = false;
+        scheduleQueueSettleFallback(record);
+        lifecycleChanged = true;
+      }
+      if (event.event.type === "compaction_start") {
+        markAgentSettling(record);
+        record.status = "working";
+        record.agentRunning = true;
+        record.compaction = {
+          reason:
+            event.event.reason === "manual" || event.event.reason === "overflow"
+              ? event.event.reason
+              : "threshold",
+          startedAt:
+            typeof event.event.startedAt === "number"
+              ? event.event.startedAt
+              : Date.now(),
+        };
+      }
+      if (event.event.type === "compaction_end") {
+        record.compaction = undefined;
+        if (event.event.aborted === true || event.event.willRetry === false) {
+          record.status = "idle";
           record.agentRunning = false;
           scheduleQueueSettleFallback(record);
           lifecycleChanged = true;
         }
-        if (event.event.type === "compaction_start") {
-          markAgentSettling(record);
-          record.status = "working";
-          record.agentRunning = true;
-          record.compaction = {
-            reason:
-              event.event.reason === "manual" ||
-              event.event.reason === "overflow"
-                ? event.event.reason
-                : "threshold",
-            startedAt:
-              typeof event.event.startedAt === "number"
-                ? event.event.startedAt
-                : Date.now(),
-          };
+        if (event.event.aborted !== true) {
+          broadcastCompactionNotice(record);
         }
-        if (event.event.type === "compaction_end") {
-          record.compaction = undefined;
-          if (event.event.aborted === true || event.event.willRetry === false) {
-            record.status = "idle";
-            record.agentRunning = false;
-            scheduleQueueSettleFallback(record);
-            lifecycleChanged = true;
-          }
-          if (event.event.aborted !== true) {
-            broadcastCompactionNotice(record);
-          }
-        }
-        if (
-          event.event.type === "agent_settled" &&
-          isCurrentAgentSettlement(record)
-        ) {
-          cancelQueueSettleFallback(record);
-          record.settlingGeneration = undefined;
-          lifecycleChanged = true;
-          // Pi emits agent_settled only when no retry, compaction, or internal
-          // follow-up remains. It is authoritative even when an interrupted
-          // overflow compaction last advertised willRetry=true.
-          if (record.status !== "error") record.status = "idle";
-          record.agentRunning = false;
-          void flushWebQueue(record);
-        }
-        const subagentsChanged = updateSubagentsFromToolEvent(
-          record,
-          event.event,
-        );
-        let sessionMetadataChanged = false;
-        if (event.event.type === "session_info_changed") {
-          record.name =
-            typeof event.event.name === "string" && event.event.name
-              ? event.event.name
-              : undefined;
-          sessionMetadataChanged = true;
-        }
-        if (
-          event.event.type === "message_end" &&
-          isRecord(event.event.message)
-        ) {
-          appendRecordHistory(record, {
-            type: "message",
-            id: randomUUID(),
-            parentId: null,
-            timestamp: new Date().toISOString(),
-            message: event.event.message,
-          });
-          record.messageCount += 1;
-          if (
-            event.event.message.role === "assistant" ||
-            event.event.message.role === "toolResult"
-          ) {
-            record.usage ??= zeroWebUsage();
-            addWebUsage(record.usage, event.event.message.usage);
-          }
-          if (
-            event.event.message.role === "user" ||
-            event.event.message.role === "assistant"
-          ) {
-            const preview = extractTextContent(event.event.message.content);
-            const terminalNotice = assistantTerminalNotice(event.event.message);
-            if (preview) record.preview = preview.slice(0, 180);
-            else if (terminalNotice)
-              record.preview =
-                `${terminalNotice.title}: ${terminalNotice.detail}`.slice(
-                  0,
-                  180,
-                );
-          }
-          sessionMetadataChanged = true;
-        }
-        broadcastToSessionClients(event.sessionId, {
-          type: "server.event",
-          sessionId: event.sessionId,
-          event: event.event,
-        } satisfies ServerEventMessage);
-        if (
-          sessionMetadataChanged ||
-          lifecycleChanged ||
-          event.event.type === "compaction_start" ||
-          event.event.type === "compaction_end"
-        ) {
-          broadcastSessionToAll(record);
-        } else if (subagentsChanged) {
-          broadcastToSessionClients(record.id, {
-            type: "server.session",
-            session: sessionToClientPayload(record),
-          } satisfies ServerSessionMessage);
-        }
-        // PRs are commonly opened during an agent run without changing branches.
-        // Refresh after completion so the catalog does not retain the pre-PR lookup.
-        if (event.event.type === "agent_end") void hydrateGitMetadata(record);
       }
+      if (
+        event.event.type === "agent_settled" &&
+        isCurrentAgentSettlement(record)
+      ) {
+        cancelQueueSettleFallback(record);
+        record.settlingGeneration = undefined;
+        lifecycleChanged = true;
+        // Pi emits agent_settled only when no retry, compaction, or internal
+        // follow-up remains. It is authoritative even when an interrupted
+        // overflow compaction last advertised willRetry=true.
+        if (record.status !== "error") record.status = "idle";
+        record.agentRunning = false;
+        void flushWebQueue(record);
+      }
+      const subagentsChanged = updateSubagentsFromToolEvent(
+        record,
+        event.event,
+      );
+      let sessionMetadataChanged = false;
+      if (event.event.type === "session_info_changed") {
+        record.name =
+          typeof event.event.name === "string" && event.event.name
+            ? event.event.name
+            : undefined;
+        sessionMetadataChanged = true;
+      }
+      if (
+        event.event.type === "message_end" &&
+        isRecord(event.event.message)
+      ) {
+        appendRecordHistory(record, {
+          type: "message",
+          id: randomUUID(),
+          parentId: null,
+          timestamp: new Date().toISOString(),
+          message: event.event.message,
+        });
+        record.messageCount += 1;
+        if (
+          event.event.message.role === "assistant" ||
+          event.event.message.role === "toolResult"
+        ) {
+          record.usage ??= zeroWebUsage();
+          addWebUsage(record.usage, event.event.message.usage);
+        }
+        if (
+          event.event.message.role === "user" ||
+          event.event.message.role === "assistant"
+        ) {
+          const preview = extractTextContent(event.event.message.content);
+          const terminalNotice = assistantTerminalNotice(event.event.message);
+          if (preview) record.preview = preview.slice(0, 180);
+          else if (terminalNotice)
+            record.preview =
+              `${terminalNotice.title}: ${terminalNotice.detail}`.slice(
+                0,
+                180,
+              );
+        }
+        sessionMetadataChanged = true;
+      }
+      broadcastToSessionClients(event.sessionId, {
+        type: "server.event",
+        sessionId: event.sessionId,
+        event: event.event,
+      } satisfies ServerEventMessage);
+      if (
+        sessionMetadataChanged ||
+        lifecycleChanged ||
+        event.event.type === "compaction_start" ||
+        event.event.type === "compaction_end"
+      ) {
+        broadcastSessionToAll(record);
+      } else if (subagentsChanged) {
+        broadcastToSessionClients(record.id, {
+          type: "server.session",
+          session: sessionToClientPayload(record),
+        } satisfies ServerSessionMessage);
+      }
+      // PRs are commonly opened during an agent run without changing branches.
+      // Refresh after completion so the catalog does not retain the pre-PR lookup.
+      if (event.event.type === "agent_end") void hydrateGitMetadata(record);
       return;
     }
     if (message.type === "agent.subagents") {
       const update = message as AgentSubagentsMessage;
       const record = runtime.sessions.get(update.sessionId);
-      if (!record) return;
+      if (!record || !record.agentSockets.has(socket)) return;
       record.subagents = mergeWebSubagentUpdates(
         record.subagents,
         update.agents,
@@ -362,6 +360,7 @@ export function createAgentMessages(options: {
     if (message.type === "agent.update") {
       const update = message as AgentUpdateMessage;
       const existing = runtime.sessions.get(update.session.id);
+      if (!existing || !existing.agentSockets.has(socket)) return;
       // Older bridge runtimes reported `working` again immediately after their
       // authoritative agent_end event. Preserve the lifecycle event until a new
       // agent_start arrives so completed runs cannot get stuck visually working.
@@ -399,6 +398,12 @@ export function createAgentMessages(options: {
         candidate.externalPending.has(response.requestId),
       );
       if (!record) return;
+      if (!record.agentSockets.has(socket)) return;
+      if (
+        record.externalRequestTargets.get(response.requestId) !== undefined &&
+        record.externalRequestTargets.get(response.requestId) !== socket
+      )
+        return;
       const pending = record.externalPending.get(response.requestId);
       if (!pending) return;
       record.externalPending.delete(response.requestId);

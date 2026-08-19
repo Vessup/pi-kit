@@ -31,7 +31,7 @@ export function createSessionRegistry(options: {
   history: SessionHistory;
   missingSessions: MissingSessions;
   /** Late-bound so session deletion can depend on the registry. */
-  reconcileMissingSessions: () => void;
+  reconcileMissingSessions: () => void | Promise<void>;
 }) {
   const { state: runtime, catalog, stores, history, missingSessions } = options;
   const { sessionsDir } = options.config;
@@ -93,33 +93,40 @@ export function createSessionRegistry(options: {
     history: unknown[] = [],
     managedWorktreeScanned = false,
   ): SessionRecord {
-    const displayHistory = boundedWebHistory(
-      kind === "saved"
-        ? buildContextEntries(history as SessionEntry[])
-        : history,
-    );
-    const historyManagedWorktree = managedWorktreeFromEntries(history);
-    const record = runtime.sessions.get(session.id) ?? {
-      ...session,
-      kind,
-      history: displayHistory,
-      historyReady: history.length > 0,
-      historyBytes: webHistoryByteLength(displayHistory),
-      active: kind !== "saved",
-      agentRunning: session.status === "working",
-      managedWorktreeScanned,
-      agentSockets: new Set<Bun.ServerWebSocket<AgentSocketData>>(),
-      clientSockets: new Set<Bun.ServerWebSocket<ClientSocketData>>(),
-      externalRequestTargets: new Map(),
-      externalPending: new Map(),
-      queue: (persistedQueues.get(session.id) ?? []).map((item) => ({
-        ...item,
-        images: item.images?.map((image) => ({ ...image })),
-      })),
-    };
+    const existing = runtime.sessions.get(session.id);
+    const displayHistory = existing
+      ? existing.history
+      : boundedWebHistory(
+          kind === "saved"
+            ? buildContextEntries(history as SessionEntry[])
+            : history,
+        );
+    const historyManagedWorktree = existing
+      ? undefined
+      : managedWorktreeFromEntries(history);
+    const record =
+      existing ??
+      ({
+        ...session,
+        kind,
+        history: displayHistory,
+        historyReady: history.length > 0,
+        historyBytes: webHistoryByteLength(displayHistory),
+        active: kind !== "saved",
+        agentRunning: session.status === "working",
+        managedWorktreeScanned,
+        agentSockets: new Set<Bun.ServerWebSocket<AgentSocketData>>(),
+        clientSockets: new Set<Bun.ServerWebSocket<ClientSocketData>>(),
+        externalRequestTargets: new Map(),
+        externalPending: new Map(),
+        queue: (persistedQueues.get(session.id) ?? []).map((item) => ({
+          ...item,
+          images: item.images?.map((image) => ({ ...image })),
+        })),
+      }) as SessionRecord;
     Object.assign(record, session);
     record.kind = kind;
-    if (history.length > 0) {
+    if (history.length > 0 && !existing) {
       record.history = displayHistory;
       record.historyReady = true;
       record.historyBytes = webHistoryByteLength(record.history);
@@ -130,8 +137,7 @@ export function createSessionRegistry(options: {
         session.managedWorktree ??
         record.managedWorktree);
     if (managedWorktreeScanned) record.managedWorktreeScanned = true;
-    record.active = kind !== "saved" || record.active;
-    if (kind === "saved") record.active = false;
+    record.active = kind !== "saved";
     return record;
   }
 
@@ -178,15 +184,20 @@ export function createSessionRegistry(options: {
   }
 
   function sessionSnapshot(): WebSession[] {
-    options.reconcileMissingSessions();
+    void Promise.resolve(options.reconcileMissingSessions()).catch((error) => {
+      console.warn(
+        `Failed to reconcile missing sessions before snapshot: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+    const scans = scanSavedSessions(sessionsDir, activeSessionFiles());
     const merged = new Map<string, WebSession>();
     for (const record of runtime.sessions.values()) {
-      if (record.catalogReady === false || isMissingInactiveSession(record))
+      if (record.catalogReady === false || isMissingInactiveSession(record, scans))
         continue;
       const key = record.file ? normalizePath(record.file) : record.id;
       merged.set(key, sessionToClientPayload(record));
     }
-    for (const scan of scanSavedSessions(sessionsDir, activeSessionFiles())) {
+    for (const scan of scans) {
       const key = scan.session.file
         ? normalizePath(scan.session.file)
         : scan.session.id;

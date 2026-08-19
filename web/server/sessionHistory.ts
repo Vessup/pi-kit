@@ -11,8 +11,10 @@ import {
 import type { SessionFileCatalog, SessionRecord } from "./server-types.js";
 
 /**
- * Bounded semantic history maintained per record. Pure module: all functions
- * operate on the record passed in and catalog helpers only.
+ * Bounded semantic history maintained per record.
+ * sessionHistoryForRecord lazily hydrates file-backed records and mutates
+ * record.history, record.historyReady, and record.historyBytes through
+ * replaceRecordHistory.
  */
 export function createSessionHistory(options: { catalog: SessionFileCatalog }) {
   const { parseSessionFile, isRecord } = options.catalog;
@@ -36,8 +38,9 @@ export function createSessionHistory(options: { catalog: SessionFileCatalog }) {
         webHistoryByteLength(record.history.slice(0, -1))) +
       webHistoryByteLength(appended);
     while (
-      record.history.length > WEB_HISTORY_MAX_ENTRIES ||
-      record.historyBytes > WEB_HISTORY_MAX_BYTES
+      record.history.length > 0 &&
+      (record.history.length > WEB_HISTORY_MAX_ENTRIES ||
+        record.historyBytes > WEB_HISTORY_MAX_BYTES)
     ) {
       const first = record.history[0];
       const preserveSummary =

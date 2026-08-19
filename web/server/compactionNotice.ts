@@ -18,7 +18,10 @@ export function createCompactionNotice(options: {
       if (runtime.sessions.get(record.id) !== record) return;
       broadcastCompactionComplete(record);
     };
-    if (refresh) void refresh.finally(deliver);
+    if (refresh)
+      void refresh.then(deliver, () => {
+        deliver();
+      });
     else deliver();
   }
 

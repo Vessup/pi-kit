@@ -31,6 +31,7 @@ export function createSessionReplacement(options: {
     webQueueEvent,
     cancelWebQueueWork,
     scheduleQueueSettleFallback,
+    scheduleWebQueueRetry,
   } = queue;
   const { broadcast: broadcastToSessionClients, sendSessionRemoved } =
     broadcast;
@@ -121,6 +122,8 @@ export function createSessionReplacement(options: {
       });
     } catch (error) {
       previous.queueMutationsQuiesced = false;
+      if (previous.queueRetryTimer === undefined)
+        scheduleWebQueueRetry(previous);
       throw error;
     }
     next.queue = mergedQueue;

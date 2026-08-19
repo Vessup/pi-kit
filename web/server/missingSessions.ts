@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { isConfirmedMissingPath } from "./file-presence.js";
 import type { SessionFileCatalog, SessionRecord } from "./server-types.js";
+import type { SessionFileScan } from "./session-file-catalog.js";
 
 /**
  * Predicates for sessions whose backing file disappeared without a durable
@@ -14,7 +15,10 @@ export function createMissingSessions(options: {
   const { sessionsDir, catalog } = options;
   const { sessionFileKey, scanSavedSessions } = catalog;
 
-  function hasStagedOrDurableReplacement(record: SessionRecord): boolean {
+  function hasStagedOrDurableReplacement(
+    record: SessionRecord,
+    scans: readonly SessionFileScan[] = scanSavedSessions(sessionsDir),
+  ): boolean {
     const sourceFile = record.file;
     if (!sourceFile) return false;
     try {
@@ -30,27 +34,30 @@ export function createMissingSessions(options: {
     } catch {
       // The containing session directory may itself have been removed.
     }
-    for (const scan of scanSavedSessions(sessionsDir)) {
-      if (sessionFileKey(scan.file) === sessionFileKey(sourceFile)) continue;
+    const sourceKey = sessionFileKey(sourceFile);
+    for (const scan of scans) {
+      if (sessionFileKey(scan.file) === sourceKey) continue;
       const replacement = scan.replacement;
       if (
         replacement?.previousSessionId === record.id &&
-        sessionFileKey(replacement.previousSessionFile) ===
-          sessionFileKey(sourceFile)
+        sessionFileKey(replacement.previousSessionFile) === sourceKey
       )
         return true;
     }
     return false;
   }
 
-  function isMissingInactiveSession(record: SessionRecord): boolean {
+  function isMissingInactiveSession(
+    record: SessionRecord,
+    scans?: readonly SessionFileScan[],
+  ): boolean {
     return Boolean(
       record.file &&
         !record.active &&
         !record.managed &&
         record.agentSockets.size === 0 &&
         isConfirmedMissingPath(record.file) &&
-        !hasStagedOrDurableReplacement(record),
+        !hasStagedOrDurableReplacement(record, scans),
     );
   }
 

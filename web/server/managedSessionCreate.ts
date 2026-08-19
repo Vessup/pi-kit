@@ -186,8 +186,6 @@ export function createManagedSessionLauncher(options: {
         if (event.type === "agent_start" || event.type === "turn_start") {
           record.agentStartGeneration = (record.agentStartGeneration ?? 0) + 1;
           markAgentActivity(record);
-        }
-        if (event.type === "agent_start" || event.type === "turn_start") {
           cancelQueueSettleFallback(record);
           record.status = "working";
           record.agentRunning = true;
@@ -400,6 +398,7 @@ export function createManagedSessionLauncher(options: {
     sessionFile?: string,
   ): Promise<SessionRecord> {
     if (!sessionFile) return await createManagedSessionUnlocked(cwd, name);
+    // Use normalized paths for pending-start dedupe and in-flight start tracking.
     const key = normalizePath(sessionFile);
     const existing = runtime.managedSessionStarts.get(key);
     if (existing) return await existing;

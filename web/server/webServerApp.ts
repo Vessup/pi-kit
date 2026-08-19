@@ -50,7 +50,9 @@ export function createWebServerApp() {
   const history = createSessionHistory({ catalog });
   const recordSync = createRecordSync({ catalog, state });
 
-  let reconcileMissingSessions: () => void = () => undefined;
+  let reconcileMissingSessions: () => void | Promise<void> = () => {
+    throw new Error("Session registry called before initialization");
+  };
   const registry = createSessionRegistry({
     state,
     config,

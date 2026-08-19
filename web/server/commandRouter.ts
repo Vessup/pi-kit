@@ -122,8 +122,8 @@ export function createCommandRouter(options: {
           },
           onExit: () => undefined,
         });
-        await temp.start();
         try {
+          await temp.start();
           switch (command.type) {
             case "clone":
               return await temp.clone();

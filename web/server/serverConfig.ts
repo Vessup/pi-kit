@@ -48,9 +48,12 @@ export function resolveWebServerConfig(): WebServerConfig {
   const agentDir = resolve(
     process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
   );
-  const configuredPort = Number(
-    process.env.PI_WEB_PORT ?? `${DEFAULT_WEB_PORT}`,
-  );
+  const configuredPortEnv =
+    process.env.PI_WEB_PORT === undefined
+      ? `${DEFAULT_WEB_PORT}`
+      : process.env.PI_WEB_PORT.trim();
+  const configuredPort =
+    configuredPortEnv.length > 0 ? Number(configuredPortEnv) : DEFAULT_WEB_PORT;
   return {
     rootDir,
     distDir: join(rootDir, "web", "dist"),

@@ -344,14 +344,23 @@ export function createHttpApi(options: {
           // stale initial session instead of retaining it for inspection.
           if (worktree.existingCheckout) {
             cleanupInitialSessionFile(initialSessionFile);
-            throw new Error(startupMessage);
+            return jsonResponse(
+              { error: startupMessage },
+              { status: 500 },
+            );
           }
-          throw new Error(
-            `${startupMessage}; initialized worktree retained at ${worktree.path} for inspection`,
+          return jsonResponse(
+            {
+              error: `${startupMessage}; initialized worktree retained at ${worktree.path} for inspection`,
+            },
+            { status: 500 },
           );
         }
         cleanupInitialSessionFile(initialSessionFile);
-        throw error;
+        return jsonResponse(
+          { error: startupMessage },
+          { status: 500 },
+        );
       }
       return jsonResponse(
         { session: sessionToClientPayload(session), worktree },

@@ -331,32 +331,30 @@ export function createManagedSessionRefresh(options: {
 
   async function recoverStagedSourceSessionDeletions(): Promise<void> {
     const tombstones: Array<{ tombstone: string; source: string }> = [];
-    const stack = [sessionsDir];
-    while (stack.length > 0) {
-      const directory = stack.pop();
-      if (!directory) break;
-      let entries: Array<{
-        name: string;
-        isDirectory(): boolean;
-        isFile(): boolean;
-      }>;
-      try {
-        entries = readdirSync(directory, { withFileTypes: true }) as Array<{
-          name: string;
-          isDirectory(): boolean;
-          isFile(): boolean;
-        }>;
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) stack.push(path);
-        else if (entry.isFile()) {
-          const match = path.match(/^(.*\.jsonl)\.replaced-[0-9a-f-]+\.tmp$/i);
-          if (match) tombstones.push({ tombstone: path, source: match[1] });
-        }
-      }
+    type RecursiveDirent = {
+      parentPath?: string;
+      path?: string;
+      name: string;
+      isFile(): boolean;
+    };
+    let entries: RecursiveDirent[] = [];
+    try {
+      entries = readdirSync(sessionsDir, {
+        recursive: true,
+        withFileTypes: true,
+      }) as unknown as RecursiveDirent[];
+    } catch {
+      entries = [];
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const basePath =
+        entry.parentPath ?? (typeof entry.path === "string"
+          ? entry.path
+          : sessionsDir);
+      const path = join(basePath, entry.name);
+      const match = path.match(/^(.*\.jsonl)\.replaced-[0-9a-f-]+\.tmp$/i);
+      if (match) tombstones.push({ tombstone: path, source: match[1] });
     }
     if (tombstones.length === 0) return;
     const saved = listSavedSessionFiles(sessionsDir).flatMap((file) => {

@@ -168,10 +168,11 @@ export function createSessionDeletion(options: {
 
   async function reconcileMissingSessionFiles(): Promise<void> {
     if (runtime.shutdownStarted) return;
+    const scans = scanSavedSessions(sessionsDir);
     const candidates = [...runtime.sessions.values()].filter(
       (record) =>
         !runtime.missingSessionReconciliations.has(record) &&
-        isMissingInactiveSession(record),
+        isMissingInactiveSession(record, scans),
     );
     await Promise.all(
       candidates.map(async (record) => {
@@ -181,7 +182,7 @@ export function createSessionDeletion(options: {
           if (
             !sessionFile ||
             runtime.sessions.get(record.id) !== record ||
-            !isMissingInactiveSession(record)
+            !isMissingInactiveSession(record, scans)
           )
             return;
           const managed = isManagedSessionFile(sessionFile);
@@ -201,7 +202,7 @@ export function createSessionDeletion(options: {
             undefined,
             () =>
               runtime.sessions.get(record.id) === record &&
-              isMissingInactiveSession(record),
+              isMissingInactiveSession(record, scans),
           );
           if (!deleted) return;
           if (managed) {
@@ -298,14 +299,16 @@ export function createSessionDeletion(options: {
       })();
     if (!record) throw new Error(`Unknown session: ${sessionId}`);
     if (record.file) {
-      const pendingStart = runtime.managedSessionStarts.get(
-        sessionFileKey(record.file),
-      );
+      // Map keys are written with normalizePath (via sessionFileKey, which is the
+      // shared key helper) in managedSessionCreate.ts; reuse it here so we await
+      // in-flight starts and stale records even if path normalization varies.
+      const fileKey = sessionFileKey(record.file);
+      const pendingStart = runtime.managedSessionStarts.get(fileKey);
       if (pendingStart) {
         await pendingStart.catch(() => undefined);
         record =
           runtime.sessions.get(sessionId) ??
-          runtime.sessionsByFile.get(sessionFileKey(record.file)) ??
+          runtime.sessionsByFile.get(fileKey) ??
           record;
       }
     }
@@ -381,7 +384,11 @@ export function createSessionDeletion(options: {
       scheduleManagedWorktreeCleanup(sessionId, sessionFile, managedWorktree);
   }
 
-  /** Drop a not-yet-activated initial session file and its registrations. */
+  /**
+   * Drop a not-yet-activated initial session file and its registrations.
+   * Map keys are produced with `sessionFileKey` (= normalizePath) so the lookup
+   * matches the writers in managedSessionCreate.ts.
+   */
   function cleanupInitialSessionFile(initialSessionFile?: string): void {
     if (!initialSessionFile) return;
     const key = sessionFileKey(initialSessionFile);
