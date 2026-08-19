@@ -16,6 +16,7 @@ import {
   type ModelHealthEntry,
   type ModelIdentity,
   modelKey,
+  truncateForLog,
 } from "./auto-router-health.js";
 import { normalizeModelId, reconcileProviderQuota } from "./auto-router-quota.js";
 import {
@@ -352,10 +353,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       level = "(pinned)";
       classifierReply = `pinned to ${pinnedTier} - not classified`;
     } else {
-      const classifierPool = resolveAvailableModels(
-        ctx.modelRegistry,
-        settings.efforts.medium?.models ?? allConfiguredModels(settings),
-      );
+      const classifierRefs = settings.efforts.medium?.models ?? allConfiguredModels(settings);
+      const classifierPool = resolveAvailableModels(ctx.modelRegistry, classifierRefs);
       const classifierRef = healthStore.pickHealthy(classifierPool);
       const classifierModel = classifierRef
         ? classifierPool.find(
@@ -367,16 +366,34 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       let classifiedLevel: AutoRouterEffortLevel = "medium";
       classifierReply = "(no classifier available)";
       if (classifierModel) {
+        // Same effort this model would actually be dispatched at for real work in the medium
+        // tier - its own configured override, or "medium" itself - so the classify call reasons
+        // at the level the user configured for it rather than an unrelated provider default.
+        const classifierEffort = resolveEffort(classifierRefs, classifierModel, "medium");
         const result = await classifyTurnComplexity(
           ctx.modelRegistry,
           classifierModel,
           prompt,
           hasImages,
+          classifierEffort,
         );
         classifiedLevel = result.level;
         classifierReply = result.reply;
         if (result.usage) {
           healthStore.recordSuccess(modelKey(classifierModel), result.usage);
+        }
+        // The classifier defaulting to `medium` isn't a real judgment of this turn's complexity
+        // when it failed to answer at all - that's silently indistinguishable from a genuine
+        // medium verdict otherwise, which is exactly what let a sustained classifier failure go
+        // unnoticed. Surface it visibly rather than let it pass as ordinary routing.
+        if (result.failed && ctx.hasUI) {
+          // A failed reply can now run up to CLASSIFY_MAX_TOKENS long (e.g. a reasoning model
+          // that never got to its answer) - bound it here the same way it's already bounded for
+          // /usage below, so one long reply can't flood this notification and bury the warning.
+          ctx.ui.notify(
+            `Auto: classifier gave no usable answer (${truncateForLog(result.reply, 500)}); defaulting to ${classifiedLevel} for this turn. Check /usage for details.`,
+            "warning",
+          );
         }
       }
       level = classifiedLevel;

@@ -378,6 +378,33 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
 });
 
+test("before_agent_start notifies when the classifier gives no usable answer, instead of silently defaulting", async () => {
+  const medium = model("prov", "medium-model");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "medium-model" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  // An empty classifier reply parses to no level word at all - exactly what happened for real
+  // when a codex-family model was sent an invalid reasoningEffort value and came back with no
+  // text content.
+  const registry = fakeModelRegistry({ models: [medium], classify: () => "" });
+  const ctx = fakeCtx({ modelRegistry: registry, currentModel: fake.currentModel });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  // Still routes (defaulting to medium) rather than blocking the turn...
+  expect(fake.setModelCalls).toEqual([medium]);
+  // ...but the failure is visible, not silent.
+  const warning = ctx.notifications.find(
+    (n) => n.type === "warning" && n.message.includes("classifier"),
+  );
+  expect(warning?.message).toContain("(empty reply)");
+});
+
 test("a model's `effort` override sets its own thinking level, independent of the tier that routed to it", async () => {
   const high = model("opencode-go", "kimi-k3");
   await writeConfig({

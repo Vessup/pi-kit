@@ -57,11 +57,15 @@ export type ClassificationLogEntry = {
   model: ModelIdentity;
 };
 
-function truncateForLog(text: string): string {
+/** Collapses whitespace and bounds length - shared with the live "classifier failed" UI
+ * notification, since an unusable reply can now run up to `CLASSIFY_MAX_TOKENS` long and would
+ * otherwise flood a one-line notification the same way it would this log. */
+export function truncateForLog(
+  text: string,
+  limit: number = CLASSIFICATION_LOG_TEXT_LIMIT,
+): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
-  return collapsed.length > CLASSIFICATION_LOG_TEXT_LIMIT
-    ? `${collapsed.slice(0, CLASSIFICATION_LOG_TEXT_LIMIT)}…`
-    : collapsed;
+  return collapsed.length > limit ? `${collapsed.slice(0, limit)}…` : collapsed;
 }
 
 export type UsageDelta = { input: number; output: number; cost: number };
