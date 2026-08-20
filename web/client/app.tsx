@@ -114,6 +114,7 @@ import type { SessionSocket } from "./ws";
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
+const LAST_SESSION_KEY = "pi-web-last-session-v1";
 
 type SessionSort = "newest" | "oldest" | "custom";
 
@@ -149,6 +150,15 @@ function loadCollapsedProjects(): string[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+function loadLastSessionId(): string | null {
+  try {
+    const value = localStorage.getItem(LAST_SESSION_KEY);
+    return typeof value === "string" && value ? value : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1422,7 +1432,7 @@ function SessionListItem({
 export function App() {
   const [sessions, setSessions] = React.useState<WebSession[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(() =>
-    hashSessionId(),
+    hashSessionId() ?? loadLastSessionId(),
   );
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
@@ -1479,6 +1489,8 @@ export function App() {
   );
   const socketRef = React.useRef<SessionSocket | null>(null);
   const selectedIdRef = React.useRef<string | null>(selectedId);
+  const initialSessionResolvedRef = React.useRef(false);
+  const sessionsRequestGenerationRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<number | null>(null);
   const queueSyncRef = React.useRef<{
     requestId: string;
@@ -1511,6 +1523,11 @@ export function App() {
   }, [collapsedProjects]);
   React.useEffect(() => {
     selectedIdRef.current = selectedId;
+    // Only persist after the initial selection has been validated against
+    // the session list; otherwise a stale hash or stored id could overwrite
+    // the previously persisted value before we know whether it exists.
+    if (initialSessionResolvedRef.current && selectedId)
+      savePreference(LAST_SESSION_KEY, selectedId);
   }, [selectedId]);
   React.useEffect(() => {
     if (
@@ -1521,18 +1538,42 @@ export function App() {
   }, [deleteCandidate, sessions]);
 
   const loadAllSessions = React.useCallback(async () => {
+    // Only the most recent request may apply results; a stale response
+    // (e.g. issued before the URL hash changed mid-flight) must not
+    // resolve the initial session selection.
+    const generation = ++sessionsRequestGenerationRef.current;
     try {
       setLoading(true);
       const snapshot = sortSessions(await listSessions());
+      if (generation !== sessionsRequestGenerationRef.current) return;
       setSessions((previous) => preserveSessionsTelemetry(previous, snapshot));
       setError(null);
-      if (!selectedId && snapshot[0]) setSelectedId(snapshot[0].id);
+      if (snapshot.length > 0) {
+        if (!initialSessionResolvedRef.current) {
+          // On first load, honor the hash or the persisted last session only
+          // if it still exists; otherwise fall back to the first session.
+          // Read the id from the ref so a hash change during the request is
+          // still honored, then persist whichever id ends up selected.
+          initialSessionResolvedRef.current = true;
+          const initialId = selectedIdRef.current;
+          const acceptedId =
+            initialId && snapshot.some((item) => item.id === initialId)
+              ? initialId
+              : snapshot[0].id;
+          savePreference(LAST_SESSION_KEY, acceptedId);
+          if (acceptedId !== initialId) setSelectedId(acceptedId);
+        } else if (!selectedIdRef.current) {
+          setSelectedId(snapshot[0].id);
+        }
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (generation === sessionsRequestGenerationRef.current)
+        setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      if (generation === sessionsRequestGenerationRef.current)
+        setLoading(false);
     }
-  }, [selectedId]);
+  }, []);
 
   React.useEffect(() => {
     void loadAllSessions();
