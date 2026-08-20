@@ -47,7 +47,9 @@ export async function readEnabledModelPatterns(
 /**
  * Convert a glob to a RegExp with minimatch's default semantics for the
  * characters we support: `*` and `?` never cross `/`, and `[...]` character
- * classes pass through. Everything else is literal.
+ * classes (sets, ranges, `!`/`^` negation, a leading `]` as a literal member,
+ * `\`-escaped members, and unterminated `[` treated as a literal) translate
+ * directly. Everything else is literal.
  */
 function globToRegExp(pattern: string): RegExp {
   let source = "";
@@ -56,9 +58,72 @@ function globToRegExp(pattern: string): RegExp {
     if (char === "*") source += "[^/]*";
     else if (char === "?") source += "[^/]";
     else if (char === "\\") source += "\\\\";
-    else source += char.replace(/[.+^${}()|[\]]/g, "\\$&");
+    else if (char === "[") {
+      const charClass = parseCharClass(pattern, index);
+      if (charClass) {
+        source += charClass.source;
+        index = charClass.nextIndex - 1;
+      } else {
+        // Unterminated class: minimatch treats the `[` as a literal.
+        source += "\\[";
+      }
+    } else source += char.replace(/[.+^${}()|[\]]/g, "\\$&");
   }
   return new RegExp(`^${source}$`, "i");
+}
+
+/** Escape a character so it is a literal member of a RegExp character class. */
+function escapeClassMember(char: string): string {
+  return char === "\\" || char === "]" || char === "^" ? `\\${char}` : char;
+}
+
+/**
+ * Translate the `[...]` character class starting at `start` into a RegExp
+ * class source with minimatch's semantics, returning the source and the index
+ * just past the closing `]`. `undefined` when the class is unterminated.
+ */
+function parseCharClass(
+  pattern: string,
+  start: number,
+): { source: string; nextIndex: number } | undefined {
+  let index = start + 1;
+  let negate = false;
+  if (pattern[index] === "!" || pattern[index] === "^") {
+    negate = true;
+    index += 1;
+  }
+  const members: string[] = [];
+  // A `]` immediately after `[` (or the negation) is a literal member.
+  if (pattern[index] === "]") {
+    members.push("\\]");
+    index += 1;
+  }
+  let closed = false;
+  while (index < pattern.length) {
+    const char = pattern[index];
+    if (char === "\\") {
+      const next = pattern[index + 1];
+      if (next === undefined) return undefined;
+      members.push(escapeClassMember(next));
+      index += 2;
+      continue;
+    }
+    if (char === "]") {
+      closed = true;
+      index += 1;
+      break;
+    }
+    members.push(escapeClassMember(char));
+    index += 1;
+  }
+  if (!closed) return undefined;
+  // Minimatch classes never match the path separator: a `/` member can never
+  // match (dropped), and a negated class excludes `/` alongside its members.
+  const literalMembers = members.filter((member) => member !== "/");
+  return {
+    source: `[${negate ? "^/" : ""}${literalMembers.join("")}]`,
+    nextIndex: index,
+  };
 }
 
 function hasGlobCharacter(pattern: string): boolean {
