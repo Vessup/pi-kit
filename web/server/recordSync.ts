@@ -264,7 +264,7 @@ export function createRecordSync(options: {
       previous.model !== next.model ||
       previous.thinkingLevel !== next.thinkingLevel ||
       previous.selectedModel !== next.selectedModel ||
-      previous.lastModel !== next.lastModel ||
+      (previous.lastModel ?? undefined) !== (next.lastModel ?? undefined) ||
       previous.status !== next.status ||
       previous.source !== next.source ||
       previous.messageCount !== next.messageCount ||

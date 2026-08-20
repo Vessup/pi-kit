@@ -20,6 +20,20 @@ import type { ServerStores } from "./serverStores.js";
 import type { SessionHistory } from "./sessionHistory.js";
 import { managedWorktreeFromEntries } from "./worktrees.js";
 
+export function mergedLastModel(
+  previous: Pick<WebSession, "model" | "selectedModel" | "lastModel">,
+  session: Pick<WebSession, "model" | "selectedModel" | "lastModel">,
+): string | undefined {
+  if (typeof session.lastModel === "string") return session.lastModel;
+  if (session.lastModel === null) return undefined;
+  const selectedModel = session.selectedModel ?? session.model;
+  if (!isAutoModelReference(selectedModel)) return undefined;
+  const previousSelection = previous.selectedModel ?? previous.model;
+  return previousSelection === selectedModel
+    ? (previous.lastModel ?? undefined)
+    : undefined;
+}
+
 /**
  * Owns the live session catalog: the id- and file-keyed record maps, record
  * construction from scans, and the projected client payload.
@@ -40,20 +54,6 @@ export function createSessionRegistry(options: {
   const { persistedQueues } = stores;
   const { isMissingInactiveSession } = missingSessions;
   const { replaceRecordHistory } = history;
-
-  function clearStaleAutoModel(record: SessionRecord, session: WebSession): void {
-    if (session.lastModel === null) {
-      record.lastModel = undefined;
-      return;
-    }
-    const selectedModel = session.selectedModel ?? session.model;
-    if (
-      session.lastModel === undefined &&
-      selectedModel &&
-      !isAutoModelReference(selectedModel)
-    )
-      record.lastModel = undefined;
-  }
 
   function sessionToClientPayload(
     session: WebSession,
@@ -141,8 +141,9 @@ export function createSessionRegistry(options: {
           images: item.images?.map((image) => ({ ...image })),
         })),
       }) as SessionRecord;
+    const nextLastModel = mergedLastModel(record, session);
     Object.assign(record, session);
-    clearStaleAutoModel(record, session);
+    record.lastModel = nextLastModel;
     record.kind = kind;
     if (history.length > 0 && !existing) {
       record.history = displayHistory;
@@ -171,8 +172,9 @@ export function createSessionRegistry(options: {
       makeSessionRecord(session, kind, history, managedWorktreeScanned);
     const historyManagedWorktree =
       history.length > 0 ? managedWorktreeFromEntries(history) : undefined;
+    const nextLastModel = mergedLastModel(record, session);
     Object.assign(record, session);
-    clearStaleAutoModel(record, session);
+    record.lastModel = nextLastModel;
     record.kind = kind;
     if (history.length > 0)
       replaceRecordHistory(

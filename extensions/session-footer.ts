@@ -64,17 +64,27 @@ export function formatCwd(cwd: string, home: string | undefined): string {
 /** Align text on both sides while preserving ANSI and OSC 8 escape sequences. */
 export function alignSides(left: string, right: string, width: number): string {
   if (width <= 0) return "";
+  const leftWidth = visibleWidth(left);
   const rightWidth = visibleWidth(right);
-  if (rightWidth > width) {
+  const sidesOverlap =
+    leftWidth > 0 &&
+    rightWidth > 0 &&
+    leftWidth + 1 + rightWidth > width;
+  if (rightWidth > width || sidesOverlap) {
     if (!left) return truncateToWidth(right, width, "");
     const leftBudget = Math.min(
-      visibleWidth(left),
+      leftWidth,
       Math.max(1, Math.floor(width * 0.4)),
     );
     const fittedLeft = truncateToWidth(left, leftBudget, "...");
-    const rightBudget = Math.max(0, width - visibleWidth(fittedLeft) - 1);
+    const fittedLeftWidth = visibleWidth(fittedLeft);
+    const rightBudget = Math.max(0, width - fittedLeftWidth - 1);
     if (rightBudget === 0) return truncateToWidth(fittedLeft, width, "");
-    return `${fittedLeft} ${truncateToWidth(right, rightBudget, "...")}`;
+    const fittedRight = truncateToWidth(right, rightBudget, "...");
+    const padding = " ".repeat(
+      Math.max(1, width - fittedLeftWidth - visibleWidth(fittedRight)),
+    );
+    return fittedLeft + padding + fittedRight;
   }
   const maxLeftWidth = Math.max(0, width - rightWidth - (left ? 1 : 0));
   const fittedLeft =

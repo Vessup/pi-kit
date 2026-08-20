@@ -1,5 +1,11 @@
 import type { WebModelOption } from "../protocol.js";
 
+export function visibleRoutedThinkingLevel(
+  thinkingLevel: string | undefined,
+): string {
+  return thinkingLevel && thinkingLevel !== "off" ? thinkingLevel : "";
+}
+
 /** Return only the thinking levels advertised for the selected model. */
 export function thinkingLevelsForSelectedModel(
   models: readonly WebModelOption[],

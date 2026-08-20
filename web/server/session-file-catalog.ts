@@ -13,8 +13,13 @@ import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { WebSession } from "../protocol.js";
 import {
+  AUTO_ROUTER_ACTIVE_ENTRY,
+  type AutoRoutingState,
+  autoRoutingStateFromEntries,
   lastAutoRoutedModelFromEntries,
+  lastAutoRoutedModelFromState,
   selectedAutoModelFromEntries,
+  selectedAutoModelFromState,
 } from "../model-status.js";
 import {
   replacementFromEntries,
@@ -50,6 +55,7 @@ export function createSessionFileCatalog(options: {
       parsedBytes: number;
       scan: SessionFileScan;
       metadataEntries: Record<string, unknown>[];
+      autoRoutingState: AutoRoutingState;
     }
   >();
 
@@ -469,6 +475,10 @@ export function createSessionFileCatalog(options: {
       let messageCount = incremental ? cached.scan.session.messageCount : 0;
       let preview = incremental ? cached.scan.session.preview : undefined;
       const metadataEntries = incremental ? [...cached.metadataEntries] : [];
+      let autoRoutingState: AutoRoutingState = incremental
+        ? { ...cached.autoRoutingState }
+        : { active: false };
+      const autoRoutingEntries: Record<string, unknown>[] = [];
       const usage = zeroWebUsage();
       if (incremental) addWebUsage(usage, cached.scan.session.usage);
       for (const line of lines) {
@@ -494,13 +504,18 @@ export function createSessionFileCatalog(options: {
         )
           thinkingLevel = entry.thinkingLevel;
         if (
-          (entry.type === "custom" &&
-            (entry.customType === WORKTREE_SESSION_ENTRY ||
-              entry.customType === WORKTREE_REPLACEMENT_ENTRY ||
-              entry.customType === "vessup:auto-router:active")) ||
-          entry.type === "model_change"
+          entry.type === "custom" &&
+          (entry.customType === WORKTREE_SESSION_ENTRY ||
+            entry.customType === WORKTREE_REPLACEMENT_ENTRY)
         ) {
           metadataEntries.push(entry);
+        }
+        if (
+          entry.type === "model_change" ||
+          (entry.type === "custom" &&
+            entry.customType === AUTO_ROUTER_ACTIVE_ENTRY)
+        ) {
+          autoRoutingEntries.push(entry);
         }
         if (entry.type === "message") {
           messageCount += 1;
@@ -531,6 +546,10 @@ export function createSessionFileCatalog(options: {
         : typeof header?.cwd === "string" && header.cwd
           ? header.cwd
           : dirname(file);
+      autoRoutingState = autoRoutingStateFromEntries(
+        autoRoutingEntries,
+        autoRoutingState,
+      );
       const managedWorktree = managedWorktreeFromEntries(metadataEntries);
       const session: WebSession = {
         id,
@@ -539,8 +558,8 @@ export function createSessionFileCatalog(options: {
         name,
         model,
         thinkingLevel,
-        selectedModel: selectedAutoModelFromEntries(metadataEntries),
-        lastModel: lastAutoRoutedModelFromEntries(metadataEntries),
+        selectedModel: selectedAutoModelFromState(autoRoutingState),
+        lastModel: lastAutoRoutedModelFromState(autoRoutingState),
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
         createdAt: incremental
@@ -575,6 +594,7 @@ export function createSessionFileCatalog(options: {
         parsedBytes,
         scan,
         metadataEntries,
+        autoRoutingState,
       });
       return freshMetadataScan(scan, file);
     } catch {

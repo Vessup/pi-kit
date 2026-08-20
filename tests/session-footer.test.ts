@@ -8,9 +8,12 @@ import {
 } from "../extensions/footer-events.ts";
 
 test("wide model details do not erase footer identity", () => {
-  const line = alignSides("⧉ ~/repo (main)", "Auto (auto) • (provider) very-long-model • high", 24);
-  expect(line).toContain("⧉");
-  expect(visibleWidth(line)).toBeLessThanOrEqual(24);
+  const left = "⧉ ~/repo (main)";
+  for (const right of ["123456789", "1234567890", "12345678901"]) {
+    const line = alignSides(left, right, 10);
+    expect(line).toContain("⧉");
+    expect(visibleWidth(line)).toBeLessThanOrEqual(10);
+  }
 });
 
 test("the shared footer places identity, routing, and activity in two rows", () => {

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createRecordSync } from "../web/server/recordSync.ts";
+import { mergedLastModel } from "../web/server/sessionRegistry.ts";
 import type {
   SessionFileCatalog,
   SessionRecord,
@@ -34,6 +35,76 @@ function recordSync() {
   } as unknown as ServerRuntimeState;
   return createRecordSync({ catalog, state });
 }
+
+test("model refresh payloads preserve the authoritative session name", () => {
+  const sync = recordSync();
+  const record = {
+    id: "session-1",
+    name: "Named session",
+    status: "idle",
+  } as unknown as SessionRecord;
+
+  sync.updateRecordFromState(record, {
+    thinkingLevel: "high",
+    sessionName: "Named session",
+  });
+  expect(record.name).toBe("Named session");
+
+  sync.updateRecordFromState(record, { thinkingLevel: "high" });
+  expect(record.name).toBeUndefined();
+});
+
+test("catalog comparisons normalize explicit last-model clears", () => {
+  const sync = recordSync();
+  const previous = {
+    id: "session-1",
+    lastModel: undefined,
+  } as unknown as SessionRecord;
+  const next = {
+    id: "session-1",
+    lastModel: null,
+  } as unknown as SessionRecord;
+
+  expect(sync.catalogSessionChanged(previous, next)).toBe(false);
+  next.lastModel = "provider/routed";
+  expect(sync.catalogSessionChanged(previous, next)).toBe(true);
+});
+
+test("session merges preserve only the current Auto selection's route", () => {
+  const previous = {
+    model: "auto/auto",
+    selectedModel: "auto/auto",
+    lastModel: "provider/previous",
+  };
+  expect(
+    mergedLastModel(previous, {
+      model: "auto/auto",
+      selectedModel: "auto/auto",
+      lastModel: undefined,
+    }),
+  ).toBe("provider/previous");
+  expect(
+    mergedLastModel(previous, {
+      model: "auto/auto-high",
+      selectedModel: "auto/auto-high",
+      lastModel: undefined,
+    }),
+  ).toBeUndefined();
+  expect(
+    mergedLastModel(previous, {
+      model: "provider/manual",
+      selectedModel: "provider/manual",
+      lastModel: undefined,
+    }),
+  ).toBeUndefined();
+  expect(
+    mergedLastModel(previous, {
+      model: "auto/auto",
+      selectedModel: "auto/auto",
+      lastModel: null,
+    }),
+  ).toBeUndefined();
+});
 
 test("a stale refresh cannot cancel Auto tracking for a newer turn", () => {
   const sync = recordSync();

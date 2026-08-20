@@ -222,6 +222,7 @@ export function createManagedSessionLauncher(options: {
                   {
                     model: snapshot.model,
                     thinkingLevel: snapshot.thinkingLevel,
+                    sessionName: snapshot.sessionName,
                   },
                   generation,
                 );

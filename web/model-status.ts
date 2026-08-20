@@ -10,7 +10,10 @@ export type WebModelStatus = {
 
 export type WebModelIdentity = { provider: string; id: string };
 
+export const AUTO_ROUTER_ACTIVE_ENTRY = "vessup:auto-router:active";
+
 const AUTO_ROUTER_EFFORTS = new Set([
+  "off",
   "minimal",
   "low",
   "medium",
@@ -19,41 +22,33 @@ const AUTO_ROUTER_EFFORTS = new Set([
   "max",
 ]);
 
-/** Reconstruct the durable Auto placeholder selected for a saved session. */
-export function selectedAutoModelFromEntries(
-  entries: readonly unknown[],
-): string | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (!entry || typeof entry !== "object") continue;
-    const value = entry as Record<string, unknown>;
-    if (
-      value.type !== "custom" ||
-      value.customType !== "vessup:auto-router:active"
-    )
-      continue;
-    const data = value.data;
-    if (
-      !data ||
-      typeof data !== "object" ||
-      (data as Record<string, unknown>).enabled !== true
-    )
-      return undefined;
-    const pinnedTier = (data as Record<string, unknown>).pinnedTier;
-    return typeof pinnedTier === "string" && AUTO_ROUTER_EFFORTS.has(pinnedTier)
-      ? `auto/auto-${pinnedTier}`
-      : "auto/auto";
-  }
-  return undefined;
+export type AutoRoutingState = {
+  active: boolean;
+  selectedModel?: string;
+  currentPlaceholder?: string;
+  pendingRoute?: string;
+  lastModel?: string;
+};
+
+function selectedAutoModelFromData(data: unknown): string | undefined {
+  if (
+    !data ||
+    typeof data !== "object" ||
+    (data as Record<string, unknown>).enabled !== true
+  )
+    return undefined;
+  const pinnedTier = (data as Record<string, unknown>).pinnedTier;
+  return typeof pinnedTier === "string" && AUTO_ROUTER_EFFORTS.has(pinnedTier)
+    ? `auto/auto-${pinnedTier}`
+    : "auto/auto";
 }
 
-/** Find the last concrete model that Auto actually routed to. */
-export function lastAutoRoutedModelFromEntries(
+/** Incrementally fold durable Auto selection and routed-model transitions. */
+export function autoRoutingStateFromEntries(
   entries: readonly unknown[],
-): string | undefined {
-  let autoActive = false;
-  let pendingRoute: string | undefined;
-  let lastModel: string | undefined;
+  initial: AutoRoutingState = { active: false },
+): AutoRoutingState {
+  const state: AutoRoutingState = { ...initial };
   for (const entry of entries) {
     if (!entry || typeof entry !== "object") continue;
     const value = entry as Record<string, unknown>;
@@ -67,30 +62,78 @@ export function lastAutoRoutedModelFromEntries(
         continue;
       const model = `${value.provider}/${value.modelId}`;
       if (isAutoModelReference(model)) {
-        if (pendingRoute) lastModel = pendingRoute;
-        pendingRoute = undefined;
-      } else if (autoActive) {
-        pendingRoute = model;
+        if (
+          state.active &&
+          state.currentPlaceholder &&
+          state.currentPlaceholder !== model
+        ) {
+          state.pendingRoute = undefined;
+          state.lastModel = undefined;
+        } else if (state.pendingRoute) {
+          state.lastModel = state.pendingRoute;
+          state.pendingRoute = undefined;
+        }
+        state.currentPlaceholder = model;
+      } else if (state.active) {
+        state.pendingRoute = model;
       }
       continue;
     }
     if (
       value.type !== "custom" ||
-      value.customType !== "vessup:auto-router:active"
+      value.customType !== AUTO_ROUTER_ACTIVE_ENTRY
     )
       continue;
-    const data = value.data;
-    const enabled =
-      typeof data === "object" &&
-      data !== null &&
-      (data as Record<string, unknown>).enabled === true;
-    autoActive = enabled;
-    if (!enabled) {
-      pendingRoute = undefined;
-      lastModel = undefined;
+    const selectedModel = selectedAutoModelFromData(value.data);
+    if (!selectedModel) {
+      state.active = false;
+      state.selectedModel = undefined;
+      state.currentPlaceholder = undefined;
+      state.pendingRoute = undefined;
+      state.lastModel = undefined;
+      continue;
     }
+    if (!state.active) {
+      state.currentPlaceholder = selectedModel;
+    } else if (
+      state.selectedModel &&
+      state.selectedModel !== selectedModel
+    ) {
+      state.pendingRoute = undefined;
+      state.lastModel = undefined;
+      state.currentPlaceholder = selectedModel;
+    }
+    state.active = true;
+    state.selectedModel = selectedModel;
+    state.currentPlaceholder ??= selectedModel;
   }
-  return lastModel ?? pendingRoute;
+  return state;
+}
+
+export function selectedAutoModelFromState(
+  state: AutoRoutingState,
+): string | undefined {
+  return state.active ? state.selectedModel : undefined;
+}
+
+export function lastAutoRoutedModelFromState(
+  state: AutoRoutingState,
+): string | undefined {
+  return state.active ? (state.pendingRoute ?? state.lastModel) : undefined;
+}
+
+/** Reconstruct the durable Auto placeholder selected for a saved session. */
+export function selectedAutoModelFromEntries(
+  entries: readonly unknown[],
+): string | undefined {
+  return selectedAutoModelFromState(autoRoutingStateFromEntries(entries));
+}
+
+/** Find the most recent concrete model that Auto actually routed to. */
+export function lastAutoRoutedModelFromEntries(
+  entries: readonly unknown[],
+): string | undefined {
+  return lastAutoRoutedModelFromState(autoRoutingStateFromEntries(entries));
 }
 
 /** Format a provider/model pair for the Web session protocol. */
@@ -148,7 +191,11 @@ export function applyRuntimeModelStatus(
     selectedModel: preservingAutoSelection ? selectedModel : runtimeModel,
   };
   if (preservingAutoSelection) next.lastModel = runtimeModel;
-  else if (!isAutoModelReference(runtimeModel)) delete next.lastModel;
+  else if (
+    !isAutoModelReference(runtimeModel) ||
+    (isAutoModelReference(selectedModel) && selectedModel !== runtimeModel)
+  )
+    delete next.lastModel;
   return next;
 }
 

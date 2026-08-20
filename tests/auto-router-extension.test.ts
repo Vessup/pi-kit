@@ -82,7 +82,11 @@ type FakePi = {
   currentModel: ModelRef;
 };
 
-function createFakePi(options: { setModelResult?: boolean } = {}): FakePi {
+function createFakePi(
+  options: {
+    setModelResult?: boolean | ((model: Model<Api>, call: number) => boolean);
+  } = {},
+): FakePi {
   const handlers = new Map<string, FakeHandler>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const setModelCalls: Model<Api>[] = [];
@@ -118,8 +122,12 @@ function createFakePi(options: { setModelResult?: boolean } = {}): FakePi {
     },
     setModel: async (m: Model<Api>) => {
       setModelCalls.push(m);
-      if (options.setModelResult !== false) currentModel.value = m;
-      return options.setModelResult !== false;
+      const success =
+        typeof options.setModelResult === "function"
+          ? options.setModelResult(m, setModelCalls.length)
+          : options.setModelResult !== false;
+      if (success) currentModel.value = m;
+      return success;
     },
     setThinkingLevel: async (level: string) => {
       thinkingLevelCalls.push(level);
@@ -385,22 +393,32 @@ test("Auto routes before prompt preflight so compaction cannot use its placehold
   await selectAuto(fake, ctx);
 
   await fake.fire("input", { text: "next prompt", source: "interactive" }, ctx);
+  await fake.fire("before_agent_start", { prompt: "next prompt" }, ctx);
 
   expect(fake.currentModel.value).toBe(a);
   expect(fake.setModelCalls).toEqual([a]);
 });
 
-test("handles failed preflight routing instead of dispatching the Auto placeholder", async () => {
-  const a = model("prov", "model-a");
+test("stops the prompt when its classified model cannot be selected", async () => {
+  const medium = model("prov", "medium-model");
+  const high = model("prov", "high-model");
   await writeConfig({
-    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+    efforts: {
+      medium: { models: [{ provider: "prov", id: "medium-model" }] },
+      high: { models: [{ provider: "prov", id: "high-model" }] },
+    },
   });
 
-  const fake = createFakePi({ setModelResult: false });
+  const fake = createFakePi({
+    setModelResult: (selected) => selected !== high,
+  });
   await autoRouter(fake.pi);
   fake.currentModel.value = AUTO_PLACEHOLDER;
   const ctx = fakeCtx({
-    modelRegistry: fakeModelRegistry({ models: [a] }),
+    modelRegistry: fakeModelRegistry({
+      models: [medium, high],
+      classify: () => "high",
+    }),
     currentModel: fake.currentModel,
   });
   await selectAuto(fake, ctx);
@@ -412,6 +430,7 @@ test("handles failed preflight routing instead of dispatching the Auto placehold
   );
 
   expect(result).toEqual({ action: "handled" });
+  expect(fake.setModelCalls).toEqual([high]);
   expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
   expect(ctx.notifications.some(({ type }) => type === "error")).toBe(true);
 });

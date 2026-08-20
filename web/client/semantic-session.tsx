@@ -117,7 +117,10 @@ import {
 } from "../model-status";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
-import { thinkingLevelsForSelectedModel } from "./model-options";
+import {
+  thinkingLevelsForSelectedModel,
+  visibleRoutedThinkingLevel,
+} from "./model-options";
 import { anchoredScrollTop, resolveScrollFollow } from "./scroll-follow";
 import { hasActiveSessionWork } from "./session-status";
 import { toolHasArgumentDetails } from "./tool-expansion";
@@ -2666,10 +2669,11 @@ export function SemanticSession({
       : autoSelected
         ? session?.lastModel
         : undefined;
+  const routedEffortLabel = visibleRoutedThinkingLevel(rawThinkingLevel);
   const turnModelSummary =
     effectiveModelReference && !isAutoModelReference(effectiveModelReference)
-      ? effortLabel
-        ? `${formatModelReference(effectiveModelReference)} · ${effortLabel}`
+      ? routedEffortLabel
+        ? `${formatModelReference(effectiveModelReference)} · ${routedEffortLabel}`
         : formatModelReference(effectiveModelReference)
       : undefined;
   const availableEfforts = thinkingLevelsForSelectedModel(

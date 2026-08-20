@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  rm,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ManagedSessionStore } from "../web/server/managed-session-store.ts";
@@ -38,6 +45,63 @@ test("metadata cache results have fresh arrays and current ownership", async () 
   expect(second.history).toEqual([]);
   expect(second.entries).toEqual([]);
   expect(second.session.source).toBe("web");
+});
+
+test("metadata scans retain bounded incremental Auto routing state", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-session-auto-metadata-"));
+  const sessionsDir = join(tempDir, "sessions");
+  const file = join(sessionsDir, "auto.jsonl");
+  await mkdir(sessionsDir, { recursive: true });
+  await writeFile(
+    file,
+    `${JSON.stringify({ type: "session", id: "auto", cwd: tempDir })}\n${JSON.stringify({
+      type: "custom",
+      customType: "vessup:auto-router:active",
+      data: { enabled: true, pinnedTier: "high" },
+    })}\n`,
+  );
+  const catalog = createSessionFileCatalog({
+    sessionsDir,
+    managedSessionStore: new ManagedSessionStore(join(tempDir, "managed.json")),
+  });
+
+  expect(catalog.parseSessionMetadataFile(file)?.session).toMatchObject({
+    selectedModel: "auto/auto-high",
+    lastModel: undefined,
+  });
+  await appendFile(
+    file,
+    `${JSON.stringify({ type: "model_change", provider: "provider", modelId: "a" })}\n`,
+  );
+  expect(catalog.parseSessionMetadataFile(file)?.session.lastModel).toBe(
+    "provider/a",
+  );
+  await appendFile(
+    file,
+    `${JSON.stringify({ type: "model_change", provider: "auto", modelId: "auto-high" })}\n`,
+  );
+  expect(catalog.parseSessionMetadataFile(file)?.session.lastModel).toBe(
+    "provider/a",
+  );
+  await appendFile(
+    file,
+    `${JSON.stringify({ type: "model_change", provider: "provider", modelId: "b" })}\n`,
+  );
+  expect(catalog.parseSessionMetadataFile(file)?.session.lastModel).toBe(
+    "provider/b",
+  );
+  await appendFile(
+    file,
+    `${JSON.stringify({ type: "model_change", provider: "auto", modelId: "auto-high" })}\n${JSON.stringify({
+      type: "custom",
+      customType: "vessup:auto-router:active",
+      data: { enabled: false },
+    })}\n`,
+  );
+  expect(catalog.parseSessionMetadataFile(file)?.session).toMatchObject({
+    selectedModel: undefined,
+    lastModel: undefined,
+  });
 });
 
 test("deletion reads worktree ownership from a bounded session prefix", async () => {

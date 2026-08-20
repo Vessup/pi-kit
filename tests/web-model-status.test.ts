@@ -10,15 +10,25 @@ import {
 } from "../web/model-status";
 
 test("reconstructs a durable Auto selection", () => {
-  expect(
-    selectedAutoModelFromEntries([
-      {
-        type: "custom",
-        customType: "vessup:auto-router:active",
-        data: { enabled: true, pinnedTier: "high" },
-      },
-    ]),
-  ).toBe("auto/auto-high");
+  for (const tier of [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]) {
+    expect(
+      selectedAutoModelFromEntries([
+        {
+          type: "custom",
+          customType: "vessup:auto-router:active",
+          data: { enabled: true, pinnedTier: tier },
+        },
+      ]),
+    ).toBe(`auto/auto-${tier}`);
+  }
   expect(
     selectedAutoModelFromEntries([
       {
@@ -73,6 +83,43 @@ test("finds only models Auto actually routed to", () => {
       { type: "model_change", provider: "auto", modelId: "auto" },
       autoEnabled,
       { type: "model_change", provider: "provider", modelId: "" },
+    ]),
+  ).toBeUndefined();
+});
+
+test("returns a newer in-flight Auto route over the prior completed route", () => {
+  const autoEnabled = {
+    type: "custom",
+    customType: "vessup:auto-router:active",
+    data: { enabled: true },
+  };
+  expect(
+    lastAutoRoutedModelFromEntries([
+      { type: "model_change", provider: "auto", modelId: "auto" },
+      autoEnabled,
+      { type: "model_change", provider: "provider", modelId: "older" },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+      { type: "model_change", provider: "provider", modelId: "newer" },
+    ]),
+  ).toBe("provider/newer");
+});
+
+test("switching Auto tiers clears the previous tier's routed model", () => {
+  expect(
+    lastAutoRoutedModelFromEntries([
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true },
+      },
+      { type: "model_change", provider: "provider", modelId: "routed" },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+      { type: "model_change", provider: "auto", modelId: "auto-high" },
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true, pinnedTier: "high" },
+      },
     ]),
   ).toBeUndefined();
 });
@@ -137,6 +184,26 @@ test("ordinary model changes replace both the runtime and selected model", () =>
     model: "anthropic/claude-sonnet",
     thinkingLevel: "medium",
     selectedModel: "anthropic/claude-sonnet",
+  });
+});
+
+test("switching to a different Auto placeholder clears the old route", () => {
+  expect(
+    applyRuntimeModelStatus(
+      {
+        model: "auto/auto",
+        thinkingLevel: "off",
+        selectedModel: "auto/auto",
+        lastModel: "openai-codex/gpt-5.6-luna",
+      },
+      "auto/auto-high",
+      "off",
+      false,
+    ),
+  ).toEqual({
+    model: "auto/auto-high",
+    thinkingLevel: "off",
+    selectedModel: "auto/auto-high",
   });
 });
 

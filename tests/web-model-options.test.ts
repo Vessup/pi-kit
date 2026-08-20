@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import type { WebModelOption } from "../web/protocol.ts";
-import { thinkingLevelsForSelectedModel } from "../web/client/model-options.ts";
+import {
+  thinkingLevelsForSelectedModel,
+  visibleRoutedThinkingLevel,
+} from "../web/client/model-options.ts";
 
 const models: WebModelOption[] = [
   {
@@ -26,6 +29,12 @@ const models: WebModelOption[] = [
     ],
   },
 ];
+
+test("Auto's routed model shows the runtime effort, not its selected tier", () => {
+  expect(visibleRoutedThinkingLevel("max")).toBe("max");
+  expect(visibleRoutedThinkingLevel("off")).toBe("");
+  expect(visibleRoutedThinkingLevel(undefined)).toBe("");
+});
 
 test("effort menu uses only the selected model's supported thinking levels", () => {
   expect(

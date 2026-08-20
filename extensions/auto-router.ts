@@ -14,6 +14,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+import { AUTO_ROUTER_ACTIVE_ENTRY } from "../web/model-status.js";
 import { classifyTurnComplexity } from "./auto-router-classify.js";
 import {
   AutoRouterHealthStore,
@@ -46,7 +47,7 @@ export const AUTO_ROUTER_MODEL_ROUTING_EVENT =
   "pi-kit:auto-router:model-routing";
 const AUTO_PROVIDER_ID = "auto";
 const AUTO_MODEL_ID = "auto";
-const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
+const AUTO_ACTIVE_ENTRY_TYPE = AUTO_ROUTER_ACTIVE_ENTRY;
 const FOOTER_KEY = "auto-router";
 const PINNED_MODEL_PREFIX = `${AUTO_MODEL_ID}-`;
 
@@ -180,6 +181,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   let routingInFlight = false;
   let modelTransitionTail = Promise.resolve();
   let compactionLease = false;
+  let preflightPromptRouted = false;
   const healthStore = new AutoRouterHealthStore();
 
   async function withModelTransition<T>(operation: () => Promise<T>): Promise<T> {
@@ -471,7 +473,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     ctx: ExtensionContext,
     prompt: string,
     hasImages: boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const settings = await readAutoRouterSettings();
 
     let tier: AutoRouterEffortLevel;
@@ -545,8 +547,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
           "warning",
         );
       }
-      return;
+      return false;
     }
+    if (!(await applyRouting(pi, ctx, picked.model, picked.effort))) return false;
     // Persisted so `/usage` can show what the classifier actually said - the classify call
     // itself is otherwise a throwaway completion whose result is discarded after parsing, which
     // made a prior misrouting report impossible to actually verify against real evidence.
@@ -557,13 +560,14 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       effort: picked.effort,
       model: picked.model,
     });
-    await applyRouting(pi, ctx, picked.model, picked.effort);
+    return true;
   }
 
   pi.on("input", async (event, ctx) => {
     // Steering/follow-up messages do not run core's pre-prompt compaction check,
     // and changing the model while an agent is streaming would race its request.
     if (event.streamingBehavior) return;
+    preflightPromptRouted = false;
     // Core checks for threshold compaction before before_agent_start. Route away
     // from Auto's inert placeholder during that preflight so summarization uses
     // a real model instead of http://127.0.0.1:0. If placeholder restoration
@@ -579,7 +583,19 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       publishFooter();
     }
     try {
-      await routeForCompaction(pi, ctx);
+      if (
+        !(await routeForPrompt(
+          pi,
+          ctx,
+          event.text,
+          Boolean(event.images?.length),
+        ))
+      ) {
+        if (ctx.hasUI)
+          ctx.ui.notify("Auto could not route this prompt.", "error");
+        return { action: "handled" };
+      }
+      preflightPromptRouted = true;
     } catch (error) {
       if (ctx.hasUI) {
         ctx.ui.notify(
@@ -587,9 +603,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
           "error",
         );
       }
-      // Do not let core continue with Auto's inert placeholder after routing
-      // fails: its auth/preflight error otherwise becomes a misleading connection
-      // error (and may be retried as compaction failures).
+      // Do not let core continue on Auto's inert placeholder or a preflight
+      // fallback when the prompt's final route could not be selected.
       return { action: "handled" };
     }
   });
@@ -679,6 +694,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
     compactionLease = false;
+    preflightPromptRouted = false;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -751,9 +767,14 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("session_shutdown", async () => {
     compactionLease = false;
     routingInFlight = false;
+    preflightPromptRouted = false;
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    if (preflightPromptRouted) {
+      preflightPromptRouted = false;
+      return;
+    }
     if (!autoActive) {
       // `autoActive` is bookkeeping derived from model_select/session_start events, and every
       // path that's supposed to keep it in sync with reality is a separate thing to get right -
