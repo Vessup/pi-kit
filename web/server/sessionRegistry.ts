@@ -42,6 +42,10 @@ export function createSessionRegistry(options: {
   const { replaceRecordHistory } = history;
 
   function clearStaleAutoModel(record: SessionRecord, session: WebSession): void {
+    if (session.lastModel === null) {
+      record.lastModel = undefined;
+      return;
+    }
     const selectedModel = session.selectedModel ?? session.model;
     if (
       session.lastModel === undefined &&

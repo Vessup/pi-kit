@@ -146,6 +146,7 @@ test("the Auto placeholder is selected again after the runtime reverts", () => {
         model: "openai-codex/gpt-5.6-luna",
         thinkingLevel: "high",
         selectedModel: "auto/auto",
+        lastModel: "openai-codex/gpt-5.6-luna",
       },
       "auto/auto",
       "off",
@@ -155,5 +156,6 @@ test("the Auto placeholder is selected again after the runtime reverts", () => {
     model: "auto/auto",
     thinkingLevel: "off",
     selectedModel: "auto/auto",
+    lastModel: "openai-codex/gpt-5.6-luna",
   });
 });

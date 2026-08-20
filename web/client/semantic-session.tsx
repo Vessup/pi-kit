@@ -695,7 +695,7 @@ function TokenDetails({
             Context{" "}
             <strong>
               {context.percent == null ? "?" : `${context.percent.toFixed(1)}%`} ·{" "}
-              {formatTokenCount(context.tokens ?? 0)} /{" "}
+              {context.tokens == null ? "?" : formatTokenCount(context.tokens)} /{" "}
               {formatTokenCount(context.contextWindow)}
             </strong>
           </span>

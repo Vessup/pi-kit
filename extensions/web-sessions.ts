@@ -942,7 +942,7 @@ async function executeAgentCommand(
         updateSession(state, {
           model: `${model.provider}/${model.id}`,
           selectedModel: `${model.provider}/${model.id}`,
-          lastModel: undefined,
+          lastModel: null,
         });
         respond(state, requestId, true);
         return;

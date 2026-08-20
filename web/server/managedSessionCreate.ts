@@ -216,7 +216,15 @@ export function createManagedSessionLauncher(options: {
                   !record.autoTurnActive
                 )
                   return;
-                updateRecordFromState(record, state);
+                const snapshot = isRecord(state) ? state : {};
+                updateRecordFromState(
+                  record,
+                  {
+                    model: snapshot.model,
+                    thinkingLevel: snapshot.thinkingLevel,
+                  },
+                  generation,
+                );
                 broadcastSessionToAll(record);
               })
               .catch(() => undefined);

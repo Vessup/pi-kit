@@ -5,7 +5,7 @@ export type WebModelStatus = {
   /** The model the user selected; differs from `model` only while Auto routes. */
   selectedModel?: string;
   /** The last concrete runtime model used for an Auto selection. */
-  lastModel?: string;
+  lastModel?: string | null;
 };
 
 export type WebModelIdentity = { provider: string; id: string };
