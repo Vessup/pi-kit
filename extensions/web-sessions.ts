@@ -580,7 +580,10 @@ function hyperlink(url: string, label: string): string {
 }
 
 function renderWebLink(theme: Theme, url: string): string {
-  return hyperlink(url, theme.fg("accent", "⧉"));
+  // Some terminals eat the trailing space between the OSC 8 link close and
+  // the following glyph, leaving the icon visually glued to the directory
+  // text. Wrapping the trailing space inside the hyperlink avoids that.
+  return hyperlink(url, `${theme.fg("accent", "⧉")} `);
 }
 
 function publishFooter(pi: ExtensionAPI, state: BridgeState): void {

@@ -61,7 +61,7 @@ test("the shared footer places identity, routing, and activity in two rows", () 
   emit({
     sessionId: "session-1",
     key: "web",
-    identityPrefix: () => "⧉",
+    identityPrefix: () => "⧉ ",
   });
   emit({
     sessionId: "session-1",
@@ -95,7 +95,7 @@ test("the shared footer places identity, routing, and activity in two rows", () 
   expect(component).toBeDefined();
   const lines = component?.render(100) ?? [];
   expect(lines).toHaveLength(2);
-  expect(lines[0]).toStartWith("⧉ ~/repo (main) • Session • PR #17");
+  expect(lines[0]).toStartWith("⧉  ~/repo (main) • Session • PR #17");
   expect(lines[0]).toEndWith(
     "Auto (auto) • (provider) model • high",
   );
