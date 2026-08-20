@@ -24,11 +24,18 @@ export function createRecordSync(options: {
     zeroWebUsage,
   } = catalog;
 
-  function updateRecordFromState(record: SessionRecord, state: unknown): void {
+  function updateRecordFromState(
+    record: SessionRecord,
+    state: unknown,
+    expectedModelTurnGeneration?: number,
+  ): void {
     const s = state as Record<string, unknown> | undefined;
     if (!s) return;
+    const modelStateIsCurrent =
+      expectedModelTurnGeneration === undefined ||
+      (record.modelTurnGeneration ?? 0) === expectedModelTurnGeneration;
     const model = s.model as Record<string, unknown> | null | undefined;
-    if (model && typeof model.id === "string") {
+    if (modelStateIsCurrent && model && typeof model.id === "string") {
       const runtimeModel =
         typeof model.provider === "string" && model.provider
           ? `${model.provider}/${model.id}`
@@ -64,7 +71,7 @@ export function createRecordSync(options: {
           record.autoTurnSettling = false;
       }
       if (!preservingAutoSelection) record.autoTurnActive = false;
-    } else if (typeof s.thinkingLevel === "string") {
+    } else if (modelStateIsCurrent && typeof s.thinkingLevel === "string") {
       record.thinkingLevel = s.thinkingLevel;
     }
     if (typeof s.sessionFile === "string") {

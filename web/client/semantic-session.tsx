@@ -738,6 +738,7 @@ function sameTokenTelemetry(
       usage?.cacheRead ?? 0,
       usage?.cacheWrite ?? 0,
       usage?.cost.total ?? 0,
+      session.contextUsage?.tokens ?? null,
       session.contextUsage?.percent ?? null,
       session.contextUsage?.contextWindow ?? 0,
     ];
@@ -777,6 +778,7 @@ const ContextProgressCircle = React.memo(
     session: WebSession | null;
     interactive?: boolean;
   }) {
+    const [open, setOpen] = React.useState(false);
     const context = session?.contextUsage;
     const contextTokens = context?.tokens ?? 0;
     const rawPercent =
@@ -831,9 +833,14 @@ const ContextProgressCircle = React.memo(
       );
     return (
       <TooltipProvider>
-        <Tooltip>
+        <Tooltip open={open} onOpenChange={setOpen}>
           <TooltipTrigger asChild>
-            <button type="button" className={className} aria-label={label}>
+            <button
+              type="button"
+              className={className}
+              aria-label={label}
+              onClick={() => setOpen((value) => !value)}
+            >
               {ring}
             </button>
           </TooltipTrigger>
@@ -850,13 +857,7 @@ const ContextProgressCircle = React.memo(
   },
   (previous, next) =>
     previous.interactive === next.interactive &&
-    previous.session?.id === next.session?.id &&
-    previous.session?.contextUsage?.tokens ===
-      next.session?.contextUsage?.tokens &&
-    previous.session?.contextUsage?.contextWindow ===
-      next.session?.contextUsage?.contextWindow &&
-    previous.session?.contextUsage?.percent ===
-      next.session?.contextUsage?.percent &&
+    sameTokenTelemetry(previous.session, next.session) &&
     previous.session?.compaction?.reason === next.session?.compaction?.reason,
 );
 
