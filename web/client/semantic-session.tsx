@@ -154,7 +154,6 @@ type SemanticSessionProps = {
   streamingMessage: Record<string, unknown> | null;
   streamingMessageKey: string | null;
   tools: ActiveTool[];
-  error: string | null;
   connected: boolean;
   transcriptLoading: boolean;
   queuedMessages: WebQueuedMessage[];
@@ -1848,7 +1847,6 @@ export function SemanticSession({
   streamingMessage,
   streamingMessageKey: providedStreamingMessageKey,
   tools,
-  error,
   connected,
   transcriptLoading,
   queuedMessages,
@@ -1863,8 +1861,6 @@ export function SemanticSession({
 }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
-  const [sendError, setSendError] = React.useState<string | null>(null);
-  const [sendNotice, setSendNotice] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
   const [aborting, setAborting] = React.useState(false);
   const [draggingAttachments, setDraggingAttachments] = React.useState(false);
@@ -2132,7 +2128,6 @@ export function SemanticSession({
   }, [captureViewportAnchor, maintainLockedScrollExtent, updateScrollButton]);
 
   React.useEffect(() => {
-    setSendNotice(null);
     setAborting(false);
   }, []);
 
@@ -2422,9 +2417,7 @@ export function SemanticSession({
         });
       }
       setImages(combined);
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     } finally {
       requestAnimationFrame(() =>
         textareaRef.current?.focus({ preventScroll: true }),
@@ -2462,9 +2455,7 @@ export function SemanticSession({
     try {
       await onSteerQueuedMessage(item.id);
       if (editingQueueId === item.id) finishQueueEditing();
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     } finally {
       setSteeringQueueId(null);
     }
@@ -2481,9 +2472,7 @@ export function SemanticSession({
     if (!window.confirm(`Confirm ${verb}?`)) return;
     try {
       await onReconcileQueue(item.id, action);
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     }
   };
 
@@ -2503,9 +2492,7 @@ export function SemanticSession({
     const next = moveWebQueuedMessage(queuedMessages, activeId, placement);
     try {
       await onReplaceQueue(next);
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     }
   };
 
@@ -2514,9 +2501,7 @@ export function SemanticSession({
     try {
       await onSelectModel(provider, modelId);
       setModelMenuOpen(false);
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     } finally {
       setControlBusy(false);
       requestAnimationFrame(() =>
@@ -2530,9 +2515,7 @@ export function SemanticSession({
     try {
       await onSelectThinkingLevel(level);
       setModelMenuOpen(false);
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     } finally {
       setControlBusy(false);
       requestAnimationFrame(() =>
@@ -2631,14 +2614,9 @@ export function SemanticSession({
   const requestAbort = async () => {
     if (!session || aborting) return;
     setAborting(true);
-    setSendError(null);
-    setSendNotice("Stopping…");
     try {
       await onAbort();
-      setSendNotice("Stop requested");
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
-      setSendNotice(null);
+    } catch {
       setAborting(false);
     }
   };
@@ -2658,12 +2636,10 @@ export function SemanticSession({
         images,
         streamingBehavior: behavior,
       });
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
       return;
     }
     setSending(true);
-    setSendNotice(null);
     try {
       if (editingQueueId) {
         await onReplaceQueue(
@@ -2706,9 +2682,7 @@ export function SemanticSession({
           throw cause;
         }
       }
-      setSendError(null);
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
     } finally {
       setSending(false);
     }
@@ -3440,12 +3414,6 @@ export function SemanticSession({
               </div>
             </div>
           </div>
-          {(sendError || error) && (
-            <p className="mt-2 text-sm text-red-300">{sendError ?? error}</p>
-          )}
-          {!sendError && !error && sendNotice && (
-            <output className="mt-2 text-sm text-zinc-400">{sendNotice}</output>
-          )}
         </div>
       </div>
     </section>

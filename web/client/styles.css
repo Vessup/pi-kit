@@ -470,8 +470,7 @@ details[open] > summary .semantic-tool-chevron {
   padding: 0.75rem 0.85rem;
   color: rgb(var(--status-working-text));
 }
-.semantic-compaction-status > svg,
-.semantic-compaction-status > .semantic-context-progress {
+.semantic-compaction-status > svg {
   margin-top: 0.1rem;
   flex: none;
 }
@@ -985,6 +984,7 @@ details[open] > summary .semantic-tool-chevron {
 .semantic-context-progress.is-decorative {
   width: 1.15rem;
   height: 1.15rem;
+  margin-top: 0.1rem;
   border-radius: 0;
 }
 .semantic-context-progress.is-decorative:hover {

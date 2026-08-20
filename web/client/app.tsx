@@ -2863,7 +2863,6 @@ export function App() {
               streamingMessage={streamingMessage}
               streamingMessageKey={streamingMessageKey}
               tools={activeTools}
-              error={error}
               connected={connected}
               transcriptLoading={transcriptLoading}
               queuedMessages={queuedMessages}
