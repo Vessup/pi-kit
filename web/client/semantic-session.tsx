@@ -41,7 +41,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  CircleGauge,
   FilePenLine,
   FileText,
   FileUp,
@@ -652,9 +651,15 @@ function combinedUsage(
   };
 }
 
-function TokenDetails({ session }: { session: WebSession }) {
-  const usage = combinedUsage(session.usage, session.subagentUsage);
-  const context = session.contextUsage;
+function TokenDetails({
+  session,
+  includeContext = true,
+}: {
+  session: WebSession | null;
+  includeContext?: boolean;
+}) {
+  const usage = combinedUsage(session?.usage, session?.subagentUsage);
+  const context = session?.contextUsage;
   return (
     <div className="semantic-token-details">
       <span>
@@ -676,19 +681,21 @@ function TokenDetails({ session }: { session: WebSession }) {
       <span>
         Cost <strong>${(usage?.cost.total ?? 0).toFixed(3)}</strong>
       </span>
-      {context?.contextWindow ? (
-        <span>
-          Context{" "}
-          <strong>
-            {context.percent == null ? "?" : `${context.percent.toFixed(1)}%`} /{" "}
-            {formatTokenCount(context.contextWindow)}
-          </strong>
-        </span>
-      ) : (
-        <span>
-          Context <strong>unknown</strong>
-        </span>
-      )}
+      {includeContext &&
+        (context?.contextWindow ? (
+          <span>
+            Context{" "}
+            <strong>
+              {context.percent == null ? "?" : `${context.percent.toFixed(1)}%`} ·{" "}
+              {formatTokenCount(context.tokens ?? 0)} /{" "}
+              {formatTokenCount(context.contextWindow)}
+            </strong>
+          </span>
+        ) : (
+          <span>
+            Context <strong>unknown</strong>
+          </span>
+        ))}
     </div>
   );
 }
@@ -740,7 +747,6 @@ function sameTokenTelemetry(
 
 const ComposerTokenInfo = React.memo(
   function ComposerTokenInfo({ session }: { session: WebSession | null }) {
-    const [open, setOpen] = React.useState(false);
     if (!session) return null;
     const usage = combinedUsage(session.usage, session.subagentUsage);
     const context = session.contextUsage;
@@ -756,29 +762,7 @@ const ComposerTokenInfo = React.memo(
         ? `${context.percent == null ? "?" : `${context.percent.toFixed(1)}%`}/${formatTokenCount(context.contextWindow)}`
         : "?/?",
     ].join(" ");
-    return (
-      <>
-        <span className="semantic-token-inline">{compact}</span>
-        <span className="semantic-token-mobile">
-          <TooltipProvider>
-            <Tooltip open={open} onOpenChange={setOpen}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Token usage"
-                  onClick={() => setOpen((value) => !value)}
-                >
-                  <CircleGauge className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top">
-                <TokenDetails session={session} />
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </span>
-      </>
-    );
+    return <span className="semantic-token-inline">{compact}</span>;
   },
   (previous, next) => sameTokenTelemetry(previous.session, next.session),
 );
@@ -841,6 +825,7 @@ const ContextProgressCircle = React.memo(
           <TooltipContent side="top">
             <div className="semantic-context-progress-details">
               <strong>{compacting ? "Compacting context…" : "Context"}</strong>
+              {session && <TokenDetails session={session} includeContext={false} />}
               <span>{contextText}</span>
             </div>
           </TooltipContent>

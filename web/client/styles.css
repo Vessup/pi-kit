@@ -937,21 +937,6 @@ details[open] > summary .semantic-tool-chevron {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.semantic-token-mobile {
-  display: none;
-}
-.semantic-token-mobile > button {
-  display: grid;
-  width: 2.25rem;
-  height: 2.25rem;
-  place-items: center;
-  border-radius: 0.5rem;
-  color: rgb(113 113 122);
-}
-.semantic-token-mobile > button:hover {
-  background: rgb(39 39 42);
-  color: rgb(212 212 216);
-}
 .semantic-token-details {
   display: grid;
   min-width: 11rem;
@@ -1248,9 +1233,6 @@ details[open] > summary .semantic-tool-chevron {
     border-top: 1px solid rgb(63 63 70 / 0.75);
     border-left: 0;
     padding-top: 0.35rem;
-  }
-  .semantic-token-mobile {
-    display: inline-flex;
   }
   .semantic-tool summary,
   .semantic-tool-call summary {
