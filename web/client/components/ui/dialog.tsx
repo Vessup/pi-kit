@@ -125,9 +125,14 @@ export function DialogContent({
   const [mounted, setMounted] = React.useState(false);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = ctx?.restoreFocusRef;
+  const restoreFocusFrameRef = React.useRef<number | null>(null);
   React.useEffect(() => setMounted(true), []);
   React.useEffect(() => {
     if (!mounted || !ctx?.open || !restoreFocusRef) return;
+    if (restoreFocusFrameRef.current !== null) {
+      cancelAnimationFrame(restoreFocusFrameRef.current);
+      restoreFocusFrameRef.current = null;
+    }
     const content = contentRef.current;
     if (!content) return;
     if (!restoreFocusRef.current) {
@@ -139,9 +144,13 @@ export function DialogContent({
     }
     return () => {
       const restoreFocus = restoreFocusRef.current;
-      restoreFocusRef.current = null;
-      if (!restoreFocus?.isConnected) return;
-      requestAnimationFrame(() => {
+      if (!restoreFocus?.isConnected) {
+        restoreFocusRef.current = null;
+        return;
+      }
+      restoreFocusFrameRef.current = requestAnimationFrame(() => {
+        restoreFocusFrameRef.current = null;
+        restoreFocusRef.current = null;
         if (restoreFocus.isConnected)
           restoreFocus.focus({ preventScroll: true });
       });
