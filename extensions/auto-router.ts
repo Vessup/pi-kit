@@ -179,6 +179,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   let pinnedTier: AutoRouterEffortLevel | undefined;
   let routingInFlight = false;
   let modelTransitionTail = Promise.resolve();
+  let compactionLease = false;
   const healthStore = new AutoRouterHealthStore();
 
   async function withModelTransition<T>(operation: () => Promise<T>): Promise<T> {
@@ -559,7 +560,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     await applyRouting(pi, ctx, picked.model, picked.effort);
   }
 
-  pi.on("input", async (_event, ctx) => {
+  pi.on("input", async (event, ctx) => {
+    // Steering/follow-up messages do not run core's pre-prompt compaction check,
+    // and changing the model while an agent is streaming would race its request.
+    if (event.streamingBehavior) return;
     // Core checks for threshold compaction before before_agent_start. Route away
     // from Auto's inert placeholder during that preflight so summarization uses
     // a real model instead of http://127.0.0.1:0. If placeholder restoration
@@ -574,7 +578,20 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
       publishFooter();
     }
-    await routeForCompaction(pi, ctx);
+    try {
+      await routeForCompaction(pi, ctx);
+    } catch (error) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+      }
+      // Do not let core continue with Auto's inert placeholder after routing
+      // fails: its auth/preflight error otherwise becomes a misleading connection
+      // error (and may be retried as compaction failures).
+      return { action: "handled" };
+    }
   });
 
   async function reconcileAllProviders(
@@ -610,11 +627,20 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     )
       return;
     if (action === "route") {
+      if (value.holdThroughCompaction === true) compactionLease = true;
       if (autoActive) waitUntil(routeForCompaction(pi, ctx));
       return;
     }
-    if (autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID)
-      waitUntil(revertToAutoPlaceholder(pi, ctx));
+    waitUntil(
+      (async () => {
+        try {
+          if (autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID)
+            await revertToAutoPlaceholder(pi, ctx);
+        } finally {
+          compactionLease = false;
+        }
+      })(),
+    );
   });
 
   pi.on("model_select", (event, _ctx) => {
@@ -674,8 +700,21 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     void ensureAutoModelScopedInGlobalSettings().catch(() => undefined);
   });
 
+  pi.on("agent_end", async (_event, ctx) => {
+    // A user can switch to Auto while a turn is still running. Core checks
+    // post-turn compaction immediately after agent_end, before agent_settled,
+    // so proactively replace the placeholder here if that happened mid-turn.
+    if (
+      !compactionLease &&
+      autoActive &&
+      ctx.model?.provider === AUTO_PROVIDER_ID
+    ) {
+      await routeForCompaction(pi, ctx);
+    }
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
-    if (!autoActive) return;
+    if (!autoActive || compactionLease) return;
     if (!ctx.model || ctx.model.provider === AUTO_PROVIDER_ID) return;
     await revertToAutoPlaceholder(pi, ctx);
   });

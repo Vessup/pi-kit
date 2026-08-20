@@ -92,9 +92,12 @@ function modelThinkingLevels(model: {
   thinkingLevelMap?: Partial<Record<string, string | null>>;
 }): string[] {
   if (!model.reasoning) return ["off"];
-  return THINKING_LEVELS.filter(
-    (level) => model.thinkingLevelMap?.[level] !== null,
-  );
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
 }
 
 export function isScopedModelAllowed(
@@ -271,11 +274,13 @@ function runAutoRouterCompactionAction(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   action: "route" | "restore",
+  holdThroughCompaction = false,
 ): Promise<void> {
   const operations: Promise<void>[] = [];
   pi.events.emit(AUTO_ROUTER_COMPACTION_EVENT, {
     action,
     ctx,
+    holdThroughCompaction,
     waitUntil(operation: Promise<void>) {
       operations.push(operation);
     },
@@ -301,7 +306,7 @@ async function compactWithWebRouting(
   bridge?: BridgeState,
 ): Promise<unknown> {
   try {
-    await runAutoRouterCompactionAction(pi, ctx, "route");
+    await runAutoRouterCompactionAction(pi, ctx, "route", true);
     return await new Promise<unknown>((resolveCompaction, rejectCompaction) => {
       try {
         ctx.compact({

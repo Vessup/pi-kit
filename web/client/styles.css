@@ -1093,6 +1093,12 @@ details[open] > summary .semantic-tool-chevron {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+.semantic-model-menu-provider-label {
+  padding: 0.35rem 0.65rem 0.15rem;
+  color: rgb(161 161 170);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
 .semantic-composer-menu-divider {
   height: 1px;
   margin: 0.35rem 0.45rem;

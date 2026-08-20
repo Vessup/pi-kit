@@ -82,7 +82,7 @@ type FakePi = {
   currentModel: ModelRef;
 };
 
-function createFakePi(): FakePi {
+function createFakePi(options: { setModelResult?: boolean } = {}): FakePi {
   const handlers = new Map<string, FakeHandler>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const setModelCalls: Model<Api>[] = [];
@@ -118,8 +118,8 @@ function createFakePi(): FakePi {
     },
     setModel: async (m: Model<Api>) => {
       setModelCalls.push(m);
-      currentModel.value = m;
-      return true;
+      if (options.setModelResult !== false) currentModel.value = m;
+      return options.setModelResult !== false;
     },
     setThinkingLevel: async (level: string) => {
       thinkingLevelCalls.push(level);
@@ -282,6 +282,61 @@ test("Auto routes manual compaction away from its inert placeholder and restores
   expect(fake.currentModel.value?.id).toBe("auto");
 });
 
+test("keeps Auto on a concrete model while a web compaction aborts the agent", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const runAction = async (
+    action: "route" | "restore",
+    holdThroughCompaction = false,
+  ) => {
+    const operations: Promise<void>[] = [];
+    fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+      action,
+      ctx,
+      holdThroughCompaction,
+      waitUntil: (operation: Promise<void>) => operations.push(operation),
+    });
+    await Promise.all(operations);
+  };
+
+  await runAction("route", true);
+  await fake.fire("agent_settled", {}, ctx);
+  expect(fake.currentModel.value).toBe(a);
+  await runAction("restore");
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
+test("routes at agent_end if Auto was selected while a turn was running", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  expect(fake.currentModel.value).toBe(a);
+});
+
 test("Auto routes before prompt preflight so compaction cannot use its placeholder", async () => {
   const a = model("prov", "model-a");
   await writeConfig({
@@ -301,6 +356,32 @@ test("Auto routes before prompt preflight so compaction cannot use its placehold
 
   expect(fake.currentModel.value).toBe(a);
   expect(fake.setModelCalls).toEqual([a]);
+});
+
+test("handles failed preflight routing instead of dispatching the Auto placeholder", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi({ setModelResult: false });
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const result = await fake.fire(
+    "input",
+    { text: "next prompt", source: "interactive" },
+    ctx,
+  );
+
+  expect(result).toEqual({ action: "handled" });
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+  expect(ctx.notifications.some(({ type }) => type === "error")).toBe(true);
 });
 
 test("serializes compaction routing with placeholder restoration", async () => {
