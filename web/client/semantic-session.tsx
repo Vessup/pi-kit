@@ -3544,7 +3544,7 @@ export function SemanticSession({
                               <span>
                                 <strong>{level}</strong>
                               </span>
-                              {effortLabel === level && (
+                              {rawThinkingLevel === level && (
                                 <Check className="h-4 w-4 text-sky-300" />
                               )}
                             </button>
