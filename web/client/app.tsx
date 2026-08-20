@@ -22,6 +22,7 @@ import {
   Copy,
   FolderGit2,
   GitFork,
+  Link2,
   ListFilter,
   ListRestart,
   MoreHorizontal,
@@ -1164,6 +1165,31 @@ type SessionActionCallbacks = {
   onDelete: () => void;
 };
 
+/** Build the shareable URL for a session, matching the app's #/sessions/<id> hash routing. */
+function sessionUrl(sessionId: string): string {
+  return `${window.location.origin}${window.location.pathname}#/sessions/${encodeURIComponent(sessionId)}`;
+}
+
+async function copySessionUrl(sessionId: string): Promise<void> {
+  const url = sessionUrl(sessionId);
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(url);
+    return;
+  }
+  // Non-secure-context fallback (e.g. plain-HTTP LAN access).
+  const helper = document.createElement("textarea");
+  helper.value = url;
+  helper.style.position = "fixed";
+  helper.style.opacity = "0";
+  document.body.appendChild(helper);
+  helper.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    helper.remove();
+  }
+}
+
 function SessionActionItems({
   session,
   actions,
@@ -1228,6 +1254,17 @@ function SessionActionItems({
         onClick={() => action(actions.onCompact)}
       >
         <WandSparkles className="h-4 w-4" /> Compact
+      </button>
+      <button
+        type="button"
+        className={itemClass}
+        onClick={() =>
+          action(() => {
+            void copySessionUrl(session.id).catch(() => undefined);
+          })
+        }
+      >
+        <Link2 className="h-4 w-4" /> Copy URL
       </button>
       <div className="my-1 border-t border-zinc-800" />
       <button
@@ -1431,8 +1468,8 @@ function SessionListItem({
 
 export function App() {
   const [sessions, setSessions] = React.useState<WebSession[]>([]);
-  const [selectedId, setSelectedId] = React.useState<string | null>(() =>
-    hashSessionId() ?? loadLastSessionId(),
+  const [selectedId, setSelectedId] = React.useState<string | null>(
+    () => hashSessionId() ?? loadLastSessionId(),
   );
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
