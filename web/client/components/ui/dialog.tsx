@@ -7,8 +7,30 @@ import { Button } from "./button";
 type DialogContextValue = {
   open: boolean;
   setOpen: (open: boolean) => void;
+  titleId: string;
+  descriptionId: string;
 } | null;
 const DialogContext = React.createContext<DialogContextValue>(null);
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "area[href]",
+  "button:not([disabled])",
+  'input:not([disabled]):not([type="hidden"])',
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "iframe",
+  "object",
+  "embed",
+  "[contenteditable]",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function focusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  ).filter((element) => element.getAttribute("aria-hidden") !== "true");
+}
 
 export function Dialog({
   open,
@@ -19,10 +41,18 @@ export function Dialog({
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
 }) {
+  const id = React.useId();
+  const context = React.useMemo(
+    () => ({
+      open,
+      setOpen: onOpenChange,
+      titleId: `${id}-title`,
+      descriptionId: `${id}-description`,
+    }),
+    [id, onOpenChange, open],
+  );
   return (
-    <DialogContext.Provider value={{ open, setOpen: onOpenChange }}>
-      {children}
-    </DialogContext.Provider>
+    <DialogContext.Provider value={context}>{children}</DialogContext.Provider>
   );
 }
 
@@ -72,32 +102,67 @@ export function DialogContent({
 }) {
   const ctx = React.useContext(DialogContext);
   const [mounted, setMounted] = React.useState(false);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const setOpenRef = React.useRef(ctx?.setOpen);
+  setOpenRef.current = ctx?.setOpen;
   React.useEffect(() => setMounted(true), []);
   React.useEffect(() => {
+    if (!mounted || !ctx?.open) return;
+    const content = contentRef.current;
+    if (!content) return;
+    const focusInitialElement = () => {
+      if (content.contains(document.activeElement)) return;
+      const focusable = focusableElements(content);
+      (focusable[0] ?? content).focus();
+    };
+    focusInitialElement();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && ctx?.open) ctx.setOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpenRef.current?.(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements(content);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        content.focus();
+        return;
+      }
+      const active = document.activeElement;
+      const activeIndex =
+        active instanceof HTMLElement ? focusable.indexOf(active) : -1;
+      if (activeIndex < 0) {
+        event.preventDefault();
+        (event.shiftKey ? focusable.at(-1) : focusable[0])?.focus();
+      } else if (
+        (!event.shiftKey && activeIndex === focusable.length - 1) ||
+        (event.shiftKey && activeIndex === 0)
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? focusable.at(-1) : focusable[0])?.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [ctx]);
+  }, [ctx?.open, mounted]);
   if (!mounted || !ctx?.open) return null;
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         type="button"
-        aria-label="Close dialog"
+        tabIndex={-1}
+        aria-hidden="true"
         className="absolute inset-0 cursor-default bg-black/70 backdrop-blur-sm"
         onClick={() => ctx.setOpen(false)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            ctx.setOpen(false);
-          }
-        }}
       />
       <div
+        ref={contentRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={ctx.titleId}
+        aria-describedby={ctx.descriptionId}
+        tabIndex={-1}
         className={cn(
           "relative z-10 w-full max-w-lg overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/40",
           className,
@@ -131,8 +196,12 @@ export function DialogTitle({
   className?: string;
   children: React.ReactNode;
 }) {
+  const ctx = React.useContext(DialogContext);
   return (
-    <h2 className={cn("text-base font-semibold text-zinc-100", className)}>
+    <h2
+      id={ctx?.titleId}
+      className={cn("text-base font-semibold text-zinc-100", className)}
+    >
       {children}
     </h2>
   );
@@ -145,8 +214,14 @@ export function DialogDescription({
   className?: string;
   children: React.ReactNode;
 }) {
+  const ctx = React.useContext(DialogContext);
   return (
-    <p className={cn("mt-1 text-sm text-zinc-400", className)}>{children}</p>
+    <p
+      id={ctx?.descriptionId}
+      className={cn("mt-1 text-sm text-zinc-400", className)}
+    >
+      {children}
+    </p>
   );
 }
 
