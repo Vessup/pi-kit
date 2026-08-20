@@ -25,6 +25,19 @@ export function selectedModelReference(
   return status.selectedModel ?? status.model;
 }
 
+/** Identify Auto's placeholder-to-concrete runtime swap, not a later manual change. */
+export function isAutoRuntimeModelSwap(
+  selectedModel: string | undefined,
+  previousModel: string | undefined,
+  runtimeModel: string,
+): boolean {
+  return (
+    isAutoModelReference(selectedModel) &&
+    isAutoModelReference(previousModel) &&
+    !isAutoModelReference(runtimeModel)
+  );
+}
+
 /**
  * Keep the user's selected Auto placeholder separate from the concrete runtime
  * model used for the active turn. Ordinary model changes update both values.

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   applyRuntimeModelStatus,
   isAutoModelReference,
+  isAutoRuntimeModelSwap,
   selectedModelReference,
 } from "../web/model-status";
 
@@ -10,6 +11,23 @@ test("recognizes Auto placeholders without matching ordinary models", () => {
   expect(isAutoModelReference("auto/auto-high")).toBe(true);
   expect(isAutoModelReference("openai/gpt-5.6-luna")).toBe(false);
   expect(isAutoModelReference(undefined)).toBe(false);
+});
+
+test("only treats an Auto placeholder transition as a routed model swap", () => {
+  expect(
+    isAutoRuntimeModelSwap(
+      "auto/auto",
+      "auto/auto",
+      "openai-codex/gpt-5.6-luna",
+    ),
+  ).toBe(true);
+  expect(
+    isAutoRuntimeModelSwap(
+      "auto/auto",
+      "openai-codex/gpt-5.6-luna",
+      "anthropic/claude-sonnet",
+    ),
+  ).toBe(false);
 });
 
 test("keeps Auto selected while recording the routed runtime model and effort", () => {

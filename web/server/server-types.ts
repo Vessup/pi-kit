@@ -69,6 +69,8 @@ export type SessionRecord = {
   modelTurnGeneration?: number;
   /** True while an Auto selection is being resolved for the current turn. */
   autoTurnActive?: boolean;
+  /** True until the settlement refresh observes Auto's restored placeholder. */
+  autoTurnSettling?: boolean;
   agentStartGeneration?: number;
   activityGeneration?: number;
   settlingGeneration?: number;

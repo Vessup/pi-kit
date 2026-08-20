@@ -33,19 +33,36 @@ export function createRecordSync(options: {
         typeof model.provider === "string" && model.provider
           ? `${model.provider}/${model.id}`
           : model.id;
+      const selectedModel = selectedModelReference(record);
       const preservingAutoSelection =
         record.autoTurnActive === true &&
-        isAutoModelReference(selectedModelReference(record)) &&
+        isAutoModelReference(selectedModel) &&
         !isAutoModelReference(runtimeModel);
-      const next = applyRuntimeModelStatus(
-        record,
-        runtimeModel,
-        typeof s.thinkingLevel === "string" ? s.thinkingLevel : undefined,
-        preservingAutoSelection,
-      );
-      record.model = next.model;
-      record.thinkingLevel = next.thinkingLevel;
-      record.selectedModel = next.selectedModel;
+      // The settlement refresh can race Auto's asynchronous placeholder
+      // restore. While settling, retain the placeholder for any concrete
+      // snapshot and clear this phase only when the runtime reports Auto.
+      const preservingSettledAutoSelection =
+        record.autoTurnSettling === true &&
+        isAutoModelReference(selectedModel) &&
+        !isAutoModelReference(runtimeModel);
+      if (preservingSettledAutoSelection) {
+        record.model = selectedModel;
+        record.selectedModel = selectedModel;
+        if (typeof s.thinkingLevel === "string")
+          record.thinkingLevel = s.thinkingLevel;
+      } else {
+        const next = applyRuntimeModelStatus(
+          record,
+          runtimeModel,
+          typeof s.thinkingLevel === "string" ? s.thinkingLevel : undefined,
+          preservingAutoSelection,
+        );
+        record.model = next.model;
+        record.thinkingLevel = next.thinkingLevel;
+        record.selectedModel = next.selectedModel;
+        if (record.autoTurnSettling === true)
+          record.autoTurnSettling = false;
+      }
       if (!preservingAutoSelection) record.autoTurnActive = false;
     } else if (typeof s.thinkingLevel === "string") {
       record.thinkingLevel = s.thinkingLevel;
@@ -79,6 +96,7 @@ export function createRecordSync(options: {
   function beginTurnModelTracking(record: SessionRecord): number {
     const generation = (record.modelTurnGeneration ?? 0) + 1;
     record.modelTurnGeneration = generation;
+    record.autoTurnSettling = false;
     record.autoTurnActive = isAutoModelReference(
       selectedModelReference(record),
     );
@@ -94,9 +112,11 @@ export function createRecordSync(options: {
     // restore when that get_state request is answered.
     if (record.autoTurnActive && isAutoModelReference(selectedModel)) {
       record.model = selectedModel;
+      record.autoTurnSettling = true;
       return;
     }
     record.autoTurnActive = false;
+    record.autoTurnSettling = false;
     record.selectedModel ??= record.model;
   }
 

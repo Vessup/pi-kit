@@ -12,6 +12,7 @@ import { agentEndTerminalNotice } from "../web/assistant-message.js";
 import {
   applyRuntimeModelStatus,
   isAutoModelReference,
+  isAutoRuntimeModelSwap,
   selectedModelReference,
   webModelReference,
 } from "../web/model-status.js";
@@ -1593,10 +1594,16 @@ export default function webSessions(pi: ExtensionAPI): void {
     const activeBridge = activeBridgeFor(ctx);
     if (activeBridge) {
       const runtimeModel = webModelReference(event.model);
+      const previousModel = event.previousModel
+        ? webModelReference(event.previousModel)
+        : undefined;
       const autoRoute =
         activeBridge.autoTurnRouting &&
-        isAutoModelReference(selectedModelReference(activeBridge.session)) &&
-        !isAutoModelReference(runtimeModel);
+        isAutoRuntimeModelSwap(
+          selectedModelReference(activeBridge.session),
+          previousModel,
+          runtimeModel,
+        );
       const next = applyRuntimeModelStatus(
         activeBridge.session,
         runtimeModel,

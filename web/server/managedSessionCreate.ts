@@ -151,6 +151,7 @@ export function createManagedSessionLauncher(options: {
       autoTurnActive: isAutoModelReference(
         resumed?.session.selectedModel ?? resumed?.session.model,
       ),
+      autoTurnSettling: false,
       status: "starting",
       source: "web",
       createdAt: resumed?.session.createdAt ?? Date.now(),
