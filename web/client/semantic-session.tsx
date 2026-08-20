@@ -667,7 +667,8 @@ function TokenDetails({ session }: { session: WebSession }) {
       )}
       {(usage?.cacheWrite ?? 0) > 0 && (
         <span>
-          Cache write <strong>{formatTokenCount(usage?.cacheWrite ?? 0)}</strong>
+          Cache write{" "}
+          <strong>{formatTokenCount(usage?.cacheWrite ?? 0)}</strong>
         </span>
       )}
       <span>
@@ -975,6 +976,51 @@ function SubagentOutputDialog({
               </header>
               <pre>{agent.streamingText}</pre>
             </section>
+          )}
+        </DialogBody>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function imageDataUrl(image: Pick<SemanticImage, "data" | "mimeType">): string {
+  return `data:${image.mimeType};base64,${image.data}`;
+}
+
+function ImageLightboxDialog({
+  image,
+  onOpenChange,
+}: {
+  image: SemanticImage | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const title = image?.name ?? "Attachment preview";
+  return (
+    <Dialog open={image !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-6xl border-zinc-700 bg-zinc-950/95 p-0">
+        <DialogHeader className="relative border-b-0 px-4 py-3 pr-16 sm:px-5">
+          <DialogTitle className="truncate text-sm">{title}</DialogTitle>
+          <DialogDescription className="sr-only">
+            Expanded attachment preview
+          </DialogDescription>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Close image preview"
+            className="absolute right-3 top-2 h-8 w-8 p-0"
+            onClick={() => onOpenChange(false)}
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        </DialogHeader>
+        <DialogBody className="flex max-h-[calc(100dvh-6rem)] min-h-0 items-center justify-center overflow-auto bg-black/20 p-3 sm:p-5">
+          {image && (
+            <img
+              className="semantic-image-lightbox"
+              src={imageDataUrl(image)}
+              alt={title}
+            />
           )}
         </DialogBody>
       </DialogContent>
@@ -1477,6 +1523,7 @@ const MessageCard = React.memo(function MessageCard({
   expandedItems,
   autoFollowExpansionKey,
   onExpansionChange,
+  onImageClick,
   toolResults,
   runningToolIds,
 }: {
@@ -1486,6 +1533,7 @@ const MessageCard = React.memo(function MessageCard({
   expandedItems: ReadonlySet<string>;
   autoFollowExpansionKey?: string | null;
   onExpansionChange: (key: string, open: boolean, manual?: boolean) => void;
+  onImageClick: (image: SemanticImage) => void;
   toolResults: ReadonlyMap<string, ToolResultView>;
   runningToolIds: ReadonlySet<string>;
 }) {
@@ -1596,14 +1644,30 @@ const MessageCard = React.memo(function MessageCard({
               );
             }
             if (part.type === "image" && typeof part.data === "string") {
+              const image: SemanticImage = {
+                type: "image",
+                data: part.data,
+                mimeType:
+                  typeof part.mimeType === "string"
+                    ? part.mimeType
+                    : "image/png",
+                name: typeof part.name === "string" ? part.name : undefined,
+              };
               return (
-                <img
+                <button
                   // biome-ignore lint/suspicious/noArrayIndexKey: image parts are appended in order from the model stream and never reordered; index is stable within a single message.
                   key={index}
-                  className="max-h-80 rounded-xl border border-zinc-700"
-                  src={`data:${String(part.mimeType ?? "image/png")};base64,${part.data}`}
-                  alt="Attachment"
-                />
+                  type="button"
+                  className="group block cursor-zoom-in rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-sky-400/70"
+                  aria-label={`Expand ${image.name ?? "attachment"}`}
+                  onClick={() => onImageClick(image)}
+                >
+                  <img
+                    className="max-h-80 rounded-xl border border-zinc-700 transition group-hover:border-zinc-400"
+                    src={imageDataUrl(image)}
+                    alt={image.name ?? "Attachment"}
+                  />
+                </button>
               );
             }
             return null;
@@ -1865,6 +1929,9 @@ export function SemanticSession({
 }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
+  const [previewImage, setPreviewImage] = React.useState<SemanticImage | null>(
+    null,
+  );
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
   const [aborting, setAborting] = React.useState(false);
@@ -2139,6 +2206,13 @@ export function SemanticSession({
     maintainLockedScrollExtent();
     captureViewportAnchor();
   }, [captureViewportAnchor, maintainLockedScrollExtent, updateScrollButton]);
+
+  const openImagePreview = React.useCallback((image: SemanticImage) => {
+    setPreviewImage(image);
+  }, []);
+  const closeImagePreview = React.useCallback(() => {
+    setPreviewImage(null);
+  }, []);
 
   React.useEffect(() => {
     setAborting(false);
@@ -2725,6 +2799,12 @@ export function SemanticSession({
 
   return (
     <section className="relative flex h-full min-h-0 flex-col bg-[#09090b]">
+      <ImageLightboxDialog
+        image={previewImage}
+        onOpenChange={(open) => {
+          if (!open) closeImagePreview();
+        }}
+      />
       <SubagentOutputDialog
         agent={selectedSubagent}
         onOpenChange={(open) => {
@@ -2881,6 +2961,7 @@ export function SemanticSession({
                 expandedItems={expandedItems}
                 autoFollowExpansionKey={autoFollowExpansionKey}
                 onExpansionChange={handleExpansionChange}
+                onImageClick={openImagePreview}
                 toolResults={streamingToolResults}
                 runningToolIds={runningToolIds}
               />
@@ -2895,6 +2976,7 @@ export function SemanticSession({
                 expandedItems={expandedItems}
                 autoFollowExpansionKey={autoFollowExpansionKey}
                 onExpansionChange={handleExpansionChange}
+                onImageClick={openImagePreview}
                 toolResults={streamingToolResults}
                 runningToolIds={runningToolIds}
               />
@@ -3140,14 +3222,24 @@ export function SemanticSession({
                 {images.map((image, index) => (
                   // biome-ignore lint/suspicious/noArrayIndexKey: image attachments are appended in order and never reordered; index is stable.
                   <div key={index} className="relative shrink-0">
-                    <img
-                      className="h-16 w-16 rounded-lg border border-zinc-700 object-cover"
-                      src={`data:${image.mimeType};base64,${image.data}`}
-                      alt={image.name ?? "Attachment"}
-                    />
+                    <button
+                      type="button"
+                      className="group block cursor-zoom-in rounded-lg border-0 bg-transparent p-0 focus:outline-none focus:ring-2 focus:ring-sky-400/70"
+                      aria-label={`Expand ${image.name ?? `attachment ${index + 1}`}`}
+                      title="Expand attachment"
+                      onClick={() => openImagePreview(image)}
+                    >
+                      <img
+                        className="h-16 w-16 rounded-lg border border-zinc-700 object-cover transition group-hover:border-zinc-400"
+                        src={imageDataUrl(image)}
+                        alt={image.name ?? "Attachment"}
+                      />
+                    </button>
                     <button
                       type="button"
                       className="absolute -right-1 -top-1 rounded-full bg-zinc-800 p-0.5"
+                      aria-label={`Remove ${image.name ?? `attachment ${index + 1}`}`}
+                      title="Remove attachment"
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => {
                         setImages((current) =>
@@ -3156,7 +3248,7 @@ export function SemanticSession({
                         textareaRef.current?.focus({ preventScroll: true });
                       }}
                     >
-                      <X className="h-3 w-3" />
+                      <X className="h-3 w-3" aria-hidden="true" />
                     </button>
                   </div>
                 ))}
