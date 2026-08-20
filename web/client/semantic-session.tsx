@@ -3483,6 +3483,7 @@ export function SemanticSession({
                             <button
                               key={value}
                               type="button"
+                              disabled={controlBusy || !connected}
                               onClick={() =>
                                 void selectModel(model.provider, model.id)
                               }
@@ -3508,6 +3509,7 @@ export function SemanticSession({
                             <button
                               key={level}
                               type="button"
+                              disabled={controlBusy || !connected}
                               onClick={() => void selectEffort(level)}
                             >
                               <span>
