@@ -55,6 +55,7 @@ export function createRecordSync(options: {
       if (preservingSettledAutoSelection) {
         record.model = selectedModel;
         record.selectedModel = selectedModel;
+        record.lastModel = runtimeModel;
         if (typeof s.thinkingLevel === "string")
           record.thinkingLevel = s.thinkingLevel;
       } else {
@@ -67,6 +68,7 @@ export function createRecordSync(options: {
         record.model = next.model;
         record.thinkingLevel = next.thinkingLevel;
         record.selectedModel = next.selectedModel;
+        record.lastModel = next.lastModel;
         if (record.autoTurnSettling === true)
           record.autoTurnSettling = false;
       }
@@ -89,10 +91,10 @@ export function createRecordSync(options: {
         : undefined;
     if (typeof s.messageCount === "number")
       record.messageCount = s.messageCount;
-    if (s.isCompacting === true) {
+    if (modelStateIsCurrent && s.isCompacting === true) {
       record.compaction ??= { reason: "threshold", startedAt: Date.now() };
       record.status = "working";
-    } else if (s.isCompacting === false) {
+    } else if (modelStateIsCurrent && s.isCompacting === false) {
       record.compaction = undefined;
       if (s.isStreaming === false && record.status !== "error")
         record.status = "idle";
@@ -107,7 +109,10 @@ export function createRecordSync(options: {
     record.autoTurnActive = isAutoModelReference(
       selectedModelReference(record),
     );
-    if (!record.autoTurnActive) record.selectedModel ??= record.model;
+    if (!record.autoTurnActive) {
+      record.selectedModel ??= record.model;
+      record.lastModel = undefined;
+    }
     return generation;
   }
 
@@ -259,6 +264,7 @@ export function createRecordSync(options: {
       previous.model !== next.model ||
       previous.thinkingLevel !== next.thinkingLevel ||
       previous.selectedModel !== next.selectedModel ||
+      previous.lastModel !== next.lastModel ||
       previous.status !== next.status ||
       previous.source !== next.source ||
       previous.messageCount !== next.messageCount ||

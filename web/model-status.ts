@@ -4,9 +4,31 @@ export type WebModelStatus = {
   thinkingLevel?: string;
   /** The model the user selected; differs from `model` only while Auto routes. */
   selectedModel?: string;
+  /** The last concrete runtime model used for an Auto selection. */
+  lastModel?: string;
 };
 
 export type WebModelIdentity = { provider: string; id: string };
+
+/** Find the last concrete model recorded in Pi's model-change entries. */
+export function lastConcreteModelFromEntries(
+  entries: readonly unknown[],
+): string | undefined {
+  let lastModel: string | undefined;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const value = entry as Record<string, unknown>;
+    if (
+      value.type !== "model_change" ||
+      typeof value.provider !== "string" ||
+      typeof value.modelId !== "string"
+    )
+      continue;
+    const model = `${value.provider}/${value.modelId}`;
+    if (!isAutoModelReference(model)) lastModel = model;
+  }
+  return lastModel;
+}
 
 /** Format a provider/model pair for the Web session protocol. */
 export function webModelReference(model: WebModelIdentity): string {
@@ -54,7 +76,7 @@ export function applyRuntimeModelStatus(
     isAutoModelReference(selectedModel) &&
     !isAutoModelReference(runtimeModel);
 
-  return {
+  const next: WebModelStatus = {
     ...status,
     model: runtimeModel,
     ...(runtimeThinkingLevel !== undefined
@@ -62,4 +84,7 @@ export function applyRuntimeModelStatus(
       : {}),
     selectedModel: preservingAutoSelection ? selectedModel : runtimeModel,
   };
+  if (preservingAutoSelection) next.lastModel = runtimeModel;
+  else if (!isAutoModelReference(runtimeModel)) delete next.lastModel;
+  return next;
 }

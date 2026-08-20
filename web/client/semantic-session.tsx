@@ -601,6 +601,12 @@ function FormattedOutput({
   ) : null;
 }
 
+function formatModelReference(reference: string): string {
+  const slashIndex = reference.indexOf("/");
+  if (slashIndex < 0) return reference;
+  return `(${reference.slice(0, slashIndex)}) ${reference.slice(slashIndex + 1)}`;
+}
+
 function formatTokenCount(count: number): string {
   if (count < 1_000) return String(count);
   if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -2646,13 +2652,15 @@ export function SemanticSession({
     (model) => `${model.provider}/${model.id}` === selectedModelRef,
   );
   const modelLabel = selectedModelOption?.name ?? fallbackModelLabel;
-  const effectiveModelLabel = session?.model?.split("/").pop();
+  const effectiveModelReference =
+    autoSelected && session?.model && !isAutoModelReference(session.model)
+      ? session.model
+      : autoSelected
+        ? session?.lastModel
+        : undefined;
   const turnModelSummary =
-    autoSelected &&
-    session?.model &&
-    session.model !== selectedModelRef &&
-    effectiveModelLabel
-      ? `${effectiveModelLabel} · ${effortLabel}`
+    effectiveModelReference && !isAutoModelReference(effectiveModelReference)
+      ? `${formatModelReference(effectiveModelReference)} · ${effortLabel}`
       : undefined;
   const availableEfforts =
     sessionOptions.thinkingLevels.length > 0

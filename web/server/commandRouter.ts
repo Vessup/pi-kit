@@ -481,6 +481,7 @@ export function createCommandRouter(options: {
           record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
           record.autoTurnActive = false;
           record.autoTurnSettling = false;
+          record.lastModel = undefined;
           await refreshManagedSession(record);
           return;
         case "set_thinking_level":

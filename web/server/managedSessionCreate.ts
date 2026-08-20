@@ -151,6 +151,7 @@ export function createManagedSessionLauncher(options: {
       model: resumed?.session.model,
       thinkingLevel: resumed?.session.thinkingLevel,
       selectedModel: resumed?.session.selectedModel ?? resumed?.session.model,
+      lastModel: resumed?.session.lastModel,
       autoTurnActive: isAutoModelReference(
         resumed?.session.selectedModel ?? resumed?.session.model,
       ),

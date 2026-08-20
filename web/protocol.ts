@@ -153,6 +153,8 @@ export type WebSession = {
   thinkingLevel?: string;
   /** The model selected by the user; remains Auto while routing a turn. */
   selectedModel?: string;
+  /** The most recent concrete model used by Auto, if any. */
+  lastModel?: string;
   status: SessionStatus;
   source: SessionSource;
   createdAt: number;

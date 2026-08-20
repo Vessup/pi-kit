@@ -3,8 +3,28 @@ import {
   applyRuntimeModelStatus,
   isAutoModelReference,
   isAutoRuntimeModelSwap,
+  lastConcreteModelFromEntries,
   selectedModelReference,
 } from "../web/model-status";
+
+test("finds the last concrete model in model-change entries", () => {
+  expect(
+    lastConcreteModelFromEntries([
+      { type: "model_change", provider: "auto", modelId: "auto" },
+      {
+        type: "model_change",
+        provider: "openai-codex",
+        modelId: "gpt-5.6-luna",
+      },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ]),
+  ).toBe("openai-codex/gpt-5.6-luna");
+  expect(
+    lastConcreteModelFromEntries([
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ]),
+  ).toBeUndefined();
+});
 
 test("recognizes Auto placeholders without matching ordinary models", () => {
   expect(isAutoModelReference("auto/auto")).toBe(true);
@@ -45,6 +65,7 @@ test("keeps Auto selected while recording the routed runtime model and effort", 
     model: "openai-codex/gpt-5.6-luna",
     thinkingLevel: "high",
     selectedModel: "auto/auto",
+    lastModel: "openai-codex/gpt-5.6-luna",
   });
   expect(selectedModelReference(status)).toBe("auto/auto");
 });

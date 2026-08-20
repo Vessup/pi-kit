@@ -63,6 +63,7 @@ export function createSessionRegistry(options: {
       model: session.model,
       thinkingLevel: session.thinkingLevel,
       selectedModel: session.selectedModel,
+      lastModel: session.lastModel,
       status: session.status,
       source: session.source,
       createdAt: session.createdAt,

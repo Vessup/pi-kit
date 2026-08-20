@@ -12,6 +12,7 @@ import {
 import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { WebSession } from "../protocol.js";
+import { lastConcreteModelFromEntries } from "../model-status.js";
 import {
   replacementFromEntries,
   WORKTREE_REPLACEMENT_ENTRY,
@@ -238,7 +239,12 @@ export function createSessionFileCatalog(options: {
     entries: unknown[],
   ): Pick<
     WebSession,
-    "name" | "model" | "thinkingLevel" | "parentSession" | "messageCount"
+    | "name"
+    | "model"
+    | "thinkingLevel"
+    | "lastModel"
+    | "parentSession"
+    | "messageCount"
   > {
     let name: string | undefined;
     let model: string | undefined;
@@ -261,7 +267,14 @@ export function createSessionFileCatalog(options: {
       if (entry.type === "session" && typeof entry.parentSession === "string")
         parentSession = entry.parentSession;
     }
-    return { name, model, thinkingLevel, parentSession, messageCount };
+    return {
+      name,
+      model,
+      thinkingLevel,
+      lastModel: lastConcreteModelFromEntries(entries),
+      parentSession,
+      messageCount,
+    };
   }
 
   function readManagedWorktreePrefix(
@@ -336,6 +349,7 @@ export function createSessionFileCatalog(options: {
         name: meta.name,
         model: meta.model,
         thinkingLevel: meta.thinkingLevel,
+        lastModel: meta.lastModel,
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
         createdAt:
@@ -443,6 +457,7 @@ export function createSessionFileCatalog(options: {
       let thinkingLevel = incremental
         ? cached.scan.session.thinkingLevel
         : undefined;
+      let lastModel = incremental ? cached.scan.session.lastModel : undefined;
       let messageCount = incremental ? cached.scan.session.messageCount : 0;
       let preview = incremental ? cached.scan.session.preview : undefined;
       const metadataEntries = incremental ? [...cached.metadataEntries] : [];
@@ -459,8 +474,13 @@ export function createSessionFileCatalog(options: {
         if (!entry || typeof entry.type !== "string") continue;
         if (entry.type === "session_info" && typeof entry.name === "string")
           name = entry.name;
-        if (entry.type === "model_change" && typeof entry.modelId === "string")
+        if (entry.type === "model_change" && typeof entry.modelId === "string") {
           model = entry.modelId;
+          if (typeof entry.provider === "string") {
+            const reference = `${entry.provider}/${entry.modelId}`;
+            if (!reference.startsWith("auto/")) lastModel = reference;
+          }
+        }
         if (
           entry.type === "thinking_level_change" &&
           typeof entry.thinkingLevel === "string"
@@ -510,6 +530,7 @@ export function createSessionFileCatalog(options: {
         name,
         model,
         thinkingLevel,
+        lastModel,
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
         createdAt: incremental

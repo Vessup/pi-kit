@@ -355,6 +355,7 @@ function sessionMatches(session: WebSession, query: string): boolean {
     session.projectName,
     session.model,
     session.selectedModel,
+    session.lastModel,
     session.status,
     sessionStatusLabel(session),
   ].some((value) => value?.toLocaleLowerCase().includes(needle));

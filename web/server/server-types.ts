@@ -46,6 +46,7 @@ export type SessionRecord = {
   model?: string;
   thinkingLevel?: string;
   selectedModel?: string;
+  lastModel?: string;
   status: SessionStatus;
   source: SessionSource;
   createdAt: number;

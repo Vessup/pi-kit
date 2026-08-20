@@ -13,6 +13,7 @@ import {
   applyRuntimeModelStatus,
   isAutoModelReference,
   isAutoRuntimeModelSwap,
+  lastConcreteModelFromEntries,
   selectedModelReference,
   webModelReference,
 } from "../web/model-status.js";
@@ -940,6 +941,7 @@ async function executeAgentCommand(
         updateSession(state, {
           model: `${model.provider}/${model.id}`,
           selectedModel: `${model.provider}/${model.id}`,
+          lastModel: undefined,
         });
         respond(state, requestId, true);
         return;
@@ -1268,6 +1270,7 @@ function makeSession(
     selectedModel: ctx.model
       ? `${ctx.model.provider}/${ctx.model.id}`
       : undefined,
+    lastModel: lastConcreteModelFromEntries(entries),
     status: statusForContext(ctx),
     source: "tui",
     createdAt: header ? Date.parse(header.timestamp) || Date.now() : Date.now(),
@@ -1692,7 +1695,10 @@ export default function webSessions(pi: ExtensionAPI): void {
         autoRoute,
       );
       if (!autoRoute) activeBridge.autoTurnRouting = false;
-      updateSession(activeBridge, next);
+      updateSession(activeBridge, {
+        ...next,
+        lastModel: next.lastModel,
+      });
     }
     forward(event, ctx);
   });

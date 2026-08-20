@@ -45,6 +45,7 @@ test("a stale refresh cannot cancel Auto tracking for a newer turn", () => {
     modelTurnGeneration: 2,
     autoTurnActive: true,
     autoTurnSettling: false,
+    status: "working",
     name: "before",
   } as unknown as SessionRecord;
 
@@ -53,6 +54,8 @@ test("a stale refresh cannot cancel Auto tracking for a newer turn", () => {
     {
       model: { provider: "auto", id: "auto" },
       thinkingLevel: "off",
+      isCompacting: false,
+      isStreaming: false,
       sessionName: "after",
     },
     1,
@@ -64,6 +67,7 @@ test("a stale refresh cannot cancel Auto tracking for a newer turn", () => {
     thinkingLevel: "high",
     modelTurnGeneration: 2,
     autoTurnActive: true,
+    status: "working",
     name: "after",
   });
 });
