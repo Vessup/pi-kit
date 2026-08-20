@@ -117,6 +117,7 @@ import {
 } from "../model-status";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
+import { thinkingLevelsForSelectedModel } from "./model-options";
 import { anchoredScrollTop, resolveScrollFollow } from "./scroll-follow";
 import { hasActiveSessionWork } from "./session-status";
 import { toolHasArgumentDetails } from "./tool-expansion";
@@ -2671,11 +2672,10 @@ export function SemanticSession({
         ? `${formatModelReference(effectiveModelReference)} · ${effortLabel}`
         : formatModelReference(effectiveModelReference)
       : undefined;
-  const availableEfforts =
-    selectedModelOption?.thinkingLevels ??
-    (sessionOptions.thinkingLevels.length > 0
-      ? sessionOptions.thinkingLevels
-      : ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  const availableEfforts = thinkingLevelsForSelectedModel(
+    sessionOptions.models,
+    selectedModelRef,
+  );
   const orderedModels = [
     ...availableModels.filter((model) => model.provider === "auto"),
     ...availableModels
@@ -3499,7 +3499,7 @@ export function SemanticSession({
                           );
                         })}
                     </section>
-                    {!autoSelected && (
+                    {!autoSelected && availableEfforts.length > 0 && (
                       <section className="semantic-model-menu-section semantic-model-menu-effort">
                         <div className="semantic-composer-menu-label">
                           Effort
