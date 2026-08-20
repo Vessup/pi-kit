@@ -474,11 +474,11 @@ export function createCommandRouter(options: {
         }
         case "set_model":
           // A browser model change is explicit user selection, not the Auto
-          // router's transient runtime swap. Prevent a concurrent turn
-          // snapshot from treating the new model as the current Auto target.
+          // router's transient runtime swap. Only invalidate Auto tracking
+          // after the runtime accepts the new model.
+          await record.managed.setModel(command.provider, command.modelId);
           record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
           record.autoTurnActive = false;
-          await record.managed.setModel(command.provider, command.modelId);
           await refreshManagedSession(record);
           return;
         case "set_thinking_level":

@@ -858,14 +858,17 @@ async function executeAgentCommand(
           throw new Error(
             `Model not found: ${command.provider}/${command.modelId}`,
           );
-        // A browser model change is explicit user selection, not Auto's
-        // transient model swap for the current turn.
-        state.autoTurnRouting = false;
         if (!(await pi.setModel(model)))
           throw new Error(
             `No credentials available for ${command.provider}/${command.modelId}`,
           );
-        updateSession(state, { model: `${model.provider}/${model.id}` });
+        // A browser model change is explicit user selection, not Auto's
+        // transient model swap for the current turn.
+        state.autoTurnRouting = false;
+        updateSession(state, {
+          model: `${model.provider}/${model.id}`,
+          selectedModel: `${model.provider}/${model.id}`,
+        });
         respond(state, requestId, true);
         return;
       }
@@ -1288,6 +1291,17 @@ export default function webSessions(pi: ExtensionAPI): void {
     });
   };
 
+  const activeBridgeFor = (
+    ctx: ExtensionContext,
+  ): BridgeState | undefined => {
+    const state = bridge;
+    return state &&
+      !state.closed &&
+      ctx.sessionManager.getSessionId() === state.session.id
+      ? state
+      : undefined;
+  };
+
   pi.registerCommand("web", {
     description: "Show the current session in the Pi web app",
     handler: async (_args, ctx) => {
@@ -1564,39 +1578,39 @@ export default function webSessions(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
-    if (
-      bridge &&
-      ctx.sessionManager.getSessionId() === bridge.session.id
-    ) {
-      bridge.autoTurnRouting = isAutoModelReference(
-        selectedModelReference(bridge.session),
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge)
+      activeBridge.autoTurnRouting = isAutoModelReference(
+        selectedModelReference(activeBridge.session),
       );
-    }
   });
   pi.on("session_info_changed", (event, ctx) => {
-    if (bridge) updateSession(bridge, { name: event.name });
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) updateSession(activeBridge, { name: event.name });
     forward(event, ctx);
   });
   pi.on("model_select", (event, ctx) => {
-    if (bridge) {
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) {
       const runtimeModel = webModelReference(event.model);
       const autoRoute =
-        bridge.autoTurnRouting &&
-        isAutoModelReference(selectedModelReference(bridge.session)) &&
+        activeBridge.autoTurnRouting &&
+        isAutoModelReference(selectedModelReference(activeBridge.session)) &&
         !isAutoModelReference(runtimeModel);
       const next = applyRuntimeModelStatus(
-        bridge.session,
+        activeBridge.session,
         runtimeModel,
         ctx.thinkingLevel,
         autoRoute,
       );
-      if (!autoRoute) bridge.autoTurnRouting = false;
-      updateSession(bridge, next);
+      if (!autoRoute) activeBridge.autoTurnRouting = false;
+      updateSession(activeBridge, next);
     }
     forward(event, ctx);
   });
   pi.on("thinking_level_select", (event, ctx) => {
-    if (bridge) updateSession(bridge, { thinkingLevel: event.level });
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) updateSession(activeBridge, { thinkingLevel: event.level });
     forward(event, ctx);
   });
   pi.on("agent_start", (event, ctx) => forward(event, ctx, "working"));
@@ -1608,23 +1622,28 @@ export default function webSessions(pi: ExtensionAPI): void {
     forward(event, ctx, status);
   });
   pi.on("agent_settled", (event, ctx) => {
-    if (bridge) {
-      bridge.autoTurnRouting = false;
-      const selectedModel = selectedModelReference(bridge.session);
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) {
+      activeBridge.autoTurnRouting = false;
+      const selectedModel = selectedModelReference(activeBridge.session);
       if (
         isAutoModelReference(selectedModel) &&
-        bridge.session.model !== selectedModel
+        activeBridge.session.model !== selectedModel
       )
-        updateSession(bridge, { model: selectedModel });
+        updateSession(activeBridge, { model: selectedModel });
     }
-    if (bridge?.session.compaction) {
-      endBridgeCompaction(bridge, {
+    if (activeBridge?.session.compaction) {
+      endBridgeCompaction(activeBridge, {
         aborted: false,
         willRetry: false,
         errorMessage: "Compaction stopped before completion",
       });
     }
-    forward(event, ctx, bridge?.session.status === "error" ? "error" : "idle");
+    forward(
+      event,
+      ctx,
+      activeBridge?.session.status === "error" ? "error" : "idle",
+    );
   });
   pi.on("turn_start", (event, ctx) => forward(event, ctx, "working"));
   pi.on("turn_end", (event, ctx) => forward(event, ctx));

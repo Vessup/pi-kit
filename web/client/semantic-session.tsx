@@ -2534,6 +2534,11 @@ export function SemanticSession({
   const selectedModelRef = selectedModelReference(session ?? {});
   const selectedModelIdLabel = selectedModelRef?.split("/").pop() ?? "Model";
   const autoSelected = isAutoModelReference(selectedModelRef);
+  const fallbackModelLabel = autoSelected
+    ? selectedModelRef === "auto/auto"
+      ? "Auto (auto)"
+      : `Auto (${selectedModelRef?.slice("auto/auto-".length) ?? "auto"})`
+    : selectedModelIdLabel;
   const effortLabel = session?.thinkingLevel ?? "off";
   const availableModels =
     sessionOptions.models.length > 0
@@ -2545,7 +2550,7 @@ export function SemanticSession({
             {
               provider: selectedModelRef.slice(0, slashIndex),
               id: selectedModelRef.slice(slashIndex + 1),
-              name: selectedModelIdLabel,
+              name: fallbackModelLabel,
               reasoning: true,
             },
           ];
@@ -2553,12 +2558,7 @@ export function SemanticSession({
   const selectedModelOption = availableModels.find(
     (model) => `${model.provider}/${model.id}` === selectedModelRef,
   );
-  const modelLabel = autoSelected
-    ? (selectedModelOption?.name ??
-      (selectedModelRef === "auto/auto"
-        ? "Auto (auto)"
-        : `Auto (${selectedModelRef?.slice("auto/auto-".length) ?? "auto"})`))
-    : selectedModelIdLabel;
+  const modelLabel = selectedModelOption?.name ?? fallbackModelLabel;
   const effectiveModelLabel = session?.model?.split("/").pop();
   const turnModelSummary =
     autoSelected &&
@@ -3355,6 +3355,7 @@ export function SemanticSession({
                           <button
                             key={level}
                             type="button"
+                            disabled={autoSelected}
                             onClick={() => void selectEffort(level)}
                           >
                             <span>

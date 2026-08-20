@@ -8,14 +8,17 @@ export type WebModelStatus = {
 
 export type WebModelIdentity = { provider: string; id: string };
 
+/** Format a provider/model pair for the Web session protocol. */
 export function webModelReference(model: WebModelIdentity): string {
   return `${model.provider}/${model.id}`;
 }
 
+/** Return whether a protocol model reference names one of Auto Router's placeholders. */
 export function isAutoModelReference(reference: string | undefined): boolean {
   return reference?.startsWith("auto/") === true;
 }
 
+/** Resolve the user selection, falling back to the runtime model for old payloads. */
 export function selectedModelReference(
   status: Pick<WebModelStatus, "model" | "selectedModel">,
 ): string | undefined {

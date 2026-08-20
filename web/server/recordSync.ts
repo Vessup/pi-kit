@@ -89,8 +89,13 @@ export function createRecordSync(options: {
   function finishTurnModelTracking(record: SessionRecord): void {
     record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
     const selectedModel = selectedModelReference(record);
-    if (record.autoTurnActive && isAutoModelReference(selectedModel))
+    // Keep the preservation flag through the first settlement refresh. The
+    // Auto extension may still be finishing its asynchronous placeholder
+    // restore when that get_state request is answered.
+    if (record.autoTurnActive && isAutoModelReference(selectedModel)) {
       record.model = selectedModel;
+      return;
+    }
     record.autoTurnActive = false;
     record.selectedModel ??= record.model;
   }
