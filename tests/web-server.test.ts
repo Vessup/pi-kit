@@ -3895,6 +3895,20 @@ test("native sessions route the web /compact command with optional instructions"
       )
         return;
       clearTimeout(timeout);
+      agent.send(
+        JSON.stringify({
+          type: "agent.history",
+          sessionId,
+          entries: [
+            {
+              type: "compaction",
+              id: "compact-1",
+              timestamp: new Date().toISOString(),
+              summary: "Context compacted by the test",
+            },
+          ],
+        }),
+      );
       // Mirror the real native bridge: emit compaction_end before acking so the
       // web server can broadcast "Compaction complete." to subscribed clients.
       agent.send(
@@ -3989,6 +4003,170 @@ test("native sessions route the web /compact command with optional instructions"
     }),
   );
   expect(await result).toBe("Compaction complete.");
+  const compactedHistory = JSON.stringify(
+    await semanticHistory(`ws://127.0.0.1:${port}/ws/client`, sessionId),
+  );
+  expect(compactedHistory).toContain("Context compacted by the test");
+  agent.close();
+}, 10_000);
+
+test("failed native compactions do not announce completion", async () => {
+  tempDir = await mkdtemp(
+    join(tmpdir(), "pi-kit-native-compact-failure-test-"),
+  );
+  const statePath = join(tempDir, "server.json");
+  child = Bun.spawn({
+    cmd: ["bun", "run", "web/server/index.ts"],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PI_WEB_PORT: "0",
+      PI_WEB_ROOT: process.cwd(),
+      PI_WEB_STATE_FILE: statePath,
+      PI_CODING_AGENT_DIR: join(tempDir, "pi-agent"),
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const { port } = await waitForState(statePath);
+  const sessionId = `compact-failure-${crypto.randomUUID()}`;
+  const agent = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
+  await new Promise<void>((resolve, reject) => {
+    agent.onopen = () => {
+      agent.send(
+        JSON.stringify({
+          type: "agent.hello",
+          session: {
+            id: sessionId,
+            cwd: tempDir,
+            status: "idle",
+            source: "tui",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            messageCount: 0,
+          },
+          entries: [],
+        }),
+      );
+      resolve();
+    };
+    agent.onerror = () =>
+      reject(new Error("compact failure agent websocket failed"));
+  });
+  await Bun.sleep(25);
+  agent.onmessage = ({ data }) => {
+    const message = JSON.parse(String(data)) as {
+      type?: string;
+      requestId?: string;
+      command?: { type?: string };
+    };
+    if (message.type !== "agent.command" || message.command?.type !== "compact")
+      return;
+    agent.send(
+      JSON.stringify({
+        type: "agent.event",
+        sessionId,
+        event: {
+          type: "compaction_start",
+          reason: "manual",
+          startedAt: Date.now(),
+          willRetry: false,
+        },
+      }),
+    );
+    agent.send(
+      JSON.stringify({
+        type: "agent.event",
+        sessionId,
+        event: {
+          type: "compaction_end",
+          reason: "manual",
+          aborted: false,
+          willRetry: false,
+          errorMessage: "Summarization failed: Connection error.",
+        },
+      }),
+    );
+    agent.send(
+      JSON.stringify({
+        type: "agent.response",
+        requestId: message.requestId,
+        success: false,
+        error: "Summarization failed: Connection error.",
+      }),
+    );
+  };
+  const result = await new Promise<{
+    success: boolean;
+    error?: string;
+    completionNotice?: string;
+  }>((resolve, reject) => {
+    const client = browserSocket(`ws://127.0.0.1:${port}/ws/client`);
+    const requestId = crypto.randomUUID();
+    let responded = false;
+    let response: { success: boolean; error?: string } | undefined;
+    let completionNotice: string | undefined;
+    let sent = false;
+    const timeout = setTimeout(() => {
+      client.close();
+      reject(new Error("failed compact response timed out"));
+    }, 5_000);
+    const finish = () => {
+      if (!responded || !response) return;
+      clearTimeout(timeout);
+      client.close();
+      resolve({ ...response, completionNotice });
+    };
+    client.onopen = () => client.send(JSON.stringify({ type: "client.hello" }));
+    client.onmessage = ({ data }) => {
+      const message = JSON.parse(String(data)) as {
+        type?: string;
+        requestId?: string;
+        success?: boolean;
+        error?: string;
+        event?: {
+          type?: string;
+          message?: { content?: Array<{ type?: string; text?: string }> };
+        };
+      };
+      if (message.type === "server.snapshot" && !sent) {
+        sent = true;
+        client.send(JSON.stringify({ type: "client.subscribe", sessionId }));
+        client.send(
+          JSON.stringify({
+            type: "client.prompt",
+            requestId,
+            sessionId,
+            message: "/compact",
+            images: [],
+          }),
+        );
+      }
+      if (
+        message.type === "server.event" &&
+        message.event?.type === "message_end"
+      ) {
+        completionNotice = message.event.message?.content?.find(
+          (part) => part.type === "text",
+        )?.text;
+      }
+      if (message.type !== "server.response" || message.requestId !== requestId)
+        return;
+      responded = true;
+      response = {
+        success: message.success === true,
+        error: message.error,
+      };
+      finish();
+    };
+    client.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error("failed compact client websocket failed"));
+    };
+  });
+  expect(result.success).toBe(false);
+  expect(result.error).toBe("Summarization failed: Connection error.");
+  expect(result.completionNotice).toBeUndefined();
   agent.close();
 }, 10_000);
 

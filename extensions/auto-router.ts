@@ -40,6 +40,8 @@ import {
   type FooterContribution,
 } from "./footer-events.js";
 
+export const AUTO_ROUTER_COMPACTION_EVENT =
+  "pi-kit:auto-router:prepare-compaction";
 const AUTO_PROVIDER_ID = "auto";
 const AUTO_MODEL_ID = "auto";
 const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
@@ -408,6 +410,21 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     }
   }
 
+  async function routeForCompaction(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    if (!autoActive) return;
+    const settings = await readAutoRouterSettings();
+    const tier = pinnedTier ?? "medium";
+    const selected = pickForTier(ctx, settings, tier);
+    if (!selected)
+      throw new Error(
+        "Auto could not select a configured model for compaction.",
+      );
+    await applyRouting(pi, ctx, selected.model, selected.effort);
+  }
+
   async function routeForPrompt(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
@@ -522,6 +539,25 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       }),
     );
   }
+
+  pi.events.on(AUTO_ROUTER_COMPACTION_EVENT, (value) => {
+    if (!isRecord(value)) return;
+    const action = value.action;
+    const ctx = value.ctx as ExtensionContext | undefined;
+    const waitUntil = value.waitUntil;
+    if (
+      (action !== "route" && action !== "restore") ||
+      !ctx ||
+      typeof waitUntil !== "function"
+    )
+      return;
+    if (action === "route") {
+      if (autoActive) waitUntil(routeForCompaction(pi, ctx));
+      return;
+    }
+    if (autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID)
+      waitUntil(revertToAutoPlaceholder(pi, ctx));
+  });
 
   pi.on("model_select", (event, _ctx) => {
     if (routingInFlight) return;

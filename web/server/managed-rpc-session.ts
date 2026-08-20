@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { WEB_COMPACT_EXTENSION_COMMAND } from "../compact-command.js";
 import type { RpcSessionCommand } from "../protocol.js";
 import { SerializedWriter } from "./serialized-writer.js";
 
@@ -124,6 +125,14 @@ export class ManagedRpcSession {
   private readonly requestPrefix = `web-${randomUUID()}`;
   private worktreeError: Error | undefined;
   private reloadError: Error | undefined;
+  private compactCompletion:
+    | {
+        started: boolean;
+        resolve: (value: unknown) => void;
+        reject: (error: Error) => void;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    | undefined;
   private reloadInFlight: Promise<void> | undefined;
   private readonly lineWriter = new SerializedWriter<string>((line) =>
     this.writeLineNow(line),
@@ -172,7 +181,7 @@ export class ManagedRpcSession {
     });
     this.process = proc;
     void this.pumpStdout(proc).catch((error) => {
-      this.failAllPending(
+      this.failRuntimeOperations(
         error instanceof Error ? error : new Error(String(error)),
       );
     });
@@ -188,7 +197,9 @@ export class ManagedRpcSession {
         const detail = this.stderrTail.trim();
         if (detail && (!expected || code !== 0))
           console.error(`RPC process exited with code ${code}: ${detail}`);
-        this.failAllPending(new Error(`RPC process exited with code ${code}`));
+        this.failRuntimeOperations(
+          new Error(`RPC process exited with code ${code}`),
+        );
       })
       .catch((error: unknown) => {
         this.started = false;
@@ -198,7 +209,7 @@ export class ManagedRpcSession {
           null,
           error instanceof Error ? error.message : String(error),
         );
-        this.failAllPending(
+        this.failRuntimeOperations(
           error instanceof Error ? error : new Error(String(error)),
         );
       });
@@ -265,6 +276,45 @@ export class ManagedRpcSession {
     this.stderrTail = `${this.stderrTail}${text}`.slice(-STDERR_TAIL_MAX_CHARS);
   }
 
+  private resolveCompactCompletion(value: unknown): void {
+    const pending = this.compactCompletion;
+    if (!pending) return;
+    this.compactCompletion = undefined;
+    clearTimeout(pending.timer);
+    pending.resolve(value);
+  }
+
+  private rejectCompactCompletion(error: Error): void {
+    const pending = this.compactCompletion;
+    if (!pending) return;
+    this.compactCompletion = undefined;
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  private waitForCompactCompletion(): Promise<unknown> {
+    if (this.compactCompletion)
+      return Promise.reject(new Error("Compaction is already in progress"));
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.compactCompletion) return;
+        this.compactCompletion = undefined;
+        reject(
+          rpcDeliveryError(
+            "compact",
+            `Web compaction did not finish within ${LONG_RUNNING_COMMAND_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, LONG_RUNNING_COMMAND_TIMEOUT_MS);
+      this.compactCompletion = {
+        started: false,
+        resolve,
+        reject,
+        timer,
+      };
+    });
+  }
+
   private handleLine(line: string): void {
     let parsed: RpcEvent;
     try {
@@ -287,6 +337,30 @@ export class ManagedRpcSession {
         this.worktreeError = new Error(parsed.error);
       if (parsed.extensionPath === "command:web-reload")
         this.reloadError = new Error(parsed.error);
+      if (parsed.extensionPath === `command:${WEB_COMPACT_EXTENSION_COMMAND}`)
+        this.rejectCompactCompletion(new CommandRejectedError(parsed.error));
+    }
+    if (
+      parsed.type === "compaction_start" &&
+      parsed.reason === "manual" &&
+      this.compactCompletion
+    ) {
+      this.compactCompletion.started = true;
+    }
+    if (
+      parsed.type === "compaction_end" &&
+      parsed.reason === "manual" &&
+      this.compactCompletion?.started
+    ) {
+      if (parsed.aborted === true || typeof parsed.errorMessage === "string")
+        this.rejectCompactCompletion(
+          new CommandRejectedError(
+            typeof parsed.errorMessage === "string"
+              ? parsed.errorMessage
+              : "Compaction cancelled",
+          ),
+        );
+      else this.resolveCompactCompletion(parsed.result);
     }
     if (parsed.type === "response") {
       const response = parsed as RpcResponse;
@@ -351,6 +425,11 @@ export class ManagedRpcSession {
         // ignore
       }
     }
+  }
+
+  private failRuntimeOperations(error: Error): void {
+    this.failAllPending(error);
+    this.rejectCompactCompletion(rpcDeliveryError("compact", error.message));
   }
 
   private async waitForPendingRequests(): Promise<void> {
@@ -535,10 +614,40 @@ export class ManagedRpcSession {
   }
 
   async compact(customInstructions?: string): Promise<unknown> {
-    return await this.send(
-      { type: "compact", customInstructions },
-      LONG_RUNNING_COMMAND_TIMEOUT_MS,
+    // The web extension command gives Auto Router a chance to replace its inert
+    // placeholder before Pi resolves compaction auth. Older runtimes still use
+    // the native RPC command for compatibility.
+    const commands = await this.getCommands();
+    const supportsWebCompact = commands.commands.some(
+      (command) => command.name === WEB_COMPACT_EXTENSION_COMMAND,
     );
+    if (!supportsWebCompact)
+      return await this.send(
+        { type: "compact", customInstructions },
+        LONG_RUNNING_COMMAND_TIMEOUT_MS,
+      );
+
+    if (this.compactCompletion)
+      throw new Error("Compaction is already in progress");
+    const completion = this.waitForCompactCompletion();
+    const message = customInstructions
+      ? `/${WEB_COMPACT_EXTENSION_COMMAND} ${JSON.stringify(customInstructions)}`
+      : `/${WEB_COMPACT_EXTENSION_COMMAND}`;
+    try {
+      const [, result] = await Promise.all([
+        this.send(
+          { type: "prompt", message },
+          LONG_RUNNING_COMMAND_TIMEOUT_MS,
+        ),
+        completion,
+      ]);
+      return result;
+    } catch (error) {
+      this.rejectCompactCompletion(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      throw error;
+    }
   }
 
   async setSessionName(name: string): Promise<void> {
@@ -677,7 +786,10 @@ export class ManagedRpcSession {
 
   private async shutdownOnce(): Promise<void> {
     const proc = this.process;
-    if (!proc || this.stopped) return;
+    if (!proc || this.stopped) {
+      this.failRuntimeOperations(new Error("RPC session stopped"));
+      return;
+    }
     try {
       // Shutdown only needs confirmed stdin delivery, not an RPC response. A
       // wedged child may never acknowledge abort and must not hold deletion or
@@ -687,7 +799,7 @@ export class ManagedRpcSession {
       // Process termination remains the authoritative shutdown fallback.
     }
     this.stopped = true;
-    this.failAllPending(new Error("RPC session stopped"));
+    this.failRuntimeOperations(new Error("RPC session stopped"));
     try {
       proc.kill("SIGTERM");
     } catch {

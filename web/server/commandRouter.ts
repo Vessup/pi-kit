@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { isPrivateWebSessionCommand } from "../compact-command.js";
 import type {
   ClientCommandMessage,
   RpcSessionCommand,
@@ -412,7 +413,7 @@ export function createCommandRouter(options: {
               : undefined;
             if (
               typeof command.name !== "string" ||
-              command.name === "web-reload" ||
+              isPrivateWebSessionCommand(command.name) ||
               (command.source !== "extension" &&
                 command.source !== "prompt" &&
                 command.source !== "skill")

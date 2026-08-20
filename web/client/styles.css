@@ -981,6 +981,15 @@ details[open] > summary .semantic-tool-chevron {
 .semantic-context-progress:hover {
   background: rgb(39 39 42);
 }
+.semantic-context-progress.is-decorative {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-top: 0.1rem;
+  border-radius: 0;
+}
+.semantic-context-progress.is-decorative:hover {
+  background: transparent;
+}
 .semantic-context-progress svg {
   width: 1.15rem;
   height: 1.15rem;

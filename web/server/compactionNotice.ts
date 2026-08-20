@@ -1,6 +1,12 @@
 import type { SessionRecord } from "./server-types.js";
 import type { ServerRuntimeState } from "./serverRuntimeState.js";
 
+export function isSuccessfulCompactionEnd(
+  event: Record<string, unknown>,
+): boolean {
+  return event.aborted !== true && typeof event.errorMessage !== "string";
+}
+
 /**
  * A managed bridge can replace compacted history after the compaction_end
  * event settles. Wait for that trailing snapshot so the completion notice is
