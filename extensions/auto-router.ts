@@ -562,7 +562,11 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("input", async (_event, ctx) => {
     // Core checks for threshold compaction before before_agent_start. Route away
     // from Auto's inert placeholder during that preflight so summarization uses
-    // a real model instead of http://127.0.0.1:0.
+    // a real model instead of http://127.0.0.1:0. If placeholder restoration
+    // is still in flight, wait for that transition before deciding whether the
+    // current model is safe for core's preflight compaction check.
+    if (!autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID) return;
+    if (routingInFlight) await modelTransitionTail;
     if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
     if (!autoActive) {
       autoActive = true;
