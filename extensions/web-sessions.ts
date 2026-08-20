@@ -9,7 +9,10 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { agentEndTerminalNotice } from "../web/assistant-message.js";
-import { WEB_COMPACT_COMMAND } from "../web/compact-command.js";
+import {
+  WEB_COMPACT_COMMAND,
+  WEB_COMPACT_EXTENSION_COMMAND,
+} from "../web/compact-command.js";
 import { boundedWebHistory } from "../web/history.js";
 import type {
   AgentCommand,
@@ -33,6 +36,7 @@ import {
   isSkillSlashCommand,
 } from "../web/slash-commands.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
+import { AUTO_ROUTER_COMPACTION_EVENT } from "./auto-router.js";
 import {
   FOOTER_CONTRIBUTION_EVENT,
   type FooterContribution,
@@ -245,6 +249,70 @@ type BridgeState = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function runAutoRouterCompactionAction(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  action: "route" | "restore",
+): Promise<void> {
+  const operations: Promise<void>[] = [];
+  pi.events.emit(AUTO_ROUTER_COMPACTION_EVENT, {
+    action,
+    ctx,
+    waitUntil(operation: Promise<void>) {
+      operations.push(operation);
+    },
+  });
+  return Promise.all(operations).then(() => undefined);
+}
+
+function compactInstructionsFromCommandArgs(args: string): string | undefined {
+  const trimmed = args.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return typeof parsed === "string" ? parsed : trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
+async function compactWithWebRouting(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  customInstructions: string | undefined,
+  bridge?: BridgeState,
+): Promise<unknown> {
+  try {
+    await runAutoRouterCompactionAction(pi, ctx, "route");
+    return await new Promise<unknown>((resolveCompaction, rejectCompaction) => {
+      try {
+        ctx.compact({
+          customInstructions,
+          onComplete: resolveCompaction,
+          onError: (error) => {
+            if (bridge) {
+              endBridgeCompaction(bridge, {
+                aborted: false,
+                willRetry: false,
+                errorMessage: error.message,
+              });
+            }
+            rejectCompaction(error);
+          },
+        });
+      } catch (error) {
+        rejectCompaction(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    });
+  } finally {
+    await runAutoRouterCompactionAction(pi, ctx, "restore").catch(
+      () => undefined,
+    );
+  }
 }
 
 function delay(ms: number): Promise<void> {
@@ -922,20 +990,16 @@ async function executeAgentCommand(
         updateSession(state, { name: command.name || undefined });
         respond(state, requestId, true);
         return;
-      case "compact":
-        state.ctx.compact({
-          customInstructions: command.customInstructions,
-          onComplete: (result) => respond(state, requestId, true, result),
-          onError: (error) => {
-            endBridgeCompaction(state, {
-              aborted: false,
-              willRetry: false,
-              errorMessage: error.message,
-            });
-            respond(state, requestId, false, undefined, error.message);
-          },
-        });
+      case "compact": {
+        const result = await compactWithWebRouting(
+          pi,
+          state.ctx,
+          command.customInstructions,
+          state,
+        );
+        respond(state, requestId, true, result);
         return;
+      }
       case "bash": {
         const shell = process.env.SHELL || "/bin/sh";
         const result = await pi.exec(shell, ["-lc", command.command], {
@@ -1273,6 +1337,20 @@ export default function webSessions(pi: ExtensionAPI): void {
         : bridge.session.messageCount,
     });
   };
+
+  // Managed RPC sessions use this private command so compaction can route
+  // through Auto before the core RPC compact path resolves model auth.
+  pi.registerCommand(WEB_COMPACT_EXTENSION_COMMAND, {
+    description: WEB_COMPACT_COMMAND.description,
+    handler: async (args, ctx) => {
+      await compactWithWebRouting(
+        pi,
+        ctx,
+        compactInstructionsFromCommandArgs(args),
+        bridge,
+      );
+    },
+  });
 
   pi.registerCommand("web", {
     description: "Show the current session in the Pi web app",

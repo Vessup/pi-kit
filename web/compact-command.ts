@@ -1,5 +1,11 @@
 import type { WebSlashCommand } from "./protocol.js";
 
+export const WEB_COMPACT_EXTENSION_COMMAND = "web-compact";
+
+export function isPrivateWebSessionCommand(name: string): boolean {
+  return name === "web-reload" || name === WEB_COMPACT_EXTENSION_COMMAND;
+}
+
 export const WEB_COMPACT_COMMAND: WebSlashCommand = {
   name: "compact",
   description: "Compact the current session context",
