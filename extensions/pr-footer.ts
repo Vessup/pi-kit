@@ -161,7 +161,7 @@ export default function prFooter(pi: ExtensionAPI): void {
     const contribution: FooterContribution = {
       sessionId: currentSessionId,
       key: "pull-request",
-      topRight: current
+      identitySuffix: current
         ? (theme) => renderPullRequest(current, theme)
         : undefined,
       onBranchChange: () => {

@@ -133,8 +133,8 @@ function createFakePi(): FakePi {
 const FAKE_THEME = { fg: (_kind: string, text: string) => text } as unknown as Theme;
 
 function lastFooterBadge(footerEvents: unknown[]): string | undefined {
-  const last = footerEvents.at(-1) as { identitySuffix?: (theme: Theme) => string | undefined } | undefined;
-  return last?.identitySuffix?.(FAKE_THEME);
+  const last = footerEvents.at(-1) as { modelPrefix?: (theme: Theme) => string | undefined } | undefined;
+  return last?.modelPrefix?.(FAKE_THEME);
 }
 
 type FakeRegistryOptions = {
@@ -223,7 +223,7 @@ test("selecting Auto marks it active without eagerly routing, showing the adapti
 
   expect(fake.setModelCalls).toEqual([]);
   expect(fake.thinkingLevelCalls).toEqual([]);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });
 
 test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immediately, before any turn runs", async () => {
@@ -238,7 +238,7 @@ test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immed
   await selectPinned(fake, ctx, "high");
 
   expect(fake.setModelCalls).toEqual([]);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (high)");
 });
 
 test("a pinned Auto (<tier>) entry routes directly within that tier, skipping classification entirely", async () => {
@@ -316,7 +316,7 @@ test("session_start restores a pinned tier from a persisted entry and reverts to
 
   expect(fake.setModelCalls).toEqual([pinnedPlaceholder("xhigh")]);
   expect(ctx.model).toEqual(pinnedPlaceholder("xhigh"));
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (xhigh)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (xhigh)");
 });
 
 test("before_agent_start self-heals into the correct pinned tier when ctx.model is already that pinned placeholder", async () => {
@@ -363,7 +363,7 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(fake.thinkingLevelCalls).toEqual(["high"]);
   // The footer badge reflects the adaptive selection itself, not which tier this particular
   // turn classified to - that's what /usage is for.
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
   // Mid-turn, /model would show the real routed model, not "Auto".
   expect(ctx.model).toEqual(high);
 
@@ -373,7 +373,7 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
   expect(fake.setModelCalls.at(-1)).toEqual(AUTO_PLACEHOLDER);
   // ...and the footer badge is unchanged, since the selection never changed.
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });
 
 test("before_agent_start notifies when the classifier gives no usable answer, instead of silently defaulting", async () => {
@@ -429,7 +429,7 @@ test("a model's `effort` override sets its own thinking level, independent of th
   // The footer badge still just says "Auto (auto)" - the adaptive selection, not the tier or
   // effort this turn happened to land on (that mismatch, e.g. "Auto (max)" next to a model
   // actually running at a lower effort, is exactly what this badge no longer claims).
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 
   await fake.runCommand("usage", "", ctx);
   const notified = ctx.notifications.at(-1)?.message ?? "";
@@ -863,7 +863,7 @@ test("deactivating Auto removes its footer badge", async () => {
 
   await fake.fire("session_start", {}, ctx);
   await selectAuto(fake, ctx);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 
   await fake.fire("model_select", { model: manual, previousModel: a, source: "set" }, ctx);
   expect(fake.footerEvents.at(-1)).toMatchObject({ remove: true });
@@ -895,7 +895,7 @@ test("session_start on a cleanly-idle Auto session leaves the placeholder select
   await fake.fire("session_start", {}, ctx);
 
   expect(fake.setModelCalls).toEqual([]);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });
 
 test("a brand-new session whose defaultModel is auto/auto routes on the first turn with no prior /model pick or session entries", async () => {
@@ -967,5 +967,5 @@ test("session_start restored mid-turn (e.g. after a crash) reverts back to the A
   expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
   // Unpinned (no `pinnedTier` in the persisted entry), so the badge reflects the adaptive
   // selection, not `ctx.thinkingLevel` left over from whatever was mid-flight at the crash.
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });

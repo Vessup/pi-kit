@@ -84,6 +84,44 @@ export function statusColor(
   }
 }
 
+export function subagentFooterSummary(
+  statuses: Iterable<SubagentStatus>,
+): { text: string; status: SubagentStatus } | undefined {
+  let total = 0;
+  let working = 0;
+  let completed = 0;
+  let failed = 0;
+  let terminated = 0;
+  for (const status of statuses) {
+    total++;
+    if (
+      status === "creating" ||
+      status === "working" ||
+      status === "terminating"
+    )
+      working++;
+    else if (status === "completed") completed++;
+    else if (status === "failed") failed++;
+    else terminated++;
+  }
+  if (total === 0) return undefined;
+  const parts = [`${total} subagent${total === 1 ? "" : "s"}`];
+  if (working) parts.push(`${working} working`);
+  if (completed) parts.push(`${completed} done`);
+  if (failed) parts.push(`${failed} failed`);
+  if (terminated) parts.push(`${terminated} stopped`);
+  return {
+    text: parts.join(" • "),
+    status: failed
+      ? "failed"
+      : working
+        ? "working"
+        : terminated
+          ? "terminated"
+          : "completed",
+  };
+}
+
 export function truncateToolOutput(text: string): string {
   const buffer = Buffer.from(text, "utf8");
   if (buffer.length <= MAX_TOOL_OUTPUT_BYTES) return text;

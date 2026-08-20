@@ -147,7 +147,7 @@ export default function sessionFooter(pi: ExtensionAPI): void {
               }
             })
             .join(" ");
-          if (identitySuffix) cwd += ` ${identitySuffix}`;
+          if (identitySuffix) cwd += ` • ${identitySuffix}`;
 
           const totals: UsageTotals = {
             input: 0,
@@ -203,11 +203,22 @@ export default function sessionFooter(pi: ExtensionAPI): void {
           if (ctx.model && footerData.getAvailableProviderCount() > 1)
             model = `(${ctx.model.provider}) ${model}`;
 
-          const topRight = Array.from(contributions.entries())
+          const modelPrefix = Array.from(contributions.entries())
             .sort(([a], [b]) => a.localeCompare(b))
             .flatMap(([, contribution]) => {
               try {
-                const rendered = contribution.topRight?.(theme);
+                const rendered = contribution.modelPrefix?.(theme);
+                return rendered ? [rendered] : [];
+              } catch {
+                return [];
+              }
+            })
+            .join(theme.fg("dim", " • "));
+          const statsRight = Array.from(contributions.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .flatMap(([, contribution]) => {
+              try {
+                const rendered = contribution.statsRight?.(theme);
                 return rendered ? [rendered] : [];
               } catch {
                 return [];
@@ -217,15 +228,15 @@ export default function sessionFooter(pi: ExtensionAPI): void {
           const cwdLine = identityPrefix
             ? `${identityPrefix} ${theme.fg("dim", cwd)}`
             : theme.fg("dim", cwd);
+          const modelLine = modelPrefix
+            ? `${modelPrefix}${theme.fg("dim", " • ")}${theme.fg("dim", model)}`
+            : theme.fg("dim", model);
+          const statsLine = theme.fg("dim", stats.join(" "));
           const lines = [
-            topRight
-              ? alignSides(cwdLine, topRight, width)
-              : truncateToWidth(cwdLine, width, theme.fg("dim", "...")),
-            alignSides(
-              theme.fg("dim", stats.join(" ")),
-              theme.fg("dim", model),
-              width,
-            ),
+            alignSides(cwdLine, modelLine, width),
+            statsRight
+              ? alignSides(statsLine, statsRight, width)
+              : truncateToWidth(statsLine, width, theme.fg("dim", "...")),
           ];
 
           const contributionStatuses = Array.from(contributions.entries())

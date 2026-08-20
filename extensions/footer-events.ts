@@ -25,7 +25,10 @@ export type FooterContribution = {
   identityPrefix?: (theme: Theme) => string | undefined;
   /** Rendered inline after the branch/session identity on the first footer line. */
   identitySuffix?: (theme: Theme) => string | undefined;
-  topRight?: (theme: Theme) => string | undefined;
+  /** Rendered before the active model on the right of the first footer line. */
+  modelPrefix?: (theme: Theme) => string | undefined;
+  /** Rendered on the right of the usage statistics on the second footer line. */
+  statsRight?: (theme: Theme) => string | undefined;
   status?: {
     text: string;
     selected?: boolean;
@@ -57,7 +60,12 @@ export function parseFooterContribution(
     typeof event.identitySuffix !== "function"
   )
     return undefined;
-  if (event.topRight !== undefined && typeof event.topRight !== "function")
+  if (
+    event.modelPrefix !== undefined &&
+    typeof event.modelPrefix !== "function"
+  )
+    return undefined;
+  if (event.statsRight !== undefined && typeof event.statsRight !== "function")
     return undefined;
   if (
     event.onBranchChange !== undefined &&

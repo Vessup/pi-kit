@@ -27,8 +27,10 @@ import {
   formatTokens,
   modelName,
   sanitizeName,
+  statusColor,
   statusIcon,
   stringifyCompact,
+  subagentFooterSummary,
   truncateChars,
   truncateToolOutput,
 } from "./format.js";
@@ -921,33 +923,6 @@ export class SubagentManager {
     return usage;
   }
 
-  private footerText(): string | undefined {
-    if (this.agents.size === 0) return undefined;
-    let working = 0;
-    let completed = 0;
-    let failed = 0;
-    let terminated = 0;
-    for (const agent of this.agents.values()) {
-      if (
-        agent.status === "creating" ||
-        agent.status === "working" ||
-        agent.status === "terminating"
-      )
-        working++;
-      else if (agent.status === "completed") completed++;
-      else if (agent.status === "failed") failed++;
-      else terminated++;
-    }
-    const parts = [
-      `◆ ${this.agents.size} subagent${this.agents.size === 1 ? "" : "s"}`,
-    ];
-    if (working) parts.push(`${working} working`);
-    if (completed) parts.push(`${completed} done`);
-    if (failed) parts.push(`${failed} failed`);
-    if (terminated) parts.push(`${terminated} stopped`);
-    return parts.join(" • ");
-  }
-
   private publishWebStatus(): void {
     this.webStatusPublishTimer = undefined;
     const ctx = this.currentContext;
@@ -971,12 +946,27 @@ export class SubagentManager {
     const usage = asFooterUsage(
       subtractUsage(this.totalUsage, this.accountedUsage),
     );
-    const statusText = this.footerText();
+    const footerSummary = subagentFooterSummary(
+      Array.from(this.agents.values(), (agent) => agent.status),
+    );
     const contribution: FooterContribution = {
       sessionId,
       key: "subagents",
-      status: statusText
-        ? { text: statusText, selected: this.footerSelected }
+      statsRight: footerSummary
+        ? (theme) => {
+            const icon = theme.fg(
+              statusColor(footerSummary.status),
+              statusIcon(footerSummary.status),
+            );
+            const text = theme.fg(
+              this.footerSelected ? "accent" : "dim",
+              footerSummary.text,
+            );
+            const rendered = `${icon} ${text}`;
+            return this.footerSelected
+              ? theme.bg("selectedBg", rendered)
+              : rendered;
+          }
         : undefined,
       usage,
     };

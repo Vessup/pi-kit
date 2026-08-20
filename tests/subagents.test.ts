@@ -7,6 +7,7 @@ import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { SubagentManager } from "../extensions/subagents/manager.ts";
 import {
   stringifyCompact,
+  subagentFooterSummary,
   truncateChars,
   truncateToolOutput,
 } from "../extensions/subagents/format.ts";
@@ -128,6 +129,28 @@ test("compact formatting handles non-JSON values and preserves Unicode code poin
   assert.equal(stringifyCompact(Symbol("value")), "Symbol(value)");
   assert.equal(stringifyCompact("🙂", 2), '"🙂…');
   assert.equal(truncateChars("a🙂b", 2), "a🙂\n[… 1 characters omitted]");
+});
+
+test("subagent footer summary uses the modal status icon state", () => {
+  assert.deepEqual(subagentFooterSummary([]), undefined);
+  assert.deepEqual(subagentFooterSummary(["completed"]), {
+    text: "1 subagent • 1 done",
+    status: "completed",
+  });
+  assert.deepEqual(
+    subagentFooterSummary(["working", "completed", "terminated"]),
+    {
+      text: "3 subagents • 1 working • 1 done • 1 stopped",
+      status: "working",
+    },
+  );
+  assert.deepEqual(
+    subagentFooterSummary(["working", "completed", "failed"]),
+    {
+      text: "3 subagents • 1 working • 1 done • 1 failed",
+      status: "failed",
+    },
+  );
 });
 
 test("subagent tool output truncates at a valid UTF-8 byte boundary", () => {

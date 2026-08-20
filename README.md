@@ -4,7 +4,7 @@ Reusable extensions for the [Pi coding agent](https://github.com/earendil-works/
 
 ## PR footer
 
-`extensions/pr-footer.ts` contributes the current GitHub pull request to the shared footer as a right-aligned, clickable ` #123` link on the directory/branch line above the model information. A colored circle beside it shows the aggregate check status:
+`extensions/pr-footer.ts` contributes the current GitHub pull request to the shared footer as a clickable ` #123` link after the session name on the directory/branch line. A colored circle beside it shows the aggregate check status:
 
 - Green: checks passed
 - Yellow: checks are pending or in progress
@@ -31,7 +31,7 @@ It uses the GitHub CLI to resolve the pull request and check status for the chec
 - Change model and reasoning effort
 - Terminate subagents and release their resources
 
-The subagent extension independently contributes its token use and status to `extensions/session-footer.ts`, the package's generic composable footer. When subagents are involved, a third footer line shows their aggregate status. With an empty editor, press Option+Down (Alt+Down) to select that line and Enter to open the manager; `/subagents` opens it directly. The manager shows individual status and transcripts and supports model, effort, messaging, and termination controls. Run `/subagents-cleanup` to stop and remove every retained subagent.
+The subagent extension independently contributes its token use and status to `extensions/session-footer.ts`, the package's generic composable footer. When subagents are involved, the right side of the footer's second row shows their aggregate status with the same in-progress, completed, failed, or stopped icon used by the manager. With an empty editor, press Option+Down (Alt+Down) to select that summary and Enter to open the manager; `/subagents` opens it directly. The manager shows individual status and transcripts and supports model, effort, messaging, and termination controls. Run `/subagents-cleanup` to stop and remove every retained subagent.
 
 ## Auto model routing
 
@@ -82,7 +82,7 @@ Run `/usage` to see health and usage for every configured model, grouped by tier
 
 `/usage` also shows the last several routing decisions under "Recent classifications" — what the classifier's raw reply actually was, the level it parsed to, and the tier/model it routed to. The classification call itself is otherwise a throwaway completion whose result would normally vanish the moment it's parsed, so if a turn ever looks under- or over-routed, this is what to check first rather than guessing from the code.
 
-The `/model` picker's effort/thinking control is inert while any Auto entry is selected, since effort is chosen per turn (or fixed to the pinned tier) internally. `/model` keeps showing whichever Auto entry you picked selected even after routing: the real model is only swapped in for the duration of each turn and swapped back to that same inert Auto placeholder as soon as it settles, so reopening `/model` between turns still shows "Auto (auto)" or "Auto (high)" (whichever you picked), not whichever model last handled a turn. A `🔀 Auto (<tier>)` badge in the TUI footer mirrors that same selection - `🔀 Auto (auto)` for the adaptive entry, `🔀 Auto (<tier>)` for a pinned one - not whatever a given turn happened to classify or dispatch to (check `/usage` for that; a model's own `effort` override in particular can differ from its tier, so the two aren't the same thing). Pi Web follows the same distinction: its model control keeps Auto checked while a turn is running, and appends the concrete routed model and effort used for that turn. Manually picking a real (non-Auto) model from `/model` turns Auto off; reselecting any Auto entry turns it back on.
+The `/model` picker's effort/thinking control is inert while any Auto entry is selected, since effort is chosen per turn (or fixed to the pinned tier) internally. `/model` keeps showing whichever Auto entry you picked selected even after routing: the real model is only swapped in for the duration of each turn and swapped back to that same inert Auto placeholder as soon as it settles, so reopening `/model` between turns still shows "Auto (auto)" or "Auto (high)" (whichever you picked), not whichever model last handled a turn. The right side of the TUI footer's first row mirrors that selection before the runtime details—`Auto (auto) • (provider) model • effort` for the adaptive entry, or `Auto (<tier>) • (provider) model • effort` for a pinned one—without a separate Auto Router icon. The Auto label reflects the selection, not whatever a given turn happened to classify or dispatch to (check `/usage` for that; a model's own `effort` override in particular can differ from its tier, so the two aren't the same thing). Pi Web follows the same distinction: its model control keeps Auto checked while a turn is running, and appends the concrete routed model and effort used for that turn. Manually picking a real (non-Auto) model from `/model` turns Auto off; reselecting any Auto entry turns it back on.
 
 If you've scoped `/model` with `enabledModels` (or `--models`), Pi's picker defaults to showing only that scoped list, hiding everything else — including every Auto entry — behind a manual Tab to "all". At session start, Auto best-effort appends an `auto/*` pattern to `enabledModels` (only when scoping is already configured, and only if it isn't already present) so every Auto entry shows up in the default scoped view too, without changing anything else about what's scoped.
 
@@ -124,7 +124,7 @@ The bundled Vite/React app provides a shadcn/ui-style session shell with:
 - Fork-point selection from the session's real user-message entries
 - Optional Tailscale Serve publishing for HTTPS access from authorized tailnet identities
 
-A linked `🌐` appears at the far left of Pi's first footer line, immediately before the directory. Click it to open that session directly, or run `/web` to display its URL.
+A linked `⧉` appears at the far left of Pi's first footer line, immediately before the directory. Click it to open that session directly, or run `/web` to display its URL.
 
 The server is intentionally tokenless so installed iOS home-screen links remain stable. It binds only to localhost unless explicitly published through Tailscale Serve. Local machine users are therefore inside the trust boundary; remote access relies on Tailscale Service grants, which must be limited to trusted identities. Browser WebSockets also require an exact same-host `Origin`, preventing unrelated websites from driving shell-capable sessions. Do not expose the localhost port with a generic reverse proxy or Tailscale Funnel.
 
@@ -134,7 +134,7 @@ Browser-created sessions use Pi's RPC mode, while native Pi processes keep their
 
 ### Tailscale
 
-If Tailscale is installed and connected, opt into tailnet-only publishing with `/web-tailscale on`. The running server immediately configures Tailscale Serve to proxy its HTTPS MagicDNS address to the localhost-only backend, and future starts restore it automatically. `/web`, the footer globe, and `/web-tailscale status` then use the tailnet URL. Node-level publishing defaults to HTTPS port `8443` to avoid macOS port-443 conflicts.
+If Tailscale is installed and connected, opt into tailnet-only publishing with `/web-tailscale on`. The running server immediately configures Tailscale Serve to proxy its HTTPS MagicDNS address to the localhost-only backend, and future starts restore it automatically. `/web`, the footer link, and `/web-tailscale status` then use the tailnet URL. Node-level publishing defaults to HTTPS port `8443` to avoid macOS port-443 conflicts.
 
 The equivalent global Pi setting in `~/.pi/agent/settings.json` is:
 

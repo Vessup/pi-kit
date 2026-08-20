@@ -132,7 +132,7 @@ function formatTier(tier: AutoRouterEffortLevel): string {
  * changed. `/usage` is the place to see what actually got routed to.
  */
 function footerBadge(pinnedTier: AutoRouterEffortLevel | undefined): string {
-  return `🔀 Auto (${pinnedTier ?? "auto"})`;
+  return `Auto (${pinnedTier ?? "auto"})`;
 }
 
 /** A registered-but-inert `/model` entry: never actually dispatched to, since `before_agent_start` always swaps in a real routed model first. */
@@ -181,7 +181,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
       sessionId: currentSessionId,
       key: FOOTER_KEY,
-      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(pinnedTier)),
+      modelPrefix: (theme: Theme) => theme.fg("accent", footerBadge(pinnedTier)),
     } satisfies FooterContribution);
   }
 

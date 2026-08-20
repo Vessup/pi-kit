@@ -511,8 +511,8 @@ function hyperlink(url: string, label: string): string {
   return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
 }
 
-function renderGlobe(theme: Theme, url: string): string {
-  return hyperlink(url, theme.fg("accent", "🌐"));
+function renderWebLink(theme: Theme, url: string): string {
+  return hyperlink(url, theme.fg("accent", "⧉"));
 }
 
 function publishFooter(pi: ExtensionAPI, state: BridgeState): void {
@@ -521,7 +521,7 @@ function publishFooter(pi: ExtensionAPI, state: BridgeState): void {
     sessionId: state.session.id,
     key: FOOTER_KEY,
     identityPrefix: server
-      ? (theme) => renderGlobe(theme, sessionUrl(server, state.session.id))
+      ? (theme) => renderWebLink(theme, sessionUrl(server, state.session.id))
       : undefined,
     onBranchChange: () => {
       void refreshGitMetadata(pi, state);
