@@ -2068,6 +2068,7 @@ for await (const line of lines) {
     env: {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_RPC_BIN: fakePi,
       PI_WEB_PORT: "0",
       PI_WEB_ROOT: process.cwd(),
       PI_WEB_STATE_FILE: statePath,
@@ -2711,6 +2712,7 @@ for await (const line of lines) {
     env: {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_RPC_BIN: fakePi,
       PI_WEB_PORT: "0",
       PI_WEB_ROOT: process.cwd(),
       PI_WEB_STATE_FILE: statePath,
@@ -2935,6 +2937,7 @@ test("managed RPC requests fail within the configured bound when Pi wedges", asy
     env: {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_RPC_BIN: fakePi,
       PI_WEB_PORT: "0",
       PI_WEB_ROOT: process.cwd(),
       PI_WEB_STATE_FILE: statePath,
@@ -3702,6 +3705,7 @@ for await (const line of lines) {
     env: {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_RPC_BIN: fakePi,
       PI_WEB_PORT: "0",
       PI_WEB_ROOT: process.cwd(),
       PI_WEB_STATE_FILE: statePath,
@@ -3783,6 +3787,7 @@ for await (const line of lines) {
     env: {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_RPC_BIN: fakePi,
       PI_WEB_PORT: "0",
       PI_WEB_ROOT: process.cwd(),
       PI_WEB_STATE_FILE: statePath,

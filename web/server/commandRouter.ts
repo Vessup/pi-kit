@@ -16,6 +16,10 @@ import {
   isUncertainRpcDeliveryCommand,
 } from "./managed-rpc-session.js";
 import type { ManagedSessionRefresh } from "./managedSessionRefresh.js";
+import {
+  filterModelsByScopePatterns,
+  readEnabledModelPatterns,
+} from "./modelScope.js";
 import type { RpcSessionFactory } from "./rpcSessions.js";
 import type {
   ExternalPendingRequest,
@@ -441,27 +445,29 @@ export function createCommandRouter(options: {
               location: "temporary",
             });
           }
-          const scoped = record.scopedModels ?? [];
-          const scopedByKey = new Map(
-            scoped.map((s) => [`${s.provider}/${s.id}`, s]),
-          );
-          const filterByScope = scopedByKey.size > 0;
-          return {
-            models: models
-              .filter((model) =>
-                filterByScope
-                  ? scopedByKey.has(
-                      `${String(model.provider ?? "")}/${String(model.id ?? "")}`,
-                    )
-                  : true,
+          // Managed sessions have no bridge to forward a resolved scope, so
+          // their scope is whatever `enabledModels` says in the shared
+          // settings file (the daemon spawns them without --models). Bridge
+          // sessions instead carry their resolved scope on the record.
+          const scopePatterns = record.scopedModels
+            ? record.scopedModels.map(
+                (model) => `${model.provider}/${model.id}`,
               )
-              .map((model) => ({
-                provider: String(model.provider ?? ""),
-                id: String(model.id ?? ""),
-                name: String(model.name ?? model.id ?? ""),
-                reasoning: model.reasoning === true,
-                thinkingLevels: levels,
-              })),
+            : await readEnabledModelPatterns(options.config.settingsPath);
+          const modelOptions = models.map((model) => ({
+            provider: String(model.provider ?? ""),
+            id: String(model.id ?? ""),
+            name: String(model.name ?? model.id ?? ""),
+            reasoning: model.reasoning === true,
+          }));
+          return {
+            models: filterModelsByScopePatterns(
+              modelOptions,
+              scopePatterns,
+            ).map((model) => ({
+              ...model,
+              thinkingLevels: levels,
+            })),
             thinkingLevels: levels,
             commands: webCommands,
           };

@@ -2712,7 +2712,7 @@ export function SemanticSession({
       <div
         ref={scrollRef}
         data-testid="transcript-scroll"
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain [overflow-anchor:none]"
         onWheel={(event) => {
           scrollIntentRef.current = event.deltaY < 0 ? "up" : "down";
           if (event.deltaY < 0) stopFollowing();
