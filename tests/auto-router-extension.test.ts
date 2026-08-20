@@ -150,8 +150,14 @@ function createFakePi(): FakePi {
 const FAKE_THEME = { fg: (_kind: string, text: string) => text } as unknown as Theme;
 
 function lastFooterBadge(footerEvents: unknown[]): string | undefined {
-  const last = footerEvents.at(-1) as { modelPrefix?: (theme: Theme) => string | undefined } | undefined;
-  return last?.modelPrefix?.(FAKE_THEME);
+  for (let index = footerEvents.length - 1; index >= 0; index -= 1) {
+    const event = footerEvents[index] as
+      | { modelPrefix?: (theme: Theme) => string | undefined }
+      | undefined;
+    const badge = event?.modelPrefix?.(FAKE_THEME);
+    if (badge) return badge;
+  }
+  return undefined;
 }
 
 type FakeRegistryOptions = {
@@ -274,6 +280,87 @@ test("Auto routes manual compaction away from its inert placeholder and restores
   await runAction("restore");
   expect(fake.currentModel.value?.provider).toBe("auto");
   expect(fake.currentModel.value?.id).toBe("auto");
+});
+
+test("Auto routes before prompt preflight so compaction cannot use its placeholder", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("input", { text: "next prompt", source: "interactive" }, ctx);
+
+  expect(fake.currentModel.value).toBe(a);
+  expect(fake.setModelCalls).toEqual([a]);
+});
+
+test("serializes compaction routing with placeholder restoration", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const enteredGate = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const originalSetModel = (fake.pi as unknown as {
+    setModel: (model: Model<Api>) => Promise<boolean>;
+  }).setModel;
+  let calls = 0;
+  (fake.pi as unknown as {
+    setModel: (model: Model<Api>) => Promise<boolean>;
+  }).setModel = async (model) => {
+    calls++;
+    if (calls === 1) {
+      entered();
+      await gate;
+    }
+    return originalSetModel(model);
+  };
+
+  const runAction = async (action: "route" | "restore") => {
+    const operations: Promise<void>[] = [];
+    fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+      action,
+      ctx,
+      waitUntil: (operation: Promise<void>) => operations.push(operation),
+    });
+    await Promise.all(operations);
+  };
+
+  const routing = runAction("route");
+  await enteredGate;
+  fake.currentModel.value = a;
+  const restoring = runAction("restore");
+  await Bun.sleep(5);
+  expect(calls).toBe(1);
+  release();
+  await Promise.all([routing, restoring]);
+  expect(calls).toBe(2);
+  expect(fake.currentModel.value?.provider).toBe("auto");
 });
 
 test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immediately, before any turn runs", async () => {

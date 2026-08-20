@@ -45,7 +45,10 @@ import {
   isSkillSlashCommand,
 } from "../web/slash-commands.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
-import { AUTO_ROUTER_COMPACTION_EVENT } from "./auto-router.js";
+import {
+  AUTO_ROUTER_COMPACTION_EVENT,
+  AUTO_ROUTER_MODEL_ROUTING_EVENT,
+} from "./auto-router.js";
 import {
   FOOTER_CONTRIBUTION_EVENT,
   type FooterContribution,
@@ -254,6 +257,8 @@ type BridgeState = {
   pending: AgentToServerMessage[];
   /** Set before Auto's before_agent_start hook swaps in the concrete model. */
   autoTurnRouting: boolean;
+  /** True while Auto itself is applying a runtime model swap. */
+  autoRuntimeRouting: boolean;
   metrics: Pick<WebSession, "usage" | "contextUsage">;
   sourceReplacement?: WorktreeSessionReplacement;
 };
@@ -1287,6 +1292,21 @@ function makeSession(
 export default function webSessions(pi: ExtensionAPI): void {
   let bridge: BridgeState | undefined;
 
+  pi.events.on(AUTO_ROUTER_MODEL_ROUTING_EVENT, (value) => {
+    if (!isRecord(value)) return;
+    const action = value.action;
+    const ctx = value.ctx as ExtensionContext | undefined;
+    if (
+      (action !== "start" && action !== "end") ||
+      !ctx ||
+      !bridge ||
+      bridge.closed ||
+      ctx.sessionManager.getSessionId() !== bridge.session.id
+    )
+      return;
+    bridge.autoRuntimeRouting = action === "start";
+  });
+
   // RPC mode normally expands /skill:name before the agent sees it. Pi Web keeps
   // skill invocations as user-authored text so the agent follows the advertised
   // progressive-disclosure contract and loads SKILL.md with read when needed.
@@ -1612,6 +1632,7 @@ export default function webSessions(pi: ExtensionAPI): void {
       reconnectAttempt: 0,
       pending: [],
       autoTurnRouting: false,
+      autoRuntimeRouting: false,
       metrics: { usage: session.usage, contextUsage: session.contextUsage },
       sourceReplacement,
     };
@@ -1682,13 +1703,12 @@ export default function webSessions(pi: ExtensionAPI): void {
       const previousModel = event.previousModel
         ? webModelReference(event.previousModel)
         : undefined;
-      const autoRoute =
-        activeBridge.autoTurnRouting &&
-        isAutoRuntimeModelSwap(
-          selectedModelReference(activeBridge.session),
-          previousModel,
-          runtimeModel,
-        );
+      const selectedModel = selectedModelReference(activeBridge.session);
+      const autoRoute = activeBridge.autoRuntimeRouting
+        ? isAutoModelReference(selectedModel) &&
+          !isAutoModelReference(runtimeModel)
+        : activeBridge.autoTurnRouting &&
+          isAutoRuntimeModelSwap(selectedModel, previousModel, runtimeModel);
       const next = applyRuntimeModelStatus(
         activeBridge.session,
         runtimeModel,
@@ -1720,6 +1740,7 @@ export default function webSessions(pi: ExtensionAPI): void {
     const activeBridge = activeBridgeFor(ctx);
     if (activeBridge) {
       activeBridge.autoTurnRouting = false;
+      activeBridge.autoRuntimeRouting = false;
       const selectedModel = selectedModelReference(activeBridge.session);
       if (
         isAutoModelReference(selectedModel) &&

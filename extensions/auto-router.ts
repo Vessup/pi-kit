@@ -42,6 +42,8 @@ import {
 
 export const AUTO_ROUTER_COMPACTION_EVENT =
   "pi-kit:auto-router:prepare-compaction";
+export const AUTO_ROUTER_MODEL_ROUTING_EVENT =
+  "pi-kit:auto-router:model-routing";
 const AUTO_PROVIDER_ID = "auto";
 const AUTO_MODEL_ID = "auto";
 const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
@@ -176,7 +178,22 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
    * every turn routes within that tier directly, skipping classification entirely. */
   let pinnedTier: AutoRouterEffortLevel | undefined;
   let routingInFlight = false;
+  let modelTransitionTail = Promise.resolve();
   const healthStore = new AutoRouterHealthStore();
+
+  async function withModelTransition<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = modelTransitionTail;
+    let release!: () => void;
+    modelTransitionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
 
   function publishFooter(): void {
     if (!currentSessionId) return;
@@ -202,12 +219,16 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       currentAutoModelId(),
     );
     if (!placeholder) return;
-    routingInFlight = true;
-    try {
-      await pi.setModel(placeholder);
-    } finally {
-      routingInFlight = false;
-    }
+    await withModelTransition(async () => {
+      routingInFlight = true;
+      publishModelRouting(pi, ctx, true);
+      try {
+        await pi.setModel(placeholder);
+      } finally {
+        routingInFlight = false;
+        publishModelRouting(pi, ctx, false);
+      }
+    });
   }
 
   function clearFooter(): void {
@@ -386,28 +407,44 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     return undefined;
   }
 
+  function publishModelRouting(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    active: boolean,
+  ): void {
+    pi.events.emit(AUTO_ROUTER_MODEL_ROUTING_EVENT, {
+      action: active ? "start" : "end",
+      ctx,
+    });
+  }
+
   async function applyRouting(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     model: Model<Api>,
     effort: AutoRouterEffortLevel,
-  ): Promise<void> {
-    routingInFlight = true;
-    try {
-      const success = await pi.setModel(model);
-      if (!success) {
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Auto: no credentials configured for ${model.provider}/${model.id}`,
-            "warning",
-          );
+  ): Promise<boolean> {
+    return withModelTransition(async () => {
+      routingInFlight = true;
+      publishModelRouting(pi, ctx, true);
+      try {
+        const success = await pi.setModel(model);
+        if (!success) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `Auto: no credentials configured for ${model.provider}/${model.id}`,
+              "warning",
+            );
+          }
+          return false;
         }
-        return;
+        await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
+        return true;
+      } finally {
+        routingInFlight = false;
+        publishModelRouting(pi, ctx, false);
       }
-      await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
-    } finally {
-      routingInFlight = false;
-    }
+    });
   }
 
   async function routeForCompaction(
@@ -422,7 +459,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       throw new Error(
         "Auto could not select a configured model for compaction.",
       );
-    await applyRouting(pi, ctx, selected.model, selected.effort);
+    if (!(await applyRouting(pi, ctx, selected.model, selected.effort)))
+      throw new Error(
+        `Auto could not authenticate ${selected.model.provider}/${selected.model.id} for compaction`,
+      );
   }
 
   async function routeForPrompt(
@@ -518,6 +558,20 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     });
     await applyRouting(pi, ctx, picked.model, picked.effort);
   }
+
+  pi.on("input", async (_event, ctx) => {
+    // Core checks for threshold compaction before before_agent_start. Route away
+    // from Auto's inert placeholder during that preflight so summarization uses
+    // a real model instead of http://127.0.0.1:0.
+    if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
+    if (!autoActive) {
+      autoActive = true;
+      pinnedTier = tierFromModelId(ctx.model.id);
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
+      publishFooter();
+    }
+    await routeForCompaction(pi, ctx);
+  });
 
   async function reconcileAllProviders(
     modelRegistry: ModelRegistry,
