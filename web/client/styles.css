@@ -741,8 +741,8 @@ details[open] > summary .semantic-tool-chevron {
   padding-top: 0.65rem;
 }
 .semantic-edit-diff {
-  min-width: max-content;
-  overflow: hidden;
+  max-width: 100%;
+  overflow-x: auto;
   border-radius: 0.4rem;
   background: rgb(9 9 11 / 0.7);
 }

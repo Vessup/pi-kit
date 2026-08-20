@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { RpcSessionCommand } from "../protocol.js";
 import { SerializedWriter } from "./serialized-writer.js";
 
@@ -65,6 +66,43 @@ export function rpcDeliveryError(command: string, message: string): Error {
     : new Error(message);
 }
 
+let cachedRpcCommand: string[] | undefined;
+
+/**
+ * Command that starts a managed RPC Pi runtime.
+ *
+ * The daemon must spawn the exact `@earendil-works/pi-coding-agent` build it
+ * itself imports (session-file formats and RPC behavior move together), not
+ * whatever `pi` happens to be first on PATH — an upgraded global `pi` can
+ * otherwise reject the daemon's session files or load extensions
+ * differently, which silently dropped every package extension (including the
+ * Auto Router provider) from managed web sessions. `rpc-entry` hardcodes
+ * `--mode rpc`, so the mode flag is intentionally absent from the rest of
+ * the command. Running it under this daemon's own Bun binary keeps
+ * TypeScript extension loading identical to the daemon's. `PI_WEB_RPC_BIN`
+ * overrides the executable for tests and wrapper setups.
+ */
+function rpcSessionCommand(): string[] {
+  if (cachedRpcCommand) return cachedRpcCommand;
+  const override = process.env.PI_WEB_RPC_BIN?.trim();
+  let command: string[];
+  if (override) {
+    command = [override, "--mode", "rpc"];
+  } else {
+    try {
+      const entry = fileURLToPath(
+        import.meta.resolve("@earendil-works/pi-coding-agent/rpc-entry"),
+      );
+      command = [process.execPath, entry];
+    } catch {
+      // Fall back to PATH resolution when the package entry cannot be resolved.
+      command = ["pi", "--mode", "rpc"];
+    }
+  }
+  cachedRpcCommand = command;
+  return command;
+}
+
 export class ManagedRpcSession {
   private readonly options: ManagedRpcSessionOptions;
   private process: Bun.Subprocess | undefined;
@@ -121,11 +159,11 @@ export class ManagedRpcSession {
     if (this.options.runtimeDirectory)
       mkdirSync(this.options.runtimeDirectory, { recursive: true });
     const env = { ...process.env, PI_WEB_MANAGED: "1" };
-    const args = ["--mode", "rpc"];
+    const args: string[] = [];
     if (this.options.noSession) args.push("--no-session");
     if (this.options.name) args.push("--name", this.options.name);
     const proc = Bun.spawn({
-      cmd: ["pi", ...args],
+      cmd: [...rpcSessionCommand(), ...args],
       cwd: this.options.cwd,
       env,
       stdin: "pipe",
