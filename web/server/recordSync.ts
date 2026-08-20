@@ -24,6 +24,35 @@ export function createRecordSync(options: {
     zeroWebUsage,
   } = catalog;
 
+  function restoreAutoRouteFromScan(
+    record: SessionRecord,
+    scan: ReturnType<typeof parseSessionMetadataFile>,
+  ): boolean {
+    const selectedModel = selectedModelReference(record);
+    if (
+      !scan ||
+      !isAutoModelReference(selectedModel) ||
+      scan.session.selectedModel !== selectedModel ||
+      typeof scan.session.lastModel !== "string"
+    )
+      return false;
+    if (record.lastModel === scan.session.lastModel) return false;
+    record.lastModel = scan.session.lastModel;
+    return true;
+  }
+
+  function restoreAutoRouteFromSessionFile(
+    record: SessionRecord,
+    file: string,
+  ): boolean {
+    if (
+      record.file &&
+      normalizePath(record.file) !== normalizePath(file)
+    )
+      return false;
+    return restoreAutoRouteFromScan(record, parseSessionMetadataFile(file));
+  }
+
   function updateRecordFromState(
     record: SessionRecord,
     state: unknown,
@@ -35,6 +64,7 @@ export function createRecordSync(options: {
       expectedModelTurnGeneration === undefined ||
       (record.modelTurnGeneration ?? 0) === expectedModelTurnGeneration;
     const model = s.model as Record<string, unknown> | null | undefined;
+    let metadataScan: ReturnType<typeof parseSessionMetadataFile> | undefined;
     if (modelStateIsCurrent && model && typeof model.id === "string") {
       const runtimeModel =
         typeof model.provider === "string" && model.provider
@@ -79,11 +109,29 @@ export function createRecordSync(options: {
     if (typeof s.sessionFile === "string") {
       record.file = s.sessionFile;
       runtime.sessionsByFile.set(normalizePath(s.sessionFile), record);
-      const scan = parseSessionMetadataFile(s.sessionFile);
-      if (scan?.session.cwd) record.cwd = scan.session.cwd;
-      if (scan?.managedWorktreeScanned)
-        record.managedWorktree = scan.session.managedWorktree;
+      metadataScan = parseSessionMetadataFile(s.sessionFile);
+      if (metadataScan?.session.cwd) record.cwd = metadataScan.session.cwd;
+      if (metadataScan?.managedWorktreeScanned)
+        record.managedWorktree = metadataScan.session.managedWorktree;
     }
+    const runtimeModelIsAuto =
+      !model ||
+      typeof model.id !== "string" ||
+      isAutoModelReference(
+        typeof model.provider === "string" && model.provider
+          ? `${model.provider}/${model.id}`
+          : model.id,
+      );
+    // A fast Auto turn can finish before its turn-start getState() resolves.
+    // In that case the current snapshot may already be the restored placeholder,
+    // but the session file still records the concrete model transition. Fold that
+    // durable route back into the live record instead of losing the completed turn.
+    if (
+      record.autoTurnSettling === true &&
+      (!modelStateIsCurrent || runtimeModelIsAuto) &&
+      metadataScan
+    )
+      restoreAutoRouteFromScan(record, metadataScan);
     if (typeof s.sessionId === "string") record.id = s.sessionId;
     record.name =
       typeof s.sessionName === "string" && s.sessionName
@@ -279,6 +327,7 @@ export function createRecordSync(options: {
 
   return {
     updateRecordFromState,
+    restoreAutoRouteFromSessionFile,
     beginTurnModelTracking,
     finishTurnModelTracking,
     updateRecordFromStats,

@@ -94,6 +94,7 @@ export function createManagedSessionLauncher(options: {
   const { replaceRecordHistory, appendRecordHistory } = history;
   const {
     updateRecordFromState,
+    restoreAutoRouteFromSessionFile,
     beginTurnModelTracking,
     finishTurnModelTracking,
     updateRecordFromStats,
@@ -211,18 +212,37 @@ export function createManagedSessionLauncher(options: {
               .then((state) => {
                 if (
                   runtime.sessions.get(record.id) !== record ||
-                  record.managed !== managedAtTurnStart ||
-                  record.modelTurnGeneration !== generation ||
-                  !record.autoTurnActive
+                  record.managed !== managedAtTurnStart
                 )
                   return;
                 const snapshot = isRecord(state) ? state : {};
+                if (
+                  record.modelTurnGeneration !== generation ||
+                  !record.autoTurnActive
+                ) {
+                  // A very fast Auto turn can restore its placeholder before
+                  // this asynchronous getState() resolves. The live snapshot is
+                  // stale, but the session file still contains the concrete
+                  // model transition, so recover only that durable metadata
+                  // before discarding the stale state.
+                  if (
+                    record.autoTurnSettling === true &&
+                    typeof snapshot.sessionFile === "string" &&
+                    restoreAutoRouteFromSessionFile(
+                      record,
+                      snapshot.sessionFile,
+                    )
+                  )
+                    broadcastSessionToAll(record);
+                  return;
+                }
                 updateRecordFromState(
                   record,
                   {
                     model: snapshot.model,
                     thinkingLevel: snapshot.thinkingLevel,
                     sessionName: snapshot.sessionName,
+                    sessionFile: snapshot.sessionFile,
                   },
                   generation,
                 );

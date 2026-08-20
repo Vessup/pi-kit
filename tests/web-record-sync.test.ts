@@ -7,12 +7,15 @@ import type {
 } from "../web/server/server-types.ts";
 import type { ServerRuntimeState } from "../web/server/serverRuntimeState.ts";
 
-function recordSync() {
+function recordSync(
+  parseSessionMetadataFile: SessionFileCatalog["parseSessionMetadataFile"] =
+    () => undefined,
+) {
   const catalog = {
     isRecord: (value: unknown): value is Record<string, unknown> =>
       typeof value === "object" && value !== null,
     normalizePath: (value: string) => value,
-    parseSessionMetadataFile: () => undefined,
+    parseSessionMetadataFile,
     toNumber: (value: unknown, fallback = 0) =>
       typeof value === "number" ? value : fallback,
     zeroWebUsage: () => ({
@@ -104,6 +107,70 @@ test("session merges preserve only the current Auto selection's route", () => {
       lastModel: null,
     }),
   ).toBeUndefined();
+});
+
+test("a stale turn-start snapshot recovers the routed model from session metadata", () => {
+  const sync = recordSync(() => ({
+    session: {
+      selectedModel: "auto/auto",
+      lastModel: "provider/routed",
+    },
+  }) as ReturnType<SessionFileCatalog["parseSessionMetadataFile"]>);
+  const record = {
+    id: "session-1",
+    model: "auto/auto",
+    selectedModel: "auto/auto",
+    modelTurnGeneration: 2,
+    autoTurnActive: true,
+    autoTurnSettling: true,
+    status: "idle",
+  } as unknown as SessionRecord;
+
+  sync.updateRecordFromState(
+    record,
+    {
+      model: { provider: "auto", id: "auto" },
+      sessionFile: "/tmp/session.jsonl",
+    },
+    1,
+  );
+
+  expect(record).toMatchObject({
+    model: "auto/auto",
+    selectedModel: "auto/auto",
+    lastModel: "provider/routed",
+    modelTurnGeneration: 2,
+  });
+});
+
+test("durable recovery cannot replace a route from a newer turn", () => {
+  const sync = recordSync(() => ({
+    session: {
+      selectedModel: "auto/auto",
+      lastModel: "provider/older",
+    },
+  }) as ReturnType<SessionFileCatalog["parseSessionMetadataFile"]>);
+  const record = {
+    id: "session-1",
+    model: "auto/auto",
+    selectedModel: "auto/auto",
+    lastModel: "provider/newer",
+    modelTurnGeneration: 2,
+    autoTurnActive: true,
+    autoTurnSettling: false,
+    status: "working",
+  } as unknown as SessionRecord;
+
+  sync.updateRecordFromState(
+    record,
+    {
+      model: { provider: "auto", id: "auto" },
+      sessionFile: "/tmp/session.jsonl",
+    },
+    1,
+  );
+
+  expect(record.lastModel).toBe("provider/newer");
 });
 
 test("a stale refresh cannot cancel Auto tracking for a newer turn", () => {
