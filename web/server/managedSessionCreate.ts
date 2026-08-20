@@ -11,7 +11,10 @@ import type {
   ServerSessionMessage,
 } from "../protocol.js";
 import type { ClientBroadcast } from "./clientBroadcast.js";
-import type { CompactionNotice } from "./compactionNotice.js";
+import {
+  type CompactionNotice,
+  isSuccessfulCompactionEnd,
+} from "./compactionNotice.js";
 import type { GitMetadata } from "./gitMetadata.js";
 import type { ManagedSessionRefresh } from "./managedSessionRefresh.js";
 import {
@@ -328,7 +331,10 @@ export function createManagedSessionLauncher(options: {
             record.compactionHistoryRefresh = refresh;
           }
         }
-        if (event.type === "compaction_end" && event.aborted !== true) {
+        if (
+          event.type === "compaction_end" &&
+          isSuccessfulCompactionEnd(event)
+        ) {
           broadcastCompactionNotice(record);
         }
         broadcastToSessionClients(record.id, {

@@ -9,7 +9,10 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import autoRouter, { escapeTableCell } from "../extensions/auto-router.ts";
+import autoRouter, {
+  AUTO_ROUTER_COMPACTION_EVENT,
+  escapeTableCell,
+} from "../extensions/auto-router.ts";
 import type { AutoRouterSettings } from "../extensions/auto-router-settings.ts";
 
 test("escapeTableCell neutralizes both pipes and line breaks, so one bad reply can't break the rest of the table", () => {
@@ -71,6 +74,7 @@ type FakePi = {
   pi: ExtensionAPI;
   fire: (event: string, payload: unknown, ctx: unknown) => Promise<unknown>;
   runCommand: (name: string, args: string, ctx: unknown) => Promise<void>;
+  emitEvent: (event: string, value: unknown) => void;
   setModelCalls: Model<Api>[];
   thinkingLevelCalls: string[];
   appendedEntries: Array<{ type: string; data: unknown }>;
@@ -85,7 +89,13 @@ function createFakePi(): FakePi {
   const thinkingLevelCalls: string[] = [];
   const appendedEntries: Array<{ type: string; data: unknown }> = [];
   const footerEvents: unknown[] = [];
+  const eventHandlers = new Map<string, (value: unknown) => void>();
   const currentModel: ModelRef = { value: undefined };
+  const emitEvent = (event: string, value: unknown) => {
+    const handler = eventHandlers.get(event);
+    if (handler) handler(value);
+    else footerEvents.push(value);
+  };
 
   const pi = {
     registerProvider: () => undefined,
@@ -99,7 +109,13 @@ function createFakePi(): FakePi {
     appendEntry: (type: string, data: unknown) => {
       appendedEntries.push({ type, data });
     },
-    events: { emit: (_event: string, value: unknown) => footerEvents.push(value), on: () => () => undefined },
+    events: {
+      emit: emitEvent,
+      on: (event: string, handler: (value: unknown) => void) => {
+        eventHandlers.set(event, handler);
+        return () => eventHandlers.delete(event);
+      },
+    },
     setModel: async (m: Model<Api>) => {
       setModelCalls.push(m);
       currentModel.value = m;
@@ -122,6 +138,7 @@ function createFakePi(): FakePi {
       if (!command) throw new Error(`no command registered: ${name}`);
       await command.handler(args, ctx as ExtensionCommandContext);
     },
+    emitEvent,
     setModelCalls,
     thinkingLevelCalls,
     appendedEntries,
@@ -224,6 +241,39 @@ test("selecting Auto marks it active without eagerly routing, showing the adapti
   expect(fake.setModelCalls).toEqual([]);
   expect(fake.thinkingLevelCalls).toEqual([]);
   expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
+});
+
+test("Auto routes manual compaction away from its inert placeholder and restores it afterward", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const runAction = async (action: "route" | "restore") => {
+    const operations: Promise<void>[] = [];
+    fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+      action,
+      ctx,
+      waitUntil: (operation: Promise<void>) => operations.push(operation),
+    });
+    await Promise.all(operations);
+  };
+
+  await runAction("route");
+  expect(fake.currentModel.value?.provider).toBe("prov");
+  expect(fake.currentModel.value?.id).toBe("model-a");
+  await runAction("restore");
+  expect(fake.currentModel.value?.provider).toBe("auto");
+  expect(fake.currentModel.value?.id).toBe("auto");
 });
 
 test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immediately, before any turn runs", async () => {

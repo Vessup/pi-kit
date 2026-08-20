@@ -157,7 +157,8 @@ type SemanticSessionProps = {
   streamingMessage: Record<string, unknown> | null;
   streamingMessageKey: string | null;
   tools: ActiveTool[];
-  error: string | null;
+  sessionError: string | null;
+  onDismissSessionError: () => void;
   connected: boolean;
   transcriptLoading: boolean;
   queuedMessages: WebQueuedMessage[];
@@ -711,7 +712,7 @@ function CompactionStatus({ session }: { session: WebSession }) {
         : "Compacting context…";
   return (
     <output className="semantic-compaction-status">
-      <LoaderCircle className="h-4 w-4 animate-spin" />
+      <ContextProgressCircle session={session} interactive={false} />
       <div>
         <strong>{title}</strong>
         <small>
@@ -768,7 +769,13 @@ const ComposerTokenInfo = React.memo(
 );
 
 const ContextProgressCircle = React.memo(
-  function ContextProgressCircle({ session }: { session: WebSession | null }) {
+  function ContextProgressCircle({
+    session,
+    interactive = true,
+  }: {
+    session: WebSession | null;
+    interactive?: boolean;
+  }) {
     const context = session?.contextUsage;
     const contextTokens = context?.tokens ?? 0;
     const rawPercent =
@@ -791,35 +798,42 @@ const ContextProgressCircle = React.memo(
     const label = compacting
       ? `Compacting context, ${contextText}`
       : `Context usage ${contextText}`;
+    const className = cn(
+      "semantic-context-progress",
+      !interactive && "is-decorative",
+      compacting && "is-compacting",
+      !compacting && percent >= 90 && "is-critical",
+      !compacting && percent >= 70 && percent < 90 && "is-warning",
+    );
+    const ring = (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <circle
+          className="semantic-context-progress-track"
+          cx="10"
+          cy="10"
+          r={radius}
+        />
+        <circle
+          className="semantic-context-progress-value"
+          cx="10"
+          cy="10"
+          r={radius}
+          strokeDasharray={`${dash} ${circumference - dash}`}
+        />
+      </svg>
+    );
+    if (!interactive)
+      return (
+        <span className={className} aria-hidden="true">
+          {ring}
+        </span>
+      );
     return (
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
-            <button
-              type="button"
-              className={cn(
-                "semantic-context-progress",
-                compacting && "is-compacting",
-                !compacting && percent >= 90 && "is-critical",
-                !compacting && percent >= 70 && percent < 90 && "is-warning",
-              )}
-              aria-label={label}
-            >
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <circle
-                  className="semantic-context-progress-track"
-                  cx="10"
-                  cy="10"
-                  r={radius}
-                />
-                <circle
-                  className="semantic-context-progress-value"
-                  cx="10"
-                  cy="10"
-                  r={radius}
-                  strokeDasharray={`${dash} ${circumference - dash}`}
-                />
-              </svg>
+            <button type="button" className={className} aria-label={label}>
+              {ring}
             </button>
           </TooltipTrigger>
           <TooltipContent side="top">
@@ -834,6 +848,7 @@ const ContextProgressCircle = React.memo(
     );
   },
   (previous, next) =>
+    previous.interactive === next.interactive &&
     previous.session?.id === next.session?.id &&
     previous.session?.contextUsage?.tokens ===
       next.session?.contextUsage?.tokens &&
@@ -1823,7 +1838,8 @@ export function SemanticSession({
   streamingMessage,
   streamingMessageKey: providedStreamingMessageKey,
   tools,
-  error,
+  sessionError,
+  onDismissSessionError,
   connected,
   transcriptLoading,
   queuedMessages,
@@ -1838,8 +1854,7 @@ export function SemanticSession({
 }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
-  const [sendError, setSendError] = React.useState<string | null>(null);
-  const [sendNotice, setSendNotice] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
   const [aborting, setAborting] = React.useState(false);
   const [draggingAttachments, setDraggingAttachments] = React.useState(false);
@@ -1855,6 +1870,14 @@ export function SemanticSession({
   const [steeringQueueId, setSteeringQueueId] = React.useState<string | null>(
     null,
   );
+  const reportActionError = React.useCallback((cause: unknown) => {
+    setActionError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+  React.useEffect(() => {
+    if (!actionError) return;
+    const timer = window.setTimeout(() => setActionError(null), 8_000);
+    return () => window.clearTimeout(timer);
+  }, [actionError]);
   const queueSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, {
@@ -2107,7 +2130,6 @@ export function SemanticSession({
   }, [captureViewportAnchor, maintainLockedScrollExtent, updateScrollButton]);
 
   React.useEffect(() => {
-    setSendNotice(null);
     setAborting(false);
   }, []);
 
@@ -2397,9 +2419,9 @@ export function SemanticSession({
         });
       }
       setImages(combined);
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     } finally {
       requestAnimationFrame(() =>
         textareaRef.current?.focus({ preventScroll: true }),
@@ -2426,9 +2448,14 @@ export function SemanticSession({
   };
 
   const removeQueuedMessage = async (item: WebQueuedMessage) => {
-    await onReplaceQueue(
-      queuedMessages.filter((queued) => queued.id !== item.id),
-    );
+    try {
+      await onReplaceQueue(
+        queuedMessages.filter((queued) => queued.id !== item.id),
+      );
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
+    }
   };
 
   const steerQueuedMessage = async (item: WebQueuedMessage) => {
@@ -2437,9 +2464,9 @@ export function SemanticSession({
     try {
       await onSteerQueuedMessage(item.id);
       if (editingQueueId === item.id) finishQueueEditing();
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     } finally {
       setSteeringQueueId(null);
     }
@@ -2456,9 +2483,9 @@ export function SemanticSession({
     if (!window.confirm(`Confirm ${verb}?`)) return;
     try {
       await onReconcileQueue(item.id, action);
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     }
   };
 
@@ -2478,9 +2505,9 @@ export function SemanticSession({
     const next = moveWebQueuedMessage(queuedMessages, activeId, placement);
     try {
       await onReplaceQueue(next);
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     }
   };
 
@@ -2489,9 +2516,9 @@ export function SemanticSession({
     try {
       await onSelectModel(provider, modelId);
       setModelMenuOpen(false);
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     } finally {
       setControlBusy(false);
       requestAnimationFrame(() =>
@@ -2505,9 +2532,9 @@ export function SemanticSession({
     try {
       await onSelectThinkingLevel(level);
       setModelMenuOpen(false);
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     } finally {
       setControlBusy(false);
       requestAnimationFrame(() =>
@@ -2625,14 +2652,11 @@ export function SemanticSession({
   const requestAbort = async () => {
     if (!session || aborting) return;
     setAborting(true);
-    setSendError(null);
-    setSendNotice("Stopping…");
     try {
       await onAbort();
-      setSendNotice("Stop requested");
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
-      setSendNotice(null);
+      reportActionError(cause);
       setAborting(false);
     }
   };
@@ -2653,11 +2677,10 @@ export function SemanticSession({
         streamingBehavior: behavior,
       });
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
       return;
     }
     setSending(true);
-    setSendNotice(null);
     try {
       if (editingQueueId) {
         await onReplaceQueue(
@@ -2700,9 +2723,9 @@ export function SemanticSession({
           throw cause;
         }
       }
-      setSendError(null);
+      setActionError(null);
     } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : String(cause));
+      reportActionError(cause);
     } finally {
       setSending(false);
     }
@@ -2716,6 +2739,27 @@ export function SemanticSession({
           if (!open) setSelectedSubagentId(null);
         }}
       />
+      {(actionError || sessionError) && (
+        <div
+          role="alert"
+          className="absolute right-4 top-4 z-40 flex max-w-[min(28rem,calc(100%-2rem))] items-start gap-3 rounded-lg border border-red-400/30 bg-red-950/95 px-3 py-2 text-sm text-red-100 shadow-xl backdrop-blur"
+        >
+          <span className="min-w-0 flex-1 break-words">
+            {actionError ?? sessionError}
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            className="mt-0.5 shrink-0 text-red-200/70 hover:text-red-100"
+            onClick={() => {
+              if (actionError) setActionError(null);
+              else onDismissSessionError();
+            }}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {/* biome-ignore lint/a11y/noStaticElementInteractions: this is a custom scroll container with wheel/touch tracking, not a clickable element; role="region" would force an aria-label and tabIndex that don't fit the layout. */}
       <div
         ref={scrollRef}
@@ -3452,12 +3496,6 @@ export function SemanticSession({
               </div>
             </div>
           </div>
-          {(sendError || error) && (
-            <p className="mt-2 text-sm text-red-300">{sendError ?? error}</p>
-          )}
-          {!sendError && !error && sendNotice && (
-            <output className="mt-2 text-sm text-zinc-400">{sendNotice}</output>
-          )}
         </div>
       </div>
     </section>

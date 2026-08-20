@@ -2864,7 +2864,8 @@ export function App() {
               streamingMessage={streamingMessage}
               streamingMessageKey={streamingMessageKey}
               tools={activeTools}
-              error={error}
+              sessionError={error}
+              onDismissSessionError={() => setError(null)}
               connected={connected}
               transcriptLoading={transcriptLoading}
               queuedMessages={queuedMessages}
