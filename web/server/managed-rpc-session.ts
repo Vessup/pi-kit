@@ -181,7 +181,7 @@ export class ManagedRpcSession {
     });
     this.process = proc;
     void this.pumpStdout(proc).catch((error) => {
-      this.failAllPending(
+      this.failRuntimeOperations(
         error instanceof Error ? error : new Error(String(error)),
       );
     });
@@ -197,7 +197,9 @@ export class ManagedRpcSession {
         const detail = this.stderrTail.trim();
         if (detail && (!expected || code !== 0))
           console.error(`RPC process exited with code ${code}: ${detail}`);
-        this.failAllPending(new Error(`RPC process exited with code ${code}`));
+        this.failRuntimeOperations(
+          new Error(`RPC process exited with code ${code}`),
+        );
       })
       .catch((error: unknown) => {
         this.started = false;
@@ -207,7 +209,7 @@ export class ManagedRpcSession {
           null,
           error instanceof Error ? error.message : String(error),
         );
-        this.failAllPending(
+        this.failRuntimeOperations(
           error instanceof Error ? error : new Error(String(error)),
         );
       });
@@ -424,6 +426,11 @@ export class ManagedRpcSession {
     }
   }
 
+  private failRuntimeOperations(error: Error): void {
+    this.failAllPending(error);
+    this.rejectCompactCompletion(error);
+  }
+
   private async waitForPendingRequests(): Promise<void> {
     const deadline = Date.now() + RPC_REQUEST_TIMEOUT_MS;
     while (this.pending.size > 0) {
@@ -631,11 +638,14 @@ export class ManagedRpcSession {
       ? `/${WEB_COMPACT_EXTENSION_COMMAND} ${JSON.stringify(customInstructions)}`
       : `/${WEB_COMPACT_EXTENSION_COMMAND}`;
     try {
-      await this.send(
-        { type: "prompt", message },
-        LONG_RUNNING_COMMAND_TIMEOUT_MS,
-      );
-      return await completion;
+      const [, result] = await Promise.all([
+        this.send(
+          { type: "prompt", message },
+          LONG_RUNNING_COMMAND_TIMEOUT_MS,
+        ),
+        completion,
+      ]);
+      return result;
     } catch (error) {
       this.rejectCompactCompletion(
         error instanceof Error ? error : new Error(String(error)),
@@ -780,7 +790,10 @@ export class ManagedRpcSession {
 
   private async shutdownOnce(): Promise<void> {
     const proc = this.process;
-    if (!proc || this.stopped) return;
+    if (!proc || this.stopped) {
+      this.failRuntimeOperations(new Error("RPC session stopped"));
+      return;
+    }
     try {
       // Shutdown only needs confirmed stdin delivery, not an RPC response. A
       // wedged child may never acknowledge abort and must not hold deletion or
@@ -790,7 +803,7 @@ export class ManagedRpcSession {
       // Process termination remains the authoritative shutdown fallback.
     }
     this.stopped = true;
-    this.failAllPending(new Error("RPC session stopped"));
+    this.failRuntimeOperations(new Error("RPC session stopped"));
     try {
       proc.kill("SIGTERM");
     } catch {

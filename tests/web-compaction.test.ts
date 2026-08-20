@@ -1,34 +1,38 @@
 import { expect, test } from "bun:test";
+import { isPrivateWebSessionCommand } from "../web/compact-command.ts";
 import { isSuccessfulCompactionEnd } from "../web/server/compactionNotice.ts";
 import { ManagedRpcSession } from "../web/server/managed-rpc-session.ts";
 
-test("managed web compaction waits for the compaction_end event", async () => {
+type FakeManagedRuntime = {
+  started: boolean;
+  stopped: boolean;
+  process: {
+    stdin: {
+      write: (value: string | Uint8Array) => Promise<void>;
+    };
+    exited: Promise<number>;
+    kill: () => void;
+  };
+  handleLine: (line: string) => void;
+};
+
+function fakeManagedCompaction(onPrompt: (runtime: FakeManagedRuntime) => void) {
   const session = new ManagedRpcSession({
     cwd: process.cwd(),
     onEvent: () => undefined,
     onExit: () => undefined,
   });
-  const runtime = session as unknown as {
-    started: boolean;
-    stopped: boolean;
-    process: {
-      stdin: {
-        write: (value: string | Uint8Array) => Promise<void>;
-      };
-    };
-    handleLine: (line: string) => void;
-  };
+  const runtime = session as unknown as FakeManagedRuntime;
   runtime.started = true;
   runtime.stopped = false;
   runtime.process = {
+    exited: Promise.resolve(0),
+    kill: () => undefined,
     stdin: {
       write: async (value) => {
         const text =
           typeof value === "string" ? value : new TextDecoder().decode(value);
-        const request = JSON.parse(text) as {
-          id: string;
-          type: string;
-        };
+        const request = JSON.parse(text) as { id: string; type: string };
         if (request.type === "get_commands") {
           queueMicrotask(() =>
             runtime.handleLine(
@@ -53,33 +57,37 @@ test("managed web compaction waits for the compaction_end event", async () => {
               success: true,
             }),
           );
-          setTimeout(
-            () =>
-              runtime.handleLine(
-                JSON.stringify({
-                  type: "compaction_start",
-                  reason: "manual",
-                }),
-              ),
-            10,
-          );
-          setTimeout(
-            () =>
-              runtime.handleLine(
-                JSON.stringify({
-                  type: "compaction_end",
-                  reason: "manual",
-                  aborted: false,
-                  willRetry: false,
-                  result: { summary: "done" },
-                }),
-              ),
-            60,
-          );
+          onPrompt(runtime);
         });
       },
     },
   };
+  return session;
+}
+
+test("managed web compaction waits for the compaction_end event", async () => {
+  const session = fakeManagedCompaction((runtime) => {
+    setTimeout(
+      () =>
+        runtime.handleLine(
+          JSON.stringify({ type: "compaction_start", reason: "manual" }),
+        ),
+      10,
+    );
+    setTimeout(
+      () =>
+        runtime.handleLine(
+          JSON.stringify({
+            type: "compaction_end",
+            reason: "manual",
+            aborted: false,
+            willRetry: false,
+            result: { summary: "done" },
+          }),
+        ),
+      60,
+    );
+  });
 
   let settled = false;
   const compacting = session.compact("instructions").then((result) => {
@@ -89,6 +97,21 @@ test("managed web compaction waits for the compaction_end event", async () => {
   await Bun.sleep(25);
   expect(settled).toBe(false);
   expect(await compacting).toEqual({ summary: "done" });
+});
+
+test("managed web compaction rejects immediately when its runtime shuts down", async () => {
+  const session = fakeManagedCompaction(() => undefined);
+  const compacting = session.compact();
+  await Bun.sleep(10);
+
+  await session.shutdown();
+  await expect(compacting).rejects.toThrow("RPC session stopped");
+});
+
+test("private compaction transport stays out of slash-command discovery", () => {
+  expect(isPrivateWebSessionCommand("web-compact")).toBe(true);
+  expect(isPrivateWebSessionCommand("web-reload")).toBe(true);
+  expect(isPrivateWebSessionCommand("compact")).toBe(false);
 });
 
 test("compaction failures do not look like successful completions", () => {

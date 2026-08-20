@@ -1861,6 +1861,7 @@ export function SemanticSession({
 }: SemanticSessionProps) {
   const [draft, setDraft] = React.useState(() => loadSessionDraft(session?.id));
   const [images, setImages] = React.useState<SemanticImage[]>([]);
+  const [actionError, setActionError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
   const [aborting, setAborting] = React.useState(false);
   const [draggingAttachments, setDraggingAttachments] = React.useState(false);
@@ -1876,6 +1877,14 @@ export function SemanticSession({
   const [steeringQueueId, setSteeringQueueId] = React.useState<string | null>(
     null,
   );
+  const reportActionError = React.useCallback((cause: unknown) => {
+    setActionError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+  React.useEffect(() => {
+    if (!actionError) return;
+    const timer = window.setTimeout(() => setActionError(null), 8_000);
+    return () => window.clearTimeout(timer);
+  }, [actionError]);
   const queueSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, {
@@ -2417,7 +2426,9 @@ export function SemanticSession({
         });
       }
       setImages(combined);
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     } finally {
       requestAnimationFrame(() =>
         textareaRef.current?.focus({ preventScroll: true }),
@@ -2444,9 +2455,14 @@ export function SemanticSession({
   };
 
   const removeQueuedMessage = async (item: WebQueuedMessage) => {
-    await onReplaceQueue(
-      queuedMessages.filter((queued) => queued.id !== item.id),
-    );
+    try {
+      await onReplaceQueue(
+        queuedMessages.filter((queued) => queued.id !== item.id),
+      );
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
+    }
   };
 
   const steerQueuedMessage = async (item: WebQueuedMessage) => {
@@ -2455,7 +2471,9 @@ export function SemanticSession({
     try {
       await onSteerQueuedMessage(item.id);
       if (editingQueueId === item.id) finishQueueEditing();
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     } finally {
       setSteeringQueueId(null);
     }
@@ -2472,7 +2490,9 @@ export function SemanticSession({
     if (!window.confirm(`Confirm ${verb}?`)) return;
     try {
       await onReconcileQueue(item.id, action);
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     }
   };
 
@@ -2492,7 +2512,9 @@ export function SemanticSession({
     const next = moveWebQueuedMessage(queuedMessages, activeId, placement);
     try {
       await onReplaceQueue(next);
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     }
   };
 
@@ -2501,7 +2523,9 @@ export function SemanticSession({
     try {
       await onSelectModel(provider, modelId);
       setModelMenuOpen(false);
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     } finally {
       setControlBusy(false);
       requestAnimationFrame(() =>
@@ -2515,7 +2539,9 @@ export function SemanticSession({
     try {
       await onSelectThinkingLevel(level);
       setModelMenuOpen(false);
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     } finally {
       setControlBusy(false);
       requestAnimationFrame(() =>
@@ -2616,7 +2642,9 @@ export function SemanticSession({
     setAborting(true);
     try {
       await onAbort();
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
       setAborting(false);
     }
   };
@@ -2636,7 +2664,8 @@ export function SemanticSession({
         images,
         streamingBehavior: behavior,
       });
-    } catch {
+    } catch (cause) {
+      reportActionError(cause);
       return;
     }
     setSending(true);
@@ -2682,7 +2711,9 @@ export function SemanticSession({
           throw cause;
         }
       }
-    } catch {
+      setActionError(null);
+    } catch (cause) {
+      reportActionError(cause);
     } finally {
       setSending(false);
     }
@@ -2696,6 +2727,22 @@ export function SemanticSession({
           if (!open) setSelectedSubagentId(null);
         }}
       />
+      {actionError && (
+        <div
+          role="alert"
+          className="absolute right-4 top-4 z-40 flex max-w-[min(28rem,calc(100%-2rem))] items-start gap-3 rounded-lg border border-red-400/30 bg-red-950/95 px-3 py-2 text-sm text-red-100 shadow-xl backdrop-blur"
+        >
+          <span className="min-w-0 flex-1 break-words">{actionError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            className="mt-0.5 shrink-0 text-red-200/70 hover:text-red-100"
+            onClick={() => setActionError(null)}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {/* biome-ignore lint/a11y/noStaticElementInteractions: this is a custom scroll container with wheel/touch tracking, not a clickable element; role="region" would force an aria-label and tabIndex that don't fit the layout. */}
       <div
         ref={scrollRef}

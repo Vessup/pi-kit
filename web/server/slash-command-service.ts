@@ -1,4 +1,7 @@
-import { includeWebCompactCommand } from "../compact-command.js";
+import {
+  includeWebCompactCommand,
+  isPrivateWebSessionCommand,
+} from "../compact-command.js";
 import type { WebSlashCommand } from "../protocol.js";
 import type { ExpandableSlashCommand } from "../slash-commands.js";
 import type { ManagedRpcSession } from "./managed-rpc-session.js";
@@ -134,7 +137,7 @@ export class SlashCommandService {
     const visible: WebSlashCommand[] = commands
       .filter(
         (command) =>
-          command.name !== "web-reload" &&
+          !isPrivateWebSessionCommand(command.name) &&
           (includeExtensions ||
             command.source === "prompt" ||
             command.source === "skill" ||

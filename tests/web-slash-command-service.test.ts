@@ -101,13 +101,25 @@ test("slash command discovery is bounded and shutdown cannot mask the timeout", 
   );
 });
 
-test("slash command projection reuses the compact fallback", () => {
+test("slash command projection reuses fallbacks and hides private transports", () => {
   const service = new SlashCommandService(
     (path) => path,
     () => ({}) as ManagedRpcSession,
   );
-  expect(service.toWeb([]).map((command) => command.name)).toEqual([
-    "compact",
-    "reload",
-  ]);
+  const sourceInfo = { path: "web-sessions.ts", scope: "temporary" as const };
+  expect(
+    service
+      .toWeb(
+        [
+          {
+            name: "web-compact",
+            source: "extension",
+            sourceInfo,
+          },
+          { name: "web-reload", source: "extension", sourceInfo },
+        ],
+        true,
+      )
+      .map((command) => command.name),
+  ).toEqual(["compact", "reload"]);
 });
