@@ -110,6 +110,7 @@ import {
   TooltipTrigger,
 } from "./components/ui/tooltip";
 import {
+  autoTierFromReference,
   isAutoModelReference,
   selectedModelReference,
 } from "../model-status";
@@ -2627,12 +2628,17 @@ export function SemanticSession({
   const selectedModelRef = selectedModelReference(session ?? {});
   const selectedModelIdLabel = selectedModelRef?.split("/").pop() ?? "Model";
   const autoSelected = isAutoModelReference(selectedModelRef);
+  const autoTier = autoTierFromReference(selectedModelRef);
   const fallbackModelLabel = autoSelected
-    ? selectedModelRef === "auto/auto"
-      ? "Auto (auto)"
-      : `Auto (${selectedModelRef?.slice("auto/auto-".length) ?? "auto"})`
+    ? `Auto (${autoTier ?? "auto"})`
     : selectedModelIdLabel;
-  const effortLabel = session?.thinkingLevel ?? "off";
+  const rawThinkingLevel = session?.thinkingLevel;
+  const effortLabel =
+    autoSelected
+      ? `(${autoTier ?? "auto"})`
+      : rawThinkingLevel && rawThinkingLevel !== "off"
+        ? rawThinkingLevel
+        : "";
   const availableModels =
     sessionOptions.models.length > 0
       ? sessionOptions.models
@@ -2651,7 +2657,9 @@ export function SemanticSession({
   const selectedModelOption = availableModels.find(
     (model) => `${model.provider}/${model.id}` === selectedModelRef,
   );
-  const modelLabel = selectedModelOption?.name ?? fallbackModelLabel;
+  const modelLabel = autoSelected
+    ? "Auto"
+    : (selectedModelOption?.name ?? fallbackModelLabel);
   const effectiveModelReference =
     autoSelected && session?.model && !isAutoModelReference(session.model)
       ? session.model
@@ -2660,7 +2668,9 @@ export function SemanticSession({
         : undefined;
   const turnModelSummary =
     effectiveModelReference && !isAutoModelReference(effectiveModelReference)
-      ? `${formatModelReference(effectiveModelReference)} · ${effortLabel}`
+      ? effortLabel
+        ? `${formatModelReference(effectiveModelReference)} · ${effortLabel}`
+        : formatModelReference(effectiveModelReference)
       : undefined;
   const availableEfforts =
     sessionOptions.thinkingLevels.length > 0
@@ -3424,18 +3434,22 @@ export function SemanticSession({
                   disabled={controlBusy || !connected}
                   title={
                     turnModelSummary
-                      ? `Selected ${modelLabel}; using ${turnModelSummary}`
+                      ? `Selected ${modelLabel}${effortLabel ? ` ${effortLabel}` : ""}; using ${turnModelSummary}`
                       : undefined
                   }
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => setModelMenuOpen((open) => !open)}
                 >
                   <span className="semantic-model-selection">{modelLabel}</span>
-                  {!autoSelected && (
-                    <>
-                      <span className="text-zinc-600">·</span>
-                      <span>{effortLabel}</span>
-                    </>
+                  {autoSelected ? (
+                    <span>{effortLabel}</span>
+                  ) : (
+                    effortLabel && (
+                      <>
+                        <span className="text-zinc-600">·</span>
+                        <span>{effortLabel}</span>
+                      </>
+                    )
                   )}
                   {turnModelSummary && (
                     <>

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   applyRuntimeModelStatus,
+  autoTierFromReference,
   isAutoModelReference,
   isAutoRuntimeModelSwap,
   lastAutoRoutedModelFromEntries,
@@ -158,4 +159,12 @@ test("the Auto placeholder is selected again after the runtime reverts", () => {
     selectedModel: "auto/auto",
     lastModel: "openai-codex/gpt-5.6-luna",
   });
+});
+
+test("autoTierFromReference resolves adaptive and pinned tiers, but never ordinary models", () => {
+  expect(autoTierFromReference("auto/auto")).toBe("auto");
+  expect(autoTierFromReference("auto/auto-max")).toBe("max");
+  expect(autoTierFromReference("auto/auto-medium")).toBe("medium");
+  expect(autoTierFromReference("anthropic/claude-sonnet")).toBeUndefined();
+  expect(autoTierFromReference(undefined)).toBeUndefined();
 });

@@ -151,3 +151,12 @@ export function applyRuntimeModelStatus(
   else if (!isAutoModelReference(runtimeModel)) delete next.lastModel;
   return next;
 }
+
+/** Pull the Auto tier label out of an `auto/auto-<tier>` reference (or `"auto"` for the adaptive one). */
+export function autoTierFromReference(reference: string | undefined): string | undefined {
+  if (reference === undefined) return undefined;
+  if (!isAutoModelReference(reference)) return undefined;
+  if (reference === "auto/auto") return "auto";
+  const PREFIX = "auto/auto-";
+  return reference.startsWith(PREFIX) ? reference.slice(PREFIX.length) : "auto";
+}
