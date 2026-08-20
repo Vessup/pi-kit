@@ -1,10 +1,17 @@
 import { expect, test } from "bun:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import sessionFooter from "../extensions/session-footer.ts";
+import sessionFooter, { alignSides } from "../extensions/session-footer.ts";
 import {
   FOOTER_CONTRIBUTION_EVENT,
   type FooterContribution,
 } from "../extensions/footer-events.ts";
+
+test("wide model details do not erase footer identity", () => {
+  const line = alignSides("⧉ ~/repo (main)", "Auto (auto) • (provider) very-long-model • high", 24);
+  expect(line).toContain("⧉");
+  expect(visibleWidth(line)).toBeLessThanOrEqual(24);
+});
 
 test("the shared footer places identity, routing, and activity in two rows", () => {
   const hooks = new Map<string, (event: unknown, ctx: unknown) => void>();

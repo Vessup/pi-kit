@@ -12,7 +12,7 @@ import {
 import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { WebSession } from "../protocol.js";
-import { lastConcreteModelFromEntries } from "../model-status.js";
+import { lastAutoRoutedModelFromEntries } from "../model-status.js";
 import {
   replacementFromEntries,
   WORKTREE_REPLACEMENT_ENTRY,
@@ -274,7 +274,7 @@ export function createSessionFileCatalog(options: {
       name,
       model,
       thinkingLevel,
-      lastModel: lastConcreteModelFromEntries(entries),
+      lastModel: lastAutoRoutedModelFromEntries(entries),
       parentSession,
       messageCount,
     };
@@ -460,7 +460,6 @@ export function createSessionFileCatalog(options: {
       let thinkingLevel = incremental
         ? cached.scan.session.thinkingLevel
         : undefined;
-      let lastModel = incremental ? cached.scan.session.lastModel : undefined;
       let messageCount = incremental ? cached.scan.session.messageCount : 0;
       let preview = incremental ? cached.scan.session.preview : undefined;
       const metadataEntries = incremental ? [...cached.metadataEntries] : [];
@@ -482,10 +481,6 @@ export function createSessionFileCatalog(options: {
             typeof entry.provider === "string" && entry.provider
               ? `${entry.provider}/${entry.modelId}`
               : entry.modelId;
-          if (typeof entry.provider === "string") {
-            const reference = `${entry.provider}/${entry.modelId}`;
-            if (!reference.startsWith("auto/")) lastModel = reference;
-          }
         }
         if (
           entry.type === "thinking_level_change" &&
@@ -493,9 +488,11 @@ export function createSessionFileCatalog(options: {
         )
           thinkingLevel = entry.thinkingLevel;
         if (
-          entry.type === "custom" &&
-          (entry.customType === WORKTREE_SESSION_ENTRY ||
-            entry.customType === WORKTREE_REPLACEMENT_ENTRY)
+          (entry.type === "custom" &&
+            (entry.customType === WORKTREE_SESSION_ENTRY ||
+              entry.customType === WORKTREE_REPLACEMENT_ENTRY ||
+              entry.customType === "vessup:auto-router:active")) ||
+          entry.type === "model_change"
         ) {
           metadataEntries.push(entry);
         }
@@ -536,7 +533,7 @@ export function createSessionFileCatalog(options: {
         name,
         model,
         thinkingLevel,
-        lastModel,
+        lastModel: lastAutoRoutedModelFromEntries(metadataEntries),
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
         createdAt: incremental

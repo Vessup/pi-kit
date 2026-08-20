@@ -3,14 +3,25 @@ import {
   applyRuntimeModelStatus,
   isAutoModelReference,
   isAutoRuntimeModelSwap,
-  lastConcreteModelFromEntries,
+  lastAutoRoutedModelFromEntries,
   selectedModelReference,
 } from "../web/model-status";
 
-test("finds the last concrete model in model-change entries", () => {
+test("finds only models Auto actually routed to", () => {
+  const autoEnabled = {
+    type: "custom",
+    customType: "vessup:auto-router:active",
+    data: { enabled: true },
+  };
+  const autoDisabled = {
+    type: "custom",
+    customType: "vessup:auto-router:active",
+    data: { enabled: false },
+  };
   expect(
-    lastConcreteModelFromEntries([
+    lastAutoRoutedModelFromEntries([
       { type: "model_change", provider: "auto", modelId: "auto" },
+      autoEnabled,
       {
         type: "model_change",
         provider: "openai-codex",
@@ -20,8 +31,25 @@ test("finds the last concrete model in model-change entries", () => {
     ]),
   ).toBe("openai-codex/gpt-5.6-luna");
   expect(
-    lastConcreteModelFromEntries([
+    lastAutoRoutedModelFromEntries([
+      { type: "model_change", provider: "anthropic", modelId: "manual" },
       { type: "model_change", provider: "auto", modelId: "auto" },
+      autoEnabled,
+      { type: "model_change", provider: "anthropic", modelId: "manual" },
+      autoDisabled,
+    ]),
+  ).toBeUndefined();
+  expect(
+    lastAutoRoutedModelFromEntries([
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ]),
+  ).toBeUndefined();
+  expect(
+    lastAutoRoutedModelFromEntries([
+      { type: "model_change", provider: "", modelId: "model" },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+      autoEnabled,
+      { type: "model_change", provider: "provider", modelId: "" },
     ]),
   ).toBeUndefined();
 });

@@ -65,7 +65,17 @@ export function formatCwd(cwd: string, home: string | undefined): string {
 export function alignSides(left: string, right: string, width: number): string {
   if (width <= 0) return "";
   const rightWidth = visibleWidth(right);
-  if (rightWidth > width) return truncateToWidth(right, width, "");
+  if (rightWidth > width) {
+    if (!left) return truncateToWidth(right, width, "");
+    const leftBudget = Math.min(
+      visibleWidth(left),
+      Math.max(1, Math.floor(width * 0.4)),
+    );
+    const fittedLeft = truncateToWidth(left, leftBudget, "...");
+    const rightBudget = Math.max(0, width - visibleWidth(fittedLeft) - 1);
+    if (rightBudget === 0) return truncateToWidth(fittedLeft, width, "");
+    return `${fittedLeft} ${truncateToWidth(right, rightBudget, "...")}`;
+  }
   const maxLeftWidth = Math.max(0, width - rightWidth - (left ? 1 : 0));
   const fittedLeft =
     maxLeftWidth > 0 ? truncateToWidth(left, maxLeftWidth, "...") : "";

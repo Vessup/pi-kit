@@ -13,7 +13,7 @@ import {
   applyRuntimeModelStatus,
   isAutoModelReference,
   isAutoRuntimeModelSwap,
-  lastConcreteModelFromEntries,
+  lastAutoRoutedModelFromEntries,
   selectedModelReference,
   webModelReference,
 } from "../web/model-status.js";
@@ -1270,7 +1270,7 @@ function makeSession(
     selectedModel: ctx.model
       ? `${ctx.model.provider}/${ctx.model.id}`
       : undefined,
-    lastModel: lastConcreteModelFromEntries(entries),
+    lastModel: lastAutoRoutedModelFromEntries(entries),
     status: statusForContext(ctx),
     source: "tui",
     createdAt: header ? Date.parse(header.timestamp) || Date.now() : Date.now(),

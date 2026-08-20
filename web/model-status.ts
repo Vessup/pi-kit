@@ -10,24 +10,50 @@ export type WebModelStatus = {
 
 export type WebModelIdentity = { provider: string; id: string };
 
-/** Find the last concrete model recorded in Pi's model-change entries. */
-export function lastConcreteModelFromEntries(
+/** Find the last concrete model that Auto actually routed to. */
+export function lastAutoRoutedModelFromEntries(
   entries: readonly unknown[],
 ): string | undefined {
+  let autoActive = false;
+  let pendingRoute: string | undefined;
   let lastModel: string | undefined;
   for (const entry of entries) {
     if (!entry || typeof entry !== "object") continue;
     const value = entry as Record<string, unknown>;
+    if (value.type === "model_change") {
+      if (
+        typeof value.provider !== "string" ||
+        value.provider.length === 0 ||
+        typeof value.modelId !== "string" ||
+        value.modelId.length === 0
+      )
+        continue;
+      const model = `${value.provider}/${value.modelId}`;
+      if (isAutoModelReference(model)) {
+        if (pendingRoute) lastModel = pendingRoute;
+        pendingRoute = undefined;
+      } else if (autoActive) {
+        pendingRoute = model;
+      }
+      continue;
+    }
     if (
-      value.type !== "model_change" ||
-      typeof value.provider !== "string" ||
-      typeof value.modelId !== "string"
+      value.type !== "custom" ||
+      value.customType !== "vessup:auto-router:active"
     )
       continue;
-    const model = `${value.provider}/${value.modelId}`;
-    if (!isAutoModelReference(model)) lastModel = model;
+    const data = value.data;
+    const enabled =
+      typeof data === "object" &&
+      data !== null &&
+      (data as Record<string, unknown>).enabled === true;
+    autoActive = enabled;
+    if (!enabled) {
+      pendingRoute = undefined;
+      lastModel = undefined;
+    }
   }
-  return lastModel;
+  return lastModel ?? pendingRoute;
 }
 
 /** Format a provider/model pair for the Web session protocol. */

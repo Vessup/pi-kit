@@ -598,6 +598,11 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       restored.pinnedTier ??
       (modelIsAuto && ctx.model ? tierFromModelId(ctx.model.id) : undefined);
     if (autoActive) {
+      if (modelIsAuto && !restored.active)
+        pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, {
+          enabled: true,
+          pinnedTier,
+        });
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could
         // revert it). Normalize back to the placeholder so /model shows Auto again.

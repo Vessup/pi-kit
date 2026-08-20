@@ -3,6 +3,7 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { boundedWebHistory, webHistoryByteLength } from "../history.js";
+import { isAutoModelReference } from "../model-status.js";
 import { compareWebSessions, type WebSession } from "../protocol.js";
 import type { MissingSessions } from "./missingSessions.js";
 import { resolveSessionProject } from "./projects.js";
@@ -39,6 +40,16 @@ export function createSessionRegistry(options: {
   const { persistedQueues } = stores;
   const { isMissingInactiveSession } = missingSessions;
   const { replaceRecordHistory } = history;
+
+  function clearStaleAutoModel(record: SessionRecord, session: WebSession): void {
+    const selectedModel = session.selectedModel ?? session.model;
+    if (
+      session.lastModel === undefined &&
+      selectedModel &&
+      !isAutoModelReference(selectedModel)
+    )
+      record.lastModel = undefined;
+  }
 
   function sessionToClientPayload(
     session: WebSession,
@@ -127,6 +138,7 @@ export function createSessionRegistry(options: {
         })),
       }) as SessionRecord;
     Object.assign(record, session);
+    clearStaleAutoModel(record, session);
     record.kind = kind;
     if (history.length > 0 && !existing) {
       record.history = displayHistory;
@@ -156,6 +168,7 @@ export function createSessionRegistry(options: {
     const historyManagedWorktree =
       history.length > 0 ? managedWorktreeFromEntries(history) : undefined;
     Object.assign(record, session);
+    clearStaleAutoModel(record, session);
     record.kind = kind;
     if (history.length > 0)
       replaceRecordHistory(
