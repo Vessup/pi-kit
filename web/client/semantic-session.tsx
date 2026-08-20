@@ -989,7 +989,6 @@ function ImageLightboxDialog({
             Expanded attachment preview
           </DialogDescription>
           <Button
-            autoFocus
             type="button"
             variant="ghost"
             size="icon"
@@ -3192,7 +3191,6 @@ export function SemanticSession({
                       className="group block cursor-zoom-in rounded-lg border-0 bg-transparent p-0 focus:outline-none focus:ring-2 focus:ring-sky-400/70"
                       aria-label={`Expand ${image.name ?? `attachment ${index + 1}`}`}
                       title="Expand attachment"
-                      onMouseDown={(event) => event.preventDefault()}
                       onClick={() => openImagePreview(image)}
                     >
                       <img

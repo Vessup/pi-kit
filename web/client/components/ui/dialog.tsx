@@ -103,11 +103,30 @@ export function DialogContent({
   const ctx = React.useContext(DialogContext);
   const [mounted, setMounted] = React.useState(false);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const setOpenRef = React.useRef(ctx?.setOpen);
-  setOpenRef.current = ctx?.setOpen;
+  const restoreFocusRef = React.useRef<HTMLElement | null>(null);
   React.useEffect(() => setMounted(true), []);
   React.useEffect(() => {
     if (!mounted || !ctx?.open) return;
+    const content = contentRef.current;
+    if (!content) return;
+    const active = document.activeElement;
+    restoreFocusRef.current =
+      active instanceof HTMLElement && !content.contains(active)
+        ? active
+        : null;
+    return () => {
+      const restoreFocus = restoreFocusRef.current;
+      restoreFocusRef.current = null;
+      if (!restoreFocus?.isConnected) return;
+      requestAnimationFrame(() => {
+        if (restoreFocus.isConnected)
+          restoreFocus.focus({ preventScroll: true });
+      });
+    };
+  }, [ctx?.open, mounted]);
+  React.useEffect(() => {
+    const setOpen = ctx?.setOpen;
+    if (!mounted || !ctx?.open || !setOpen) return;
     const content = contentRef.current;
     if (!content) return;
     const focusInitialElement = () => {
@@ -119,7 +138,7 @@ export function DialogContent({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        setOpenRef.current?.(false);
+        setOpen(false);
         return;
       }
       if (event.key !== "Tab") return;
@@ -145,7 +164,7 @@ export function DialogContent({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [ctx?.open, mounted]);
+  }, [ctx?.open, ctx?.setOpen, mounted]);
   if (!mounted || !ctx?.open) return null;
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
