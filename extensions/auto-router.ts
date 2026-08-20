@@ -627,8 +627,21 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     )
       return;
     if (action === "route") {
-      if (value.holdThroughCompaction === true) compactionLease = true;
-      if (autoActive) waitUntil(routeForCompaction(pi, ctx));
+      const holdThroughCompaction = value.holdThroughCompaction === true;
+      if (holdThroughCompaction) compactionLease = true;
+      if (!autoActive) {
+        if (holdThroughCompaction) compactionLease = false;
+        return;
+      }
+      const route = routeForCompaction(pi, ctx);
+      waitUntil(
+        holdThroughCompaction
+          ? route.catch((error) => {
+              compactionLease = false;
+              throw error;
+            })
+          : route,
+      );
       return;
     }
     waitUntil(
@@ -665,6 +678,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("session_start", async (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
+    compactionLease = false;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -709,7 +723,16 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       autoActive &&
       ctx.model?.provider === AUTO_PROVIDER_ID
     ) {
-      await routeForCompaction(pi, ctx);
+      try {
+        await routeForCompaction(pi, ctx);
+      } catch (error) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            error instanceof Error ? error.message : String(error),
+            "error",
+          );
+        }
+      }
     }
   });
 
@@ -717,6 +740,17 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     if (!autoActive || compactionLease) return;
     if (!ctx.model || ctx.model.provider === AUTO_PROVIDER_ID) return;
     await revertToAutoPlaceholder(pi, ctx);
+  });
+
+  pi.on("session_compact", () => {
+    // A successful compaction is the end of the lease even if the caller is
+    // interrupted before it can issue the paired restore action.
+    compactionLease = false;
+  });
+
+  pi.on("session_shutdown", async () => {
+    compactionLease = false;
+    routingInFlight = false;
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

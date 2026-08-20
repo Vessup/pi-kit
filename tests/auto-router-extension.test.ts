@@ -318,6 +318,38 @@ test("keeps Auto on a concrete model while a web compaction aborts the agent", a
   expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
 });
 
+test("releases a held compaction lease when compaction completes", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const operations: Promise<void>[] = [];
+  fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+    action: "route",
+    ctx,
+    holdThroughCompaction: true,
+    waitUntil: (operation: Promise<void>) => operations.push(operation),
+  });
+  await Promise.all(operations);
+  await fake.fire("session_compact", {}, ctx);
+
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  await fake.fire("agent_end", {}, ctx);
+  expect(fake.currentModel.value).toBe(a);
+  await fake.fire("agent_settled", {}, ctx);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
 test("routes at agent_end if Auto was selected while a turn was running", async () => {
   const a = model("prov", "model-a");
   await writeConfig({
