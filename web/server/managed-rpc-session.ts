@@ -300,7 +300,8 @@ export class ManagedRpcSession {
         if (!this.compactCompletion) return;
         this.compactCompletion = undefined;
         reject(
-          new Error(
+          rpcDeliveryError(
+            "compact",
             `Web compaction did not finish within ${LONG_RUNNING_COMMAND_TIMEOUT_MS}ms`,
           ),
         );

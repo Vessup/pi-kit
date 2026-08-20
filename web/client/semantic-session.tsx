@@ -154,6 +154,8 @@ type SemanticSessionProps = {
   streamingMessage: Record<string, unknown> | null;
   streamingMessageKey: string | null;
   tools: ActiveTool[];
+  sessionError: string | null;
+  onDismissSessionError: () => void;
   connected: boolean;
   transcriptLoading: boolean;
   queuedMessages: WebQueuedMessage[];
@@ -1847,6 +1849,8 @@ export function SemanticSession({
   streamingMessage,
   streamingMessageKey: providedStreamingMessageKey,
   tools,
+  sessionError,
+  onDismissSessionError,
   connected,
   transcriptLoading,
   queuedMessages,
@@ -2727,17 +2731,22 @@ export function SemanticSession({
           if (!open) setSelectedSubagentId(null);
         }}
       />
-      {actionError && (
+      {(actionError || sessionError) && (
         <div
           role="alert"
           className="absolute right-4 top-4 z-40 flex max-w-[min(28rem,calc(100%-2rem))] items-start gap-3 rounded-lg border border-red-400/30 bg-red-950/95 px-3 py-2 text-sm text-red-100 shadow-xl backdrop-blur"
         >
-          <span className="min-w-0 flex-1 break-words">{actionError}</span>
+          <span className="min-w-0 flex-1 break-words">
+            {actionError ?? sessionError}
+          </span>
           <button
             type="button"
             aria-label="Dismiss error"
             className="mt-0.5 shrink-0 text-red-200/70 hover:text-red-100"
-            onClick={() => setActionError(null)}
+            onClick={() => {
+              if (actionError) setActionError(null);
+              else onDismissSessionError();
+            }}
           >
             <X className="h-3.5 w-3.5" />
           </button>
