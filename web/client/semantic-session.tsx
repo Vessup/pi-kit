@@ -110,6 +110,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "./components/ui/tooltip";
+import {
+  isAutoModelReference,
+  selectedModelReference,
+} from "../model-status";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
 import { anchoredScrollTop, resolveScrollFollow } from "./scroll-follow";
@@ -2527,23 +2531,42 @@ export function SemanticSession({
     }
   };
 
-  const modelLabel = session?.model?.split("/").pop() ?? "Model";
+  const selectedModelRef = selectedModelReference(session ?? {});
+  const selectedModelIdLabel = selectedModelRef?.split("/").pop() ?? "Model";
+  const autoSelected = isAutoModelReference(selectedModelRef);
   const effortLabel = session?.thinkingLevel ?? "off";
   const availableModels =
     sessionOptions.models.length > 0
       ? sessionOptions.models
       : (() => {
-          const slashIndex = session?.model?.indexOf("/") ?? -1;
-          if (!session?.model || slashIndex < 0) return [];
+          const slashIndex = selectedModelRef?.indexOf("/") ?? -1;
+          if (!selectedModelRef || slashIndex < 0) return [];
           return [
             {
-              provider: session.model.slice(0, slashIndex),
-              id: session.model.slice(slashIndex + 1),
-              name: modelLabel,
+              provider: selectedModelRef.slice(0, slashIndex),
+              id: selectedModelRef.slice(slashIndex + 1),
+              name: selectedModelIdLabel,
               reasoning: true,
             },
           ];
         })();
+  const selectedModelOption = availableModels.find(
+    (model) => `${model.provider}/${model.id}` === selectedModelRef,
+  );
+  const modelLabel = autoSelected
+    ? (selectedModelOption?.name ??
+      (selectedModelRef === "auto/auto"
+        ? "Auto (auto)"
+        : `Auto (${selectedModelRef?.slice("auto/auto-".length) ?? "auto"})`))
+    : selectedModelIdLabel;
+  const effectiveModelLabel = session?.model?.split("/").pop();
+  const turnModelSummary =
+    autoSelected &&
+    session?.model &&
+    session.model !== selectedModelRef &&
+    effectiveModelLabel
+      ? `${effectiveModelLabel} · ${effortLabel}`
+      : undefined;
   const availableEfforts =
     sessionOptions.thinkingLevels.length > 0
       ? sessionOptions.thinkingLevels
@@ -3269,12 +3292,29 @@ export function SemanticSession({
                   variant="ghost"
                   size="sm"
                   disabled={controlBusy || !connected}
+                  title={
+                    turnModelSummary
+                      ? `Selected ${modelLabel}; using ${turnModelSummary}`
+                      : undefined
+                  }
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => setModelMenuOpen((open) => !open)}
                 >
-                  {modelLabel}
-                  <span className="text-zinc-600">·</span>
-                  <span>{effortLabel}</span>
+                  <span className="semantic-model-selection">{modelLabel}</span>
+                  {!autoSelected && (
+                    <>
+                      <span className="text-zinc-600">·</span>
+                      <span>{effortLabel}</span>
+                    </>
+                  )}
+                  {turnModelSummary && (
+                    <>
+                      <span className="text-zinc-600">→</span>
+                      <span className="semantic-turn-model">
+                        {turnModelSummary}
+                      </span>
+                    </>
+                  )}
                   <ChevronDown className="h-3.5 w-3.5" />
                 </Button>
                 <AnchoredPopover
@@ -3301,7 +3341,7 @@ export function SemanticSession({
                               <strong>{model.name}</strong>
                               <small>{value}</small>
                             </span>
-                            {session?.model === value && (
+                            {selectedModelRef === value && (
                               <Check className="h-4 w-4 text-sky-300" />
                             )}
                           </button>

@@ -9,6 +9,12 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { agentEndTerminalNotice } from "../web/assistant-message.js";
+import {
+  applyRuntimeModelStatus,
+  isAutoModelReference,
+  selectedModelReference,
+  webModelReference,
+} from "../web/model-status.js";
 import { WEB_COMPACT_COMMAND } from "../web/compact-command.js";
 import { boundedWebHistory } from "../web/history.js";
 import type {
@@ -239,6 +245,8 @@ type BridgeState = {
   reconnectTimer?: ReturnType<typeof setTimeout>;
   reconnectAttempt: number;
   pending: AgentToServerMessage[];
+  /** Set before Auto's before_agent_start hook swaps in the concrete model. */
+  autoTurnRouting: boolean;
   metrics: Pick<WebSession, "usage" | "contextUsage">;
   sourceReplacement?: WorktreeSessionReplacement;
 };
@@ -850,6 +858,9 @@ async function executeAgentCommand(
           throw new Error(
             `Model not found: ${command.provider}/${command.modelId}`,
           );
+        // A browser model change is explicit user selection, not Auto's
+        // transient model swap for the current turn.
+        state.autoTurnRouting = false;
         if (!(await pi.setModel(model)))
           throw new Error(
             `No credentials available for ${command.provider}/${command.modelId}`,
@@ -1183,6 +1194,9 @@ function makeSession(
     branch,
     model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
     thinkingLevel: ctx.thinkingLevel,
+    selectedModel: ctx.model
+      ? `${ctx.model.provider}/${ctx.model.id}`
+      : undefined,
     status: statusForContext(ctx),
     source: "tui",
     createdAt: header ? Date.parse(header.timestamp) || Date.now() : Date.now(),
@@ -1497,6 +1511,7 @@ export default function webSessions(pi: ExtensionAPI): void {
       closed: false,
       reconnectAttempt: 0,
       pending: [],
+      autoTurnRouting: false,
       metrics: { usage: session.usage, contextUsage: session.contextUsage },
       sourceReplacement,
     };
@@ -1548,15 +1563,36 @@ export default function webSessions(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (
+      bridge &&
+      ctx.sessionManager.getSessionId() === bridge.session.id
+    ) {
+      bridge.autoTurnRouting = isAutoModelReference(
+        selectedModelReference(bridge.session),
+      );
+    }
+  });
   pi.on("session_info_changed", (event, ctx) => {
     if (bridge) updateSession(bridge, { name: event.name });
     forward(event, ctx);
   });
   pi.on("model_select", (event, ctx) => {
-    if (bridge)
-      updateSession(bridge, {
-        model: `${event.model.provider}/${event.model.id}`,
-      });
+    if (bridge) {
+      const runtimeModel = webModelReference(event.model);
+      const autoRoute =
+        bridge.autoTurnRouting &&
+        isAutoModelReference(selectedModelReference(bridge.session)) &&
+        !isAutoModelReference(runtimeModel);
+      const next = applyRuntimeModelStatus(
+        bridge.session,
+        runtimeModel,
+        ctx.thinkingLevel,
+        autoRoute,
+      );
+      if (!autoRoute) bridge.autoTurnRouting = false;
+      updateSession(bridge, next);
+    }
     forward(event, ctx);
   });
   pi.on("thinking_level_select", (event, ctx) => {
@@ -1572,6 +1608,15 @@ export default function webSessions(pi: ExtensionAPI): void {
     forward(event, ctx, status);
   });
   pi.on("agent_settled", (event, ctx) => {
+    if (bridge) {
+      bridge.autoTurnRouting = false;
+      const selectedModel = selectedModelReference(bridge.session);
+      if (
+        isAutoModelReference(selectedModel) &&
+        bridge.session.model !== selectedModel
+      )
+        updateSession(bridge, { model: selectedModel });
+    }
     if (bridge?.session.compaction) {
       endBridgeCompaction(bridge, {
         aborted: false,

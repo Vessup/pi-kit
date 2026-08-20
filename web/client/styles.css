@@ -1045,6 +1045,16 @@ details[open] > summary .semantic-tool-chevron {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.semantic-composer-control > .semantic-model-selection,
+.semantic-composer-control > .semantic-turn-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.semantic-composer-control > .semantic-turn-model {
+  color: rgb(125 211 252);
+}
 .semantic-composer-menu button {
   display: flex;
   width: 100%;

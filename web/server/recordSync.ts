@@ -1,3 +1,8 @@
+import {
+  applyRuntimeModelStatus,
+  isAutoModelReference,
+  selectedModelReference,
+} from "../model-status.js";
 import type { WebSession } from "../protocol.js";
 import type { SessionFileCatalog, SessionRecord } from "./server-types.js";
 import type { ServerRuntimeState } from "./serverRuntimeState.js";
@@ -24,13 +29,27 @@ export function createRecordSync(options: {
     if (!s) return;
     const model = s.model as Record<string, unknown> | null | undefined;
     if (model && typeof model.id === "string") {
-      record.model =
+      const runtimeModel =
         typeof model.provider === "string" && model.provider
           ? `${model.provider}/${model.id}`
           : model.id;
-    }
-    if (typeof s.thinkingLevel === "string")
+      const preservingAutoSelection =
+        record.autoTurnActive === true &&
+        isAutoModelReference(selectedModelReference(record)) &&
+        !isAutoModelReference(runtimeModel);
+      const next = applyRuntimeModelStatus(
+        record,
+        runtimeModel,
+        typeof s.thinkingLevel === "string" ? s.thinkingLevel : undefined,
+        preservingAutoSelection,
+      );
+      record.model = next.model;
+      record.thinkingLevel = next.thinkingLevel;
+      record.selectedModel = next.selectedModel;
+      if (!preservingAutoSelection) record.autoTurnActive = false;
+    } else if (typeof s.thinkingLevel === "string") {
       record.thinkingLevel = s.thinkingLevel;
+    }
     if (typeof s.sessionFile === "string") {
       record.file = s.sessionFile;
       runtime.sessionsByFile.set(normalizePath(s.sessionFile), record);
@@ -55,6 +74,25 @@ export function createRecordSync(options: {
         record.status = "idle";
     }
     record.updatedAt = Date.now();
+  }
+
+  function beginTurnModelTracking(record: SessionRecord): number {
+    const generation = (record.modelTurnGeneration ?? 0) + 1;
+    record.modelTurnGeneration = generation;
+    record.autoTurnActive = isAutoModelReference(
+      selectedModelReference(record),
+    );
+    if (!record.autoTurnActive) record.selectedModel ??= record.model;
+    return generation;
+  }
+
+  function finishTurnModelTracking(record: SessionRecord): void {
+    record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
+    const selectedModel = selectedModelReference(record);
+    if (record.autoTurnActive && isAutoModelReference(selectedModel))
+      record.model = selectedModel;
+    record.autoTurnActive = false;
+    record.selectedModel ??= record.model;
   }
 
   function updateRecordFromStats(record: SessionRecord, value: unknown): void {
@@ -188,6 +226,7 @@ export function createRecordSync(options: {
       previous.branch !== next.branch ||
       previous.model !== next.model ||
       previous.thinkingLevel !== next.thinkingLevel ||
+      previous.selectedModel !== next.selectedModel ||
       previous.status !== next.status ||
       previous.source !== next.source ||
       previous.messageCount !== next.messageCount ||
@@ -202,6 +241,8 @@ export function createRecordSync(options: {
 
   return {
     updateRecordFromState,
+    beginTurnModelTracking,
+    finishTurnModelTracking,
     updateRecordFromStats,
     updateSubagentsFromToolEvent,
     catalogSessionChanged,
