@@ -10,6 +10,43 @@ export type WebModelStatus = {
 
 export type WebModelIdentity = { provider: string; id: string };
 
+const AUTO_ROUTER_EFFORTS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+/** Reconstruct the durable Auto placeholder selected for a saved session. */
+export function selectedAutoModelFromEntries(
+  entries: readonly unknown[],
+): string | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (!entry || typeof entry !== "object") continue;
+    const value = entry as Record<string, unknown>;
+    if (
+      value.type !== "custom" ||
+      value.customType !== "vessup:auto-router:active"
+    )
+      continue;
+    const data = value.data;
+    if (
+      !data ||
+      typeof data !== "object" ||
+      (data as Record<string, unknown>).enabled !== true
+    )
+      return undefined;
+    const pinnedTier = (data as Record<string, unknown>).pinnedTier;
+    return typeof pinnedTier === "string" && AUTO_ROUTER_EFFORTS.has(pinnedTier)
+      ? `auto/auto-${pinnedTier}`
+      : "auto/auto";
+  }
+  return undefined;
+}
+
 /** Find the last concrete model that Auto actually routed to. */
 export function lastAutoRoutedModelFromEntries(
   entries: readonly unknown[],

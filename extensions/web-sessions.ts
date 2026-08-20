@@ -14,6 +14,7 @@ import {
   isAutoModelReference,
   isAutoRuntimeModelSwap,
   lastAutoRoutedModelFromEntries,
+  selectedAutoModelFromEntries,
   selectedModelReference,
   webModelReference,
 } from "../web/model-status.js";
@@ -1267,9 +1268,9 @@ function makeSession(
     branch,
     model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
     thinkingLevel: ctx.thinkingLevel,
-    selectedModel: ctx.model
-      ? `${ctx.model.provider}/${ctx.model.id}`
-      : undefined,
+    selectedModel:
+      selectedAutoModelFromEntries(entries) ??
+      (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
     lastModel: lastAutoRoutedModelFromEntries(entries),
     status: statusForContext(ctx),
     source: "tui",

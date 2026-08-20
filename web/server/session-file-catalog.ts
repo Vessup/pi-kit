@@ -12,7 +12,10 @@ import {
 import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { WebSession } from "../protocol.js";
-import { lastAutoRoutedModelFromEntries } from "../model-status.js";
+import {
+  lastAutoRoutedModelFromEntries,
+  selectedAutoModelFromEntries,
+} from "../model-status.js";
 import {
   replacementFromEntries,
   WORKTREE_REPLACEMENT_ENTRY,
@@ -242,6 +245,7 @@ export function createSessionFileCatalog(options: {
     | "name"
     | "model"
     | "thinkingLevel"
+    | "selectedModel"
     | "lastModel"
     | "parentSession"
     | "messageCount"
@@ -274,6 +278,7 @@ export function createSessionFileCatalog(options: {
       name,
       model,
       thinkingLevel,
+      selectedModel: selectedAutoModelFromEntries(entries),
       lastModel: lastAutoRoutedModelFromEntries(entries),
       parentSession,
       messageCount,
@@ -352,6 +357,7 @@ export function createSessionFileCatalog(options: {
         name: meta.name,
         model: meta.model,
         thinkingLevel: meta.thinkingLevel,
+        selectedModel: meta.selectedModel,
         lastModel: meta.lastModel,
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
@@ -533,6 +539,7 @@ export function createSessionFileCatalog(options: {
         name,
         model,
         thinkingLevel,
+        selectedModel: selectedAutoModelFromEntries(metadataEntries),
         lastModel: lastAutoRoutedModelFromEntries(metadataEntries),
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",

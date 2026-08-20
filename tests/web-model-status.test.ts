@@ -4,8 +4,30 @@ import {
   isAutoModelReference,
   isAutoRuntimeModelSwap,
   lastAutoRoutedModelFromEntries,
+  selectedAutoModelFromEntries,
   selectedModelReference,
 } from "../web/model-status";
+
+test("reconstructs a durable Auto selection", () => {
+  expect(
+    selectedAutoModelFromEntries([
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true, pinnedTier: "high" },
+      },
+    ]),
+  ).toBe("auto/auto-high");
+  expect(
+    selectedAutoModelFromEntries([
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: false },
+      },
+    ]),
+  ).toBeUndefined();
+});
 
 test("finds only models Auto actually routed to", () => {
   const autoEnabled = {
