@@ -93,6 +93,68 @@ test("non-glob patterns fall back to partial id and name containment", () => {
   ).toBe(true);
 });
 
+test("character classes match one member, like minimatch", () => {
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[23]", "zai", { id: "glm-5.2" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[23]", "zai", { id: "glm-5.3" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[23]", "zai", { id: "glm-5.4" }),
+  ).toBe(false);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[2-3]", "zai", { id: "glm-5.3" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[2-3]", "zai", { id: "glm-5.4" }),
+  ).toBe(false);
+});
+
+test("negated character classes exclude members and the path separator", () => {
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[!23]", "zai", { id: "glm-5.4" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[!23]", "zai", { id: "glm-5.2" }),
+  ).toBe(false);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[^23]", "zai", { id: "glm-5.x" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[^23]", "zai", { id: "glm-5.2" }),
+  ).toBe(false);
+  // A negated class never matches "/", so it cannot span the provider boundary.
+  expect(modelMatchesScopePattern("zai[!z]*", "zai", { id: "glm-5.4" })).toBe(
+    false,
+  );
+  // A class whose only member is "/" can never match anything.
+  expect(modelMatchesScopePattern("zai[/]*", "zai", { id: "glm-5.4" })).toBe(
+    false,
+  );
+});
+
+test("unterminated character classes fall back to a literal bracket", () => {
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[2", "zai", { id: "glm-5.2" }),
+  ).toBe(false);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[2", "zai", { id: "glm-5.[2" }),
+  ).toBe(true);
+});
+
+test("a leading bracket inside a class is a literal member", () => {
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[]23]", "zai", { id: "glm-5.]" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[]23]", "zai", { id: "glm-5.2" }),
+  ).toBe(true);
+  expect(
+    modelMatchesScopePattern("zai/glm-5.[]23]", "zai", { id: "glm-5.4" }),
+  ).toBe(false);
+});
+
 test("readEnabledModelPatterns reads enabledModels from a settings file", async () => {
   directory = await mkdtemp(join(tmpdir(), "pi-model-scope-"));
   const settingsPath = join(directory, "settings.json");
