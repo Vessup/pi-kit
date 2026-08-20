@@ -96,6 +96,8 @@ export function DialogContent({
         }}
       />
       <div
+        role="dialog"
+        aria-modal="true"
         className={cn(
           "relative z-10 w-full max-w-lg overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/40",
           className,

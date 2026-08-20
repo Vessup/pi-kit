@@ -1128,6 +1128,14 @@ details[open] > summary .semantic-tool-chevron {
   font-size: 0.85rem;
   font-weight: 600;
 }
+.semantic-image-lightbox {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: calc(100dvh - 8rem);
+  object-fit: contain;
+}
 .semantic-queue {
   display: grid;
   margin-bottom: 0.5rem;
