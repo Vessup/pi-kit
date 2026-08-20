@@ -428,7 +428,7 @@ export class ManagedRpcSession {
 
   private failRuntimeOperations(error: Error): void {
     this.failAllPending(error);
-    this.rejectCompactCompletion(error);
+    this.rejectCompactCompletion(rpcDeliveryError("compact", error.message));
   }
 
   private async waitForPendingRequests(): Promise<void> {
@@ -616,15 +616,10 @@ export class ManagedRpcSession {
     // The web extension command gives Auto Router a chance to replace its inert
     // placeholder before Pi resolves compaction auth. Older runtimes still use
     // the native RPC command for compatibility.
-    let supportsWebCompact = false;
-    try {
-      const commands = await this.getCommands();
-      supportsWebCompact = commands.commands.some(
-        (command) => command.name === WEB_COMPACT_EXTENSION_COMMAND,
-      );
-    } catch {
-      // Fall back to the native RPC compact command for older runtimes.
-    }
+    const commands = await this.getCommands();
+    const supportsWebCompact = commands.commands.some(
+      (command) => command.name === WEB_COMPACT_EXTENSION_COMMAND,
+    );
     if (!supportsWebCompact)
       return await this.send(
         { type: "compact", customInstructions },

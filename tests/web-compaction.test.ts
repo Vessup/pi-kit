@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { isPrivateWebSessionCommand } from "../web/compact-command.ts";
 import { isSuccessfulCompactionEnd } from "../web/server/compactionNotice.ts";
-import { ManagedRpcSession } from "../web/server/managed-rpc-session.ts";
+import {
+  CommandDeliveryUncertainError,
+  ManagedRpcSession,
+} from "../web/server/managed-rpc-session.ts";
 
 type FakeManagedRuntime = {
   started: boolean;
@@ -105,7 +108,30 @@ test("managed web compaction rejects immediately when its runtime shuts down", a
   await Bun.sleep(10);
 
   await session.shutdown();
-  await expect(compacting).rejects.toThrow("RPC session stopped");
+  await expect(compacting).rejects.toBeInstanceOf(
+    CommandDeliveryUncertainError,
+  );
+});
+
+test("managed compaction propagates command-discovery transport failures", async () => {
+  const session = new ManagedRpcSession({
+    cwd: process.cwd(),
+    onEvent: () => undefined,
+    onExit: () => undefined,
+  });
+  const commandsSent: string[] = [];
+  session.getCommands = async () => {
+    throw new Error("command discovery disconnected");
+  };
+  session.send = async (command) => {
+    commandsSent.push(String(command.type));
+    return undefined;
+  };
+
+  await expect(session.compact()).rejects.toThrow(
+    "command discovery disconnected",
+  );
+  expect(commandsSent).toEqual([]);
 });
 
 test("private compaction transport stays out of slash-command discovery", () => {
