@@ -114,6 +114,7 @@ import type { SessionSocket } from "./ws";
 const SESSION_ORDER_KEY = "pi-web-session-order-v1";
 const SESSION_SORT_KEY = "pi-web-session-sort-v1";
 const COLLAPSED_PROJECTS_KEY = "pi-web-collapsed-projects-v1";
+const LAST_SESSION_KEY = "pi-web-last-session-v1";
 
 type SessionSort = "newest" | "oldest" | "custom";
 
@@ -149,6 +150,15 @@ function loadCollapsedProjects(): string[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+function loadLastSessionId(): string | null {
+  try {
+    const value = localStorage.getItem(LAST_SESSION_KEY);
+    return typeof value === "string" && value ? value : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1422,7 +1432,7 @@ function SessionListItem({
 export function App() {
   const [sessions, setSessions] = React.useState<WebSession[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(() =>
-    hashSessionId(),
+    hashSessionId() ?? loadLastSessionId(),
   );
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
@@ -1479,6 +1489,7 @@ export function App() {
   );
   const socketRef = React.useRef<SessionSocket | null>(null);
   const selectedIdRef = React.useRef<string | null>(selectedId);
+  const initialSessionResolvedRef = React.useRef(false);
   const reconnectTimerRef = React.useRef<number | null>(null);
   const queueSyncRef = React.useRef<{
     requestId: string;
@@ -1511,6 +1522,7 @@ export function App() {
   }, [collapsedProjects]);
   React.useEffect(() => {
     selectedIdRef.current = selectedId;
+    if (selectedId) savePreference(LAST_SESSION_KEY, selectedId);
   }, [selectedId]);
   React.useEffect(() => {
     if (
@@ -1526,7 +1538,17 @@ export function App() {
       const snapshot = sortSessions(await listSessions());
       setSessions((previous) => preserveSessionsTelemetry(previous, snapshot));
       setError(null);
-      if (!selectedId && snapshot[0]) setSelectedId(snapshot[0].id);
+      if (snapshot.length > 0) {
+        if (!initialSessionResolvedRef.current) {
+          // On first load, honor the hash or the persisted last session only
+          // if it still exists; otherwise fall back to the first session.
+          initialSessionResolvedRef.current = true;
+          if (!selectedId || !snapshot.some((item) => item.id === selectedId))
+            setSelectedId(snapshot[0].id);
+        } else if (!selectedId && snapshot[0]) {
+          setSelectedId(snapshot[0].id);
+        }
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
