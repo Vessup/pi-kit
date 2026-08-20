@@ -9,6 +9,7 @@ type DialogContextValue = {
   setOpen: (open: boolean) => void;
   titleId: string;
   descriptionId: string;
+  restoreFocusRef: React.MutableRefObject<HTMLElement | null>;
 } | null;
 const DialogContext = React.createContext<DialogContextValue>(null);
 
@@ -27,9 +28,22 @@ const FOCUSABLE_SELECTOR = [
 ].join(",");
 
 function focusableElements(container: HTMLElement): HTMLElement[] {
-  return Array.from(
+  const elements = Array.from(
     container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
   ).filter((element) => element.getAttribute("aria-hidden") !== "true");
+  return elements.filter((element) => {
+    if (!(element instanceof HTMLInputElement) || element.type !== "radio")
+      return true;
+    const radioGroup = elements.filter(
+      (candidate): candidate is HTMLInputElement =>
+        candidate instanceof HTMLInputElement &&
+        candidate.type === "radio" &&
+        candidate.name === element.name &&
+        candidate.form === element.form,
+    );
+    const checked = radioGroup.find((radio) => radio.checked);
+    return element === (checked ?? radioGroup[0]);
+  });
 }
 
 export function Dialog({
@@ -42,12 +56,19 @@ export function Dialog({
   children: React.ReactNode;
 }) {
   const id = React.useId();
+  const restoreFocusRef = React.useRef<HTMLElement | null>(null);
+  React.useInsertionEffect(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    restoreFocusRef.current = active instanceof HTMLElement ? active : null;
+  }, [open]);
   const context = React.useMemo(
     () => ({
       open,
       setOpen: onOpenChange,
       titleId: `${id}-title`,
       descriptionId: `${id}-description`,
+      restoreFocusRef,
     }),
     [id, onOpenChange, open],
   );
@@ -103,17 +124,19 @@ export function DialogContent({
   const ctx = React.useContext(DialogContext);
   const [mounted, setMounted] = React.useState(false);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const restoreFocusRef = React.useRef<HTMLElement | null>(null);
+  const restoreFocusRef = ctx?.restoreFocusRef;
   React.useEffect(() => setMounted(true), []);
   React.useEffect(() => {
-    if (!mounted || !ctx?.open) return;
+    if (!mounted || !ctx?.open || !restoreFocusRef) return;
     const content = contentRef.current;
     if (!content) return;
-    const active = document.activeElement;
-    restoreFocusRef.current =
-      active instanceof HTMLElement && !content.contains(active)
-        ? active
-        : null;
+    if (!restoreFocusRef.current) {
+      const active = document.activeElement;
+      restoreFocusRef.current =
+        active instanceof HTMLElement && !content.contains(active)
+          ? active
+          : null;
+    }
     return () => {
       const restoreFocus = restoreFocusRef.current;
       restoreFocusRef.current = null;
@@ -123,7 +146,7 @@ export function DialogContent({
           restoreFocus.focus({ preventScroll: true });
       });
     };
-  }, [ctx?.open, mounted]);
+  }, [ctx?.open, mounted, restoreFocusRef]);
   React.useEffect(() => {
     const setOpen = ctx?.setOpen;
     if (!mounted || !ctx?.open || !setOpen) return;

@@ -1959,7 +1959,6 @@ export function SemanticSession({
   const lockedScrollHeightRef = React.useRef<number | null>(null);
   const fileRef = React.useRef<HTMLInputElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
-  const previewReturnFocusRef = React.useRef<HTMLElement | null>(null);
   const slashMenuRef = React.useRef<HTMLDivElement | null>(null);
   const modelButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const sendMenuButtonRef = React.useRef<HTMLButtonElement | null>(null);
@@ -2186,17 +2185,10 @@ export function SemanticSession({
   }, [captureViewportAnchor, maintainLockedScrollExtent, updateScrollButton]);
 
   const openImagePreview = React.useCallback((image: SemanticImage) => {
-    const activeElement = document.activeElement;
-    previewReturnFocusRef.current =
-      activeElement instanceof HTMLElement ? activeElement : null;
     setPreviewImage(image);
   }, []);
   const closeImagePreview = React.useCallback(() => {
     setPreviewImage(null);
-    const returnFocus = previewReturnFocusRef.current;
-    previewReturnFocusRef.current = null;
-    if (returnFocus?.isConnected)
-      requestAnimationFrame(() => returnFocus.focus({ preventScroll: true }));
   }, []);
 
   React.useEffect(() => {
