@@ -1302,7 +1302,7 @@ export default function webSessions(pi: ExtensionAPI): void {
     const action = value.action;
     const ctx = value.ctx as ExtensionContext | undefined;
     if (
-      (action !== "start" && action !== "end") ||
+      (action !== "start" && action !== "end" && action !== "discard") ||
       !ctx ||
       !bridge ||
       bridge.closed ||
@@ -1310,6 +1310,18 @@ export default function webSessions(pi: ExtensionAPI): void {
     )
       return;
     bridge.autoRuntimeRouting = action === "start";
+    if (action === "discard") {
+      const selectedModel = selectedModelReference(bridge.session);
+      if (isAutoModelReference(selectedModel)) {
+        updateSession(bridge, {
+          model: selectedModel,
+          lastModel:
+            typeof value.restoreRoute === "string"
+              ? value.restoreRoute
+              : null,
+        });
+      }
+    }
   });
 
   // RPC mode normally expands /skill:name before the agent sees it. Pi Web keeps

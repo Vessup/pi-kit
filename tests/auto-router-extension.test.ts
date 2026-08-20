@@ -358,7 +358,7 @@ test("releases a held compaction lease when compaction completes", async () => {
   expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
 });
 
-test("routes at agent_end if Auto was selected while a turn was running", async () => {
+test("discards an unused post-turn compaction route", async () => {
   const a = model("prov", "model-a");
   await writeConfig({
     efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
@@ -375,6 +375,116 @@ test("routes at agent_end if Auto was selected while a turn was running", async 
 
   await fake.fire("agent_end", {}, ctx);
   expect(fake.currentModel.value).toBe(a);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+  expect(fake.appendedEntries.at(-1)).toEqual({
+    type: "vessup:auto-router:active",
+    data: {
+      enabled: true,
+      pinnedTier: undefined,
+      resetRoute: true,
+      restoreRoute: undefined,
+    },
+  });
+});
+
+test("discarding a speculative route preserves the prior real Auto route", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+    entries: [
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true },
+      },
+      { type: "model_change", provider: "prov", modelId: "previous" },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ],
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(fake.appendedEntries.at(-1)).toEqual({
+    type: "vessup:auto-router:active",
+    data: {
+      enabled: true,
+      pinnedTier: undefined,
+      resetRoute: true,
+      restoreRoute: "prov/previous",
+    },
+  });
+});
+
+test("retains a post-turn route when an automatic continuation starts", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  await fake.fire("agent_start", {}, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(
+    fake.appendedEntries.some(
+      ({ data }) =>
+        typeof data === "object" &&
+        data !== null &&
+        (data as { resetRoute?: boolean }).resetRoute === true,
+    ),
+  ).toBe(false);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
+test("retains a post-turn route when compaction actually starts", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  await fake.fire("session_before_compact", {}, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(
+    fake.appendedEntries.some(
+      ({ data }) =>
+        typeof data === "object" &&
+        data !== null &&
+        (data as { resetRoute?: boolean }).resetRoute === true,
+    ),
+  ).toBe(false);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
 });
 
 test("Auto routes before prompt preflight so compaction cannot use its placeholder", async () => {

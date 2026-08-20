@@ -14,7 +14,10 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
-import { AUTO_ROUTER_ACTIVE_ENTRY } from "../web/model-status.js";
+import {
+  AUTO_ROUTER_ACTIVE_ENTRY,
+  lastAutoRoutedModelFromEntries,
+} from "../web/model-status.js";
 import { classifyTurnComplexity } from "./auto-router-classify.js";
 import {
   AutoRouterHealthStore,
@@ -182,6 +185,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   let modelTransitionTail = Promise.resolve();
   let compactionLease = false;
   let preflightPromptRouted = false;
+  let postTurnCompactionRoutePending = false;
+  let postTurnCompactionPreviousRoute: string | undefined;
   const healthStore = new AutoRouterHealthStore();
 
   async function withModelTransition<T>(operation: () => Promise<T>): Promise<T> {
@@ -695,6 +700,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     routingInFlight = false;
     compactionLease = false;
     preflightPromptRouted = false;
+    postTurnCompactionRoutePending = false;
+    postTurnCompactionPreviousRoute = undefined;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -740,8 +747,13 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       ctx.model?.provider === AUTO_PROVIDER_ID
     ) {
       try {
+        postTurnCompactionPreviousRoute = lastAutoRoutedModelFromEntries(
+          ctx.sessionManager.getEntries(),
+        );
         await routeForCompaction(pi, ctx);
+        postTurnCompactionRoutePending = true;
       } catch (error) {
+        postTurnCompactionPreviousRoute = undefined;
         if (ctx.hasUI) {
           ctx.ui.notify(
             error instanceof Error ? error.message : String(error),
@@ -752,9 +764,44 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     }
   });
 
+  function commitPostTurnCompactionRoute(): void {
+    postTurnCompactionRoutePending = false;
+    postTurnCompactionPreviousRoute = undefined;
+  }
+
+  pi.on("session_before_compact", () => {
+    // Core has now committed to a real compaction attempt, so a model selected
+    // at agent_end is no longer speculative and should remain visible as used.
+    commitPostTurnCompactionRoute();
+  });
+
+  pi.on("agent_start", () => {
+    // A retry or queued continuation can begin after agent_end. In that case
+    // the candidate is handling a real request even if no compaction starts.
+    if (postTurnCompactionRoutePending) commitPostTurnCompactionRoute();
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     if (!autoActive || compactionLease) return;
     if (!ctx.model || ctx.model.provider === AUTO_PROVIDER_ID) return;
+    if (postTurnCompactionRoutePending) {
+      const restoreRoute = postTurnCompactionPreviousRoute;
+      commitPostTurnCompactionRoute();
+      // The agent_end route existed only to make core's post-turn compaction
+      // check safe, but no compaction started. Roll it back in durable and live
+      // Web status without erasing an earlier model that Auto genuinely used.
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, {
+        enabled: true,
+        pinnedTier,
+        resetRoute: true,
+        restoreRoute,
+      });
+      pi.events.emit(AUTO_ROUTER_MODEL_ROUTING_EVENT, {
+        action: "discard",
+        ctx,
+        restoreRoute,
+      });
+    }
     await revertToAutoPlaceholder(pi, ctx);
   });
 
@@ -762,12 +809,14 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     // A successful compaction is the end of the lease even if the caller is
     // interrupted before it can issue the paired restore action.
     compactionLease = false;
+    commitPostTurnCompactionRoute();
   });
 
   pi.on("session_shutdown", async () => {
     compactionLease = false;
     routingInFlight = false;
     preflightPromptRouted = false;
+    commitPostTurnCompactionRoute();
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

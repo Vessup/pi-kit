@@ -104,6 +104,61 @@ test("returns a newer in-flight Auto route over the prior completed route", () =
   ).toBe("provider/newer");
 });
 
+test("a discarded speculative route is not reported as used", () => {
+  expect(
+    lastAutoRoutedModelFromEntries([
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true },
+      },
+      { type: "model_change", provider: "provider", modelId: "candidate" },
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true, resetRoute: true },
+      },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ]),
+  ).toBeUndefined();
+  expect(
+    selectedAutoModelFromEntries([
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true },
+      },
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true, resetRoute: true },
+      },
+    ]),
+  ).toBe("auto/auto");
+  expect(
+    lastAutoRoutedModelFromEntries([
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true },
+      },
+      { type: "model_change", provider: "provider", modelId: "previous" },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+      { type: "model_change", provider: "provider", modelId: "speculative" },
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: {
+          enabled: true,
+          resetRoute: true,
+          restoreRoute: "provider/previous",
+        },
+      },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ]),
+  ).toBe("provider/previous");
+});
+
 test("switching Auto tiers clears the previous tier's routed model", () => {
   expect(
     lastAutoRoutedModelFromEntries([

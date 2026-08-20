@@ -106,6 +106,18 @@ export function autoRoutingStateFromEntries(
     state.active = true;
     state.selectedModel = selectedModel;
     state.currentPlaceholder ??= selectedModel;
+    if (
+      value.data &&
+      typeof value.data === "object" &&
+      (value.data as Record<string, unknown>).resetRoute === true
+    ) {
+      state.pendingRoute = undefined;
+      const restoreRoute = (value.data as Record<string, unknown>).restoreRoute;
+      state.lastModel =
+        typeof restoreRoute === "string" && restoreRoute.length > 0
+          ? restoreRoute
+          : undefined;
+    }
   }
   return state;
 }
