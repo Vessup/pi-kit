@@ -609,26 +609,6 @@ function formatModelReference(reference: string): string {
   return `(${reference.slice(0, slashIndex)}) ${reference.slice(slashIndex + 1)}`;
 }
 
-function formatProviderLabel(provider: string): string {
-  const knownLabels: Record<string, string> = {
-    "openai-codex": "OpenAI Codex",
-    openai: "OpenAI",
-    anthropic: "Anthropic",
-    minimax: "MiniMax",
-    "kimi-coding": "Kimi Coding",
-    "opencode-go": "OpenCode Go",
-    zai: "Zai",
-  };
-  return (
-    knownLabels[provider] ??
-    provider
-      .split(/[-_]/g)
-      .filter(Boolean)
-      .map((part) => part[0]?.toUpperCase() + part.slice(1))
-      .join(" ")
-  );
-}
-
 function formatTokenCount(count: number): string {
   if (count < 1_000) return String(count);
   if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -2696,20 +2676,12 @@ export function SemanticSession({
     (sessionOptions.thinkingLevels.length > 0
       ? sessionOptions.thinkingLevels
       : ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-  const autoModels = availableModels.filter(
-    (model) => model.provider === "auto",
-  );
-  const nonAutoModels = availableModels.filter(
-    (model) => model.provider !== "auto",
-  );
-  const modelsByProvider = Array.from(
-    nonAutoModels.reduce((groups, model) => {
-      const group = groups.get(model.provider) ?? [];
-      group.push(model);
-      groups.set(model.provider, group);
-      return groups;
-    }, new Map<string, WebModelOption[]>()),
-  );
+  const orderedModels = [
+    ...availableModels.filter((model) => model.provider === "auto"),
+    ...availableModels
+      .filter((model) => model.provider !== "auto")
+      .sort((a, b) => a.provider.localeCompare(b.provider)),
+  ];
   const slashMatch = editingQueueId ? null : draft.match(/^\/([^\s]*)$/);
   const slashQuery = slashMatch?.[1] ?? "";
   const matchingSlashCommands = React.useMemo(
@@ -3504,70 +3476,27 @@ export function SemanticSession({
                 >
                   <div className="semantic-model-menu-sections">
                     <section className="semantic-model-menu-section">
-                      {autoModels.length > 0 && (
-                        <>
-                          <div className="semantic-composer-menu-label">
-                            Auto Router
-                          </div>
-                          {autoModels.map((model) => {
-                            const value = `${model.provider}/${model.id}`;
-                            return (
-                              <button
-                                key={value}
-                                type="button"
-                                onClick={() =>
-                                  void selectModel(model.provider, model.id)
-                                }
-                              >
-                                <span>
-                                  <strong>{model.name}</strong>
-                                  <small>{value}</small>
-                                </span>
-                                {selectedModelRef === value && (
-                                  <Check className="h-4 w-4 text-sky-300" />
-                                )}
-                              </button>
-                            );
-                          })}
-                        </>
-                      )}
-                      {modelsByProvider.length > 0 && (
-                        <>
-                          <div className="semantic-composer-menu-label">
-                            {autoModels.length > 0 ? "Models" : "Model"}
-                          </div>
-                          {modelsByProvider.map(([provider, models]) => (
-                            <React.Fragment key={provider}>
-                              <div className="semantic-model-menu-provider-label">
-                                {formatProviderLabel(provider)}
-                              </div>
-                              {models.map((model) => {
-                                const value = `${model.provider}/${model.id}`;
-                                return (
-                                  <button
-                                    key={value}
-                                    type="button"
-                                    onClick={() =>
-                                      void selectModel(
-                                        model.provider,
-                                        model.id,
-                                      )
-                                    }
-                                  >
-                                    <span>
-                                      <strong>{model.name}</strong>
-                                      <small>{value}</small>
-                                    </span>
-                                    {selectedModelRef === value && (
-                                      <Check className="h-4 w-4 text-sky-300" />
-                                    )}
-                                  </button>
-                                );
-                              })}
-                            </React.Fragment>
-                          ))}
-                        </>
-                      )}
+                      {orderedModels.length > 0 &&
+                        orderedModels.map((model) => {
+                          const value = `${model.provider}/${model.id}`;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() =>
+                                void selectModel(model.provider, model.id)
+                              }
+                            >
+                              <span>
+                                <strong>{model.name}</strong>
+                                <small>{value}</small>
+                              </span>
+                              {selectedModelRef === value && (
+                                <Check className="h-4 w-4 text-sky-300" />
+                              )}
+                            </button>
+                          );
+                        })}
                     </section>
                     {!autoSelected && (
                       <section className="semantic-model-menu-section semantic-model-menu-effort">

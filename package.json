@@ -92,5 +92,8 @@
     "diff": "8.0.3",
     "highlight.js": "11.11.1",
     "proper-lockfile": "4.1.2"
+  },
+  "patchedDependencies": {
+    "@earendil-works/pi-coding-agent@0.84.1": "patches/@earendil-works%2Fpi-coding-agent@0.84.1.patch"
   }
 }
