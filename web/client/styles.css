@@ -1106,6 +1106,9 @@ details[open] > summary .semantic-tool-chevron {
   grid-template-columns: minmax(0, 1.35fr) minmax(13rem, 1fr);
   align-items: start;
 }
+.semantic-model-menu-sections:not(:has(.semantic-model-menu-effort)) {
+  grid-template-columns: minmax(0, 1fr);
+}
 .semantic-model-menu-section {
   min-width: 0;
 }

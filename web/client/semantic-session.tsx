@@ -2597,7 +2597,6 @@ export function SemanticSession({
     setControlBusy(true);
     try {
       await onSelectModel(provider, modelId);
-      setModelMenuOpen(false);
       setActionError(null);
     } catch (cause) {
       reportActionError(cause);
@@ -2613,7 +2612,6 @@ export function SemanticSession({
     setControlBusy(true);
     try {
       await onSelectThinkingLevel(level);
-      setModelMenuOpen(false);
       setActionError(null);
     } catch (cause) {
       reportActionError(cause);
@@ -2676,6 +2674,12 @@ export function SemanticSession({
     sessionOptions.thinkingLevels.length > 0
       ? sessionOptions.thinkingLevels
       : ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const autoModels = availableModels.filter(
+    (model) => model.provider === "auto",
+  );
+  const nonAutoModels = availableModels.filter(
+    (model) => model.provider !== "auto",
+  );
   const slashMatch = editingQueueId ? null : draft.match(/^\/([^\s]*)$/);
   const slashQuery = slashMatch?.[1] ?? "";
   const matchingSlashCommands = React.useMemo(
@@ -3470,48 +3474,84 @@ export function SemanticSession({
                 >
                   <div className="semantic-model-menu-sections">
                     <section className="semantic-model-menu-section">
-                      <div className="semantic-composer-menu-label">Model</div>
-                      {availableModels.map((model) => {
-                        const value = `${model.provider}/${model.id}`;
-                        return (
-                          <button
-                            key={value}
-                            type="button"
-                            onClick={() =>
-                              void selectModel(model.provider, model.id)
-                            }
-                          >
-                            <span>
-                              <strong>{model.name}</strong>
-                              <small>{value}</small>
-                            </span>
-                            {selectedModelRef === value && (
-                              <Check className="h-4 w-4 text-sky-300" />
-                            )}
-                          </button>
-                        );
-                      })}
+                      {autoModels.length > 0 && (
+                        <>
+                          <div className="semantic-composer-menu-label">
+                            Auto Router
+                          </div>
+                          {autoModels.map((model) => {
+                            const value = `${model.provider}/${model.id}`;
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                onClick={() =>
+                                  void selectModel(model.provider, model.id)
+                                }
+                              >
+                                <span>
+                                  <strong>{model.name}</strong>
+                                  <small>{value}</small>
+                                </span>
+                                {selectedModelRef === value && (
+                                  <Check className="h-4 w-4 text-sky-300" />
+                                )}
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
+                      {nonAutoModels.length > 0 && (
+                        <>
+                          <div className="semantic-composer-menu-label">
+                            {autoModels.length > 0 ? "Models" : "Model"}
+                          </div>
+                          {nonAutoModels.map((model) => {
+                            const value = `${model.provider}/${model.id}`;
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                onClick={() =>
+                                  void selectModel(model.provider, model.id)
+                                }
+                              >
+                                <span>
+                                  <strong>{model.name}</strong>
+                                  <small>{value}</small>
+                                </span>
+                                {selectedModelRef === value && (
+                                  <Check className="h-4 w-4 text-sky-300" />
+                                )}
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
                     </section>
-                    <section className="semantic-model-menu-section semantic-model-menu-effort">
-                      <div className="semantic-composer-menu-label">Effort</div>
-                      <div className="semantic-effort-grid">
-                        {availableEfforts.map((level) => (
-                          <button
-                            key={level}
-                            type="button"
-                            disabled={autoSelected}
-                            onClick={() => void selectEffort(level)}
-                          >
-                            <span>
-                              <strong>{level}</strong>
-                            </span>
-                            {effortLabel === level && (
-                              <Check className="h-4 w-4 text-sky-300" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </section>
+                    {!autoSelected && (
+                      <section className="semantic-model-menu-section semantic-model-menu-effort">
+                        <div className="semantic-composer-menu-label">
+                          Effort
+                        </div>
+                        <div className="semantic-effort-grid">
+                          {availableEfforts.map((level) => (
+                            <button
+                              key={level}
+                              type="button"
+                              onClick={() => void selectEffort(level)}
+                            >
+                              <span>
+                                <strong>{level}</strong>
+                              </span>
+                              {effortLabel === level && (
+                                <Check className="h-4 w-4 text-sky-300" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    )}
                   </div>
                 </AnchoredPopover>
                 <ContextProgressCircle session={session} />
