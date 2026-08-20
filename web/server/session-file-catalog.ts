@@ -258,7 +258,10 @@ export function createSessionFileCatalog(options: {
       if (entry.type === "session_info" && typeof entry.name === "string")
         name = entry.name;
       if (entry.type === "model_change" && typeof entry.modelId === "string")
-        model = entry.modelId;
+        model =
+          typeof entry.provider === "string" && entry.provider
+            ? `${entry.provider}/${entry.modelId}`
+            : entry.modelId;
       if (
         entry.type === "thinking_level_change" &&
         typeof entry.thinkingLevel === "string"
@@ -475,7 +478,10 @@ export function createSessionFileCatalog(options: {
         if (entry.type === "session_info" && typeof entry.name === "string")
           name = entry.name;
         if (entry.type === "model_change" && typeof entry.modelId === "string") {
-          model = entry.modelId;
+          model =
+            typeof entry.provider === "string" && entry.provider
+              ? `${entry.provider}/${entry.modelId}`
+              : entry.modelId;
           if (typeof entry.provider === "string") {
             const reference = `${entry.provider}/${entry.modelId}`;
             if (!reference.startsWith("auto/")) lastModel = reference;
