@@ -82,7 +82,11 @@ type FakePi = {
   currentModel: ModelRef;
 };
 
-function createFakePi(): FakePi {
+function createFakePi(
+  options: {
+    setModelResult?: boolean | ((model: Model<Api>, call: number) => boolean);
+  } = {},
+): FakePi {
   const handlers = new Map<string, FakeHandler>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const setModelCalls: Model<Api>[] = [];
@@ -118,8 +122,12 @@ function createFakePi(): FakePi {
     },
     setModel: async (m: Model<Api>) => {
       setModelCalls.push(m);
-      currentModel.value = m;
-      return true;
+      const success =
+        typeof options.setModelResult === "function"
+          ? options.setModelResult(m, setModelCalls.length)
+          : options.setModelResult !== false;
+      if (success) currentModel.value = m;
+      return success;
     },
     setThinkingLevel: async (level: string) => {
       thinkingLevelCalls.push(level);
@@ -150,8 +158,14 @@ function createFakePi(): FakePi {
 const FAKE_THEME = { fg: (_kind: string, text: string) => text } as unknown as Theme;
 
 function lastFooterBadge(footerEvents: unknown[]): string | undefined {
-  const last = footerEvents.at(-1) as { identitySuffix?: (theme: Theme) => string | undefined } | undefined;
-  return last?.identitySuffix?.(FAKE_THEME);
+  for (let index = footerEvents.length - 1; index >= 0; index -= 1) {
+    const event = footerEvents[index] as
+      | { modelPrefix?: (theme: Theme) => string | undefined }
+      | undefined;
+    const badge = event?.modelPrefix?.(FAKE_THEME);
+    if (badge) return badge;
+  }
+  return undefined;
 }
 
 type FakeRegistryOptions = {
@@ -240,7 +254,7 @@ test("selecting Auto marks it active without eagerly routing, showing the adapti
 
   expect(fake.setModelCalls).toEqual([]);
   expect(fake.thinkingLevelCalls).toEqual([]);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });
 
 test("Auto routes manual compaction away from its inert placeholder and restores it afterward", async () => {
@@ -276,6 +290,321 @@ test("Auto routes manual compaction away from its inert placeholder and restores
   expect(fake.currentModel.value?.id).toBe("auto");
 });
 
+test("keeps Auto on a concrete model while a web compaction aborts the agent", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const runAction = async (
+    action: "route" | "restore",
+    holdThroughCompaction = false,
+  ) => {
+    const operations: Promise<void>[] = [];
+    fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+      action,
+      ctx,
+      holdThroughCompaction,
+      waitUntil: (operation: Promise<void>) => operations.push(operation),
+    });
+    await Promise.all(operations);
+  };
+
+  await runAction("route", true);
+  await fake.fire("agent_settled", {}, ctx);
+  expect(fake.currentModel.value).toBe(a);
+  await runAction("restore");
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
+test("releases a held compaction lease when compaction completes", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const operations: Promise<void>[] = [];
+  fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+    action: "route",
+    ctx,
+    holdThroughCompaction: true,
+    waitUntil: (operation: Promise<void>) => operations.push(operation),
+  });
+  await Promise.all(operations);
+  await fake.fire("session_compact", {}, ctx);
+
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  await fake.fire("agent_end", {}, ctx);
+  expect(fake.currentModel.value).toBe(a);
+  await fake.fire("agent_settled", {}, ctx);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
+test("discards an unused post-turn compaction route", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  expect(fake.currentModel.value).toBe(a);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+  expect(fake.appendedEntries.at(-1)).toEqual({
+    type: "vessup:auto-router:active",
+    data: {
+      enabled: true,
+      pinnedTier: undefined,
+      resetRoute: true,
+      restoreRoute: undefined,
+    },
+  });
+});
+
+test("discarding a speculative route preserves the prior real Auto route", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+    entries: [
+      {
+        type: "custom",
+        customType: "vessup:auto-router:active",
+        data: { enabled: true },
+      },
+      { type: "model_change", provider: "prov", modelId: "previous" },
+      { type: "model_change", provider: "auto", modelId: "auto" },
+    ],
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(fake.appendedEntries.at(-1)).toEqual({
+    type: "vessup:auto-router:active",
+    data: {
+      enabled: true,
+      pinnedTier: undefined,
+      resetRoute: true,
+      restoreRoute: "prov/previous",
+    },
+  });
+});
+
+test("retains a post-turn route when an automatic continuation starts", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  await fake.fire("agent_start", {}, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(
+    fake.appendedEntries.some(
+      ({ data }) =>
+        typeof data === "object" &&
+        data !== null &&
+        (data as { resetRoute?: boolean }).resetRoute === true,
+    ),
+  ).toBe(false);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
+test("retains a post-turn route when compaction actually starts", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("agent_end", {}, ctx);
+  await fake.fire("session_before_compact", {}, ctx);
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(
+    fake.appendedEntries.some(
+      ({ data }) =>
+        typeof data === "object" &&
+        data !== null &&
+        (data as { resetRoute?: boolean }).resetRoute === true,
+    ),
+  ).toBe(false);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+});
+
+test("Auto routes before prompt preflight so compaction cannot use its placeholder", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  await fake.fire("input", { text: "next prompt", source: "interactive" }, ctx);
+  await fake.fire("before_agent_start", { prompt: "next prompt" }, ctx);
+
+  expect(fake.currentModel.value).toBe(a);
+  expect(fake.setModelCalls).toEqual([a]);
+});
+
+test("stops the prompt when its classified model cannot be selected", async () => {
+  const medium = model("prov", "medium-model");
+  const high = model("prov", "high-model");
+  await writeConfig({
+    efforts: {
+      medium: { models: [{ provider: "prov", id: "medium-model" }] },
+      high: { models: [{ provider: "prov", id: "high-model" }] },
+    },
+  });
+
+  const fake = createFakePi({
+    setModelResult: (selected) => selected !== high,
+  });
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({
+      models: [medium, high],
+      classify: () => "high",
+    }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  const result = await fake.fire(
+    "input",
+    { text: "next prompt", source: "interactive" },
+    ctx,
+  );
+
+  expect(result).toEqual({ action: "handled" });
+  expect(fake.setModelCalls).toEqual([high]);
+  expect(fake.currentModel.value).toBe(AUTO_PLACEHOLDER);
+  expect(ctx.notifications.some(({ type }) => type === "error")).toBe(true);
+});
+
+test("serializes compaction routing with placeholder restoration", async () => {
+  const a = model("prov", "model-a");
+  await writeConfig({
+    efforts: { medium: { models: [{ provider: "prov", id: "model-a" }] } },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a] }),
+    currentModel: fake.currentModel,
+  });
+  await selectAuto(fake, ctx);
+
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const enteredGate = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const originalSetModel = (fake.pi as unknown as {
+    setModel: (model: Model<Api>) => Promise<boolean>;
+  }).setModel;
+  let calls = 0;
+  (fake.pi as unknown as {
+    setModel: (model: Model<Api>) => Promise<boolean>;
+  }).setModel = async (model) => {
+    calls++;
+    if (calls === 1) {
+      entered();
+      await gate;
+    }
+    return originalSetModel(model);
+  };
+
+  const runAction = async (action: "route" | "restore") => {
+    const operations: Promise<void>[] = [];
+    fake.emitEvent(AUTO_ROUTER_COMPACTION_EVENT, {
+      action,
+      ctx,
+      waitUntil: (operation: Promise<void>) => operations.push(operation),
+    });
+    await Promise.all(operations);
+  };
+
+  const routing = runAction("route");
+  await enteredGate;
+  fake.currentModel.value = a;
+  const restoring = runAction("restore");
+  await Bun.sleep(5);
+  expect(calls).toBe(1);
+  release();
+  await Promise.all([routing, restoring]);
+  expect(calls).toBe(2);
+  expect(fake.currentModel.value?.provider).toBe("auto");
+});
+
 test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immediately, before any turn runs", async () => {
   const a = model("prov", "model-a");
   await writeConfig({ efforts: { high: { models: [{ provider: "prov", id: "model-a" }] } } });
@@ -288,7 +617,7 @@ test("selecting a pinned Auto (<tier>) entry shows that tier in the footer immed
   await selectPinned(fake, ctx, "high");
 
   expect(fake.setModelCalls).toEqual([]);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (high)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (high)");
 });
 
 test("a pinned Auto (<tier>) entry routes directly within that tier, skipping classification entirely", async () => {
@@ -366,7 +695,7 @@ test("session_start restores a pinned tier from a persisted entry and reverts to
 
   expect(fake.setModelCalls).toEqual([pinnedPlaceholder("xhigh")]);
   expect(ctx.model).toEqual(pinnedPlaceholder("xhigh"));
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (xhigh)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (xhigh)");
 });
 
 test("before_agent_start self-heals into the correct pinned tier when ctx.model is already that pinned placeholder", async () => {
@@ -413,7 +742,7 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(fake.thinkingLevelCalls).toEqual(["high"]);
   // The footer badge reflects the adaptive selection itself, not which tier this particular
   // turn classified to - that's what /usage is for.
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
   // Mid-turn, /model would show the real routed model, not "Auto".
   expect(ctx.model).toEqual(high);
 
@@ -423,7 +752,7 @@ test("before_agent_start routes to the classified tier, and the picker shows Aut
   expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
   expect(fake.setModelCalls.at(-1)).toEqual(AUTO_PLACEHOLDER);
   // ...and the footer badge is unchanged, since the selection never changed.
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });
 
 test("before_agent_start notifies when the classifier gives no usable answer, instead of silently defaulting", async () => {
@@ -479,7 +808,7 @@ test("a model's `effort` override sets its own thinking level, independent of th
   // The footer badge still just says "Auto (auto)" - the adaptive selection, not the tier or
   // effort this turn happened to land on (that mismatch, e.g. "Auto (max)" next to a model
   // actually running at a lower effort, is exactly what this badge no longer claims).
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 
   await fake.runCommand("usage", "", ctx);
   const notified = ctx.notifications.at(-1)?.message ?? "";
@@ -913,7 +1242,7 @@ test("deactivating Auto removes its footer badge", async () => {
 
   await fake.fire("session_start", {}, ctx);
   await selectAuto(fake, ctx);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 
   await fake.fire("model_select", { model: manual, previousModel: a, source: "set" }, ctx);
   expect(fake.footerEvents.at(-1)).toMatchObject({ remove: true });
@@ -945,7 +1274,7 @@ test("session_start on a cleanly-idle Auto session leaves the placeholder select
   await fake.fire("session_start", {}, ctx);
 
   expect(fake.setModelCalls).toEqual([]);
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });
 
 test("a brand-new session whose defaultModel is auto/auto routes on the first turn with no prior /model pick or session entries", async () => {
@@ -1017,5 +1346,5 @@ test("session_start restored mid-turn (e.g. after a crash) reverts back to the A
   expect(ctx.model).toEqual(AUTO_PLACEHOLDER);
   // Unpinned (no `pinnedTier` in the persisted entry), so the badge reflects the adaptive
   // selection, not `ctx.thinkingLevel` left over from whatever was mid-flight at the crash.
-  expect(lastFooterBadge(fake.footerEvents)).toBe("🔀 Auto (auto)");
+  expect(lastFooterBadge(fake.footerEvents)).toBe("Auto (auto)");
 });

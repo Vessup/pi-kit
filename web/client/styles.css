@@ -937,21 +937,6 @@ details[open] > summary .semantic-tool-chevron {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.semantic-token-mobile {
-  display: none;
-}
-.semantic-token-mobile > button {
-  display: grid;
-  width: 2.25rem;
-  height: 2.25rem;
-  place-items: center;
-  border-radius: 0.5rem;
-  color: rgb(113 113 122);
-}
-.semantic-token-mobile > button:hover {
-  background: rgb(39 39 42);
-  color: rgb(212 212 216);
-}
 .semantic-token-details {
   display: grid;
   min-width: 11rem;
@@ -1054,6 +1039,16 @@ details[open] > summary .semantic-tool-chevron {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.semantic-composer-control > .semantic-model-selection,
+.semantic-composer-control > .semantic-turn-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.semantic-composer-control > .semantic-turn-model {
+  color: rgb(125 211 252);
+}
 .semantic-composer-menu button {
   display: flex;
   width: 100%;
@@ -1110,6 +1105,9 @@ details[open] > summary .semantic-tool-chevron {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(13rem, 1fr);
   align-items: start;
+}
+.semantic-model-menu-sections:not(:has(.semantic-model-menu-effort)) {
+  grid-template-columns: minmax(0, 1fr);
 }
 .semantic-model-menu-section {
   min-width: 0;
@@ -1255,9 +1253,6 @@ details[open] > summary .semantic-tool-chevron {
     border-top: 1px solid rgb(63 63 70 / 0.75);
     border-left: 0;
     padding-top: 0.35rem;
-  }
-  .semantic-token-mobile {
-    display: inline-flex;
   }
   .semantic-tool summary,
   .semantic-tool-call summary {

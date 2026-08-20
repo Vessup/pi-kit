@@ -64,8 +64,28 @@ export function formatCwd(cwd: string, home: string | undefined): string {
 /** Align text on both sides while preserving ANSI and OSC 8 escape sequences. */
 export function alignSides(left: string, right: string, width: number): string {
   if (width <= 0) return "";
+  const leftWidth = visibleWidth(left);
   const rightWidth = visibleWidth(right);
-  if (rightWidth > width) return truncateToWidth(right, width, "");
+  const sidesOverlap =
+    leftWidth > 0 &&
+    rightWidth > 0 &&
+    leftWidth + 1 + rightWidth > width;
+  if (rightWidth > width || sidesOverlap) {
+    if (!left) return truncateToWidth(right, width, "");
+    const leftBudget = Math.min(
+      leftWidth,
+      Math.max(1, Math.floor(width * 0.4)),
+    );
+    const fittedLeft = truncateToWidth(left, leftBudget, "...");
+    const fittedLeftWidth = visibleWidth(fittedLeft);
+    const rightBudget = Math.max(0, width - fittedLeftWidth - 1);
+    if (rightBudget === 0) return truncateToWidth(fittedLeft, width, "");
+    const fittedRight = truncateToWidth(right, rightBudget, "...");
+    const padding = " ".repeat(
+      Math.max(1, width - fittedLeftWidth - visibleWidth(fittedRight)),
+    );
+    return fittedLeft + padding + fittedRight;
+  }
   const maxLeftWidth = Math.max(0, width - rightWidth - (left ? 1 : 0));
   const fittedLeft =
     maxLeftWidth > 0 ? truncateToWidth(left, maxLeftWidth, "...") : "";
@@ -147,7 +167,7 @@ export default function sessionFooter(pi: ExtensionAPI): void {
               }
             })
             .join(" ");
-          if (identitySuffix) cwd += ` ${identitySuffix}`;
+          if (identitySuffix) cwd += ` • ${identitySuffix}`;
 
           const totals: UsageTotals = {
             input: 0,
@@ -203,11 +223,22 @@ export default function sessionFooter(pi: ExtensionAPI): void {
           if (ctx.model && footerData.getAvailableProviderCount() > 1)
             model = `(${ctx.model.provider}) ${model}`;
 
-          const topRight = Array.from(contributions.entries())
+          const modelPrefix = Array.from(contributions.entries())
             .sort(([a], [b]) => a.localeCompare(b))
             .flatMap(([, contribution]) => {
               try {
-                const rendered = contribution.topRight?.(theme);
+                const rendered = contribution.modelPrefix?.(theme);
+                return rendered ? [rendered] : [];
+              } catch {
+                return [];
+              }
+            })
+            .join(theme.fg("dim", " • "));
+          const statsRight = Array.from(contributions.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .flatMap(([, contribution]) => {
+              try {
+                const rendered = contribution.statsRight?.(theme);
                 return rendered ? [rendered] : [];
               } catch {
                 return [];
@@ -217,15 +248,15 @@ export default function sessionFooter(pi: ExtensionAPI): void {
           const cwdLine = identityPrefix
             ? `${identityPrefix} ${theme.fg("dim", cwd)}`
             : theme.fg("dim", cwd);
+          const modelLine = modelPrefix
+            ? `${modelPrefix}${theme.fg("dim", " • ")}${theme.fg("dim", model)}`
+            : theme.fg("dim", model);
+          const statsLine = theme.fg("dim", stats.join(" "));
           const lines = [
-            topRight
-              ? alignSides(cwdLine, topRight, width)
-              : truncateToWidth(cwdLine, width, theme.fg("dim", "...")),
-            alignSides(
-              theme.fg("dim", stats.join(" ")),
-              theme.fg("dim", model),
-              width,
-            ),
+            alignSides(cwdLine, modelLine, width),
+            statsRight
+              ? alignSides(statsLine, statsRight, width)
+              : truncateToWidth(statsLine, width, theme.fg("dim", "...")),
           ];
 
           const contributionStatuses = Array.from(contributions.entries())

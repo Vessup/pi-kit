@@ -23,6 +23,7 @@
   },
   "pi": {
     "extensions": [
+      "./extensions/model-order.ts",
       "./extensions/session-footer.ts",
       "./extensions/pr-footer.ts",
       "./extensions/terminal-output.ts",

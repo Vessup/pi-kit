@@ -14,6 +14,10 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+import {
+  AUTO_ROUTER_ACTIVE_ENTRY,
+  lastAutoRoutedModelFromEntries,
+} from "../web/model-status.js";
 import { classifyTurnComplexity } from "./auto-router-classify.js";
 import {
   AutoRouterHealthStore,
@@ -42,9 +46,11 @@ import {
 
 export const AUTO_ROUTER_COMPACTION_EVENT =
   "pi-kit:auto-router:prepare-compaction";
+export const AUTO_ROUTER_MODEL_ROUTING_EVENT =
+  "pi-kit:auto-router:model-routing";
 const AUTO_PROVIDER_ID = "auto";
 const AUTO_MODEL_ID = "auto";
-const AUTO_ACTIVE_ENTRY_TYPE = "vessup:auto-router:active";
+const AUTO_ACTIVE_ENTRY_TYPE = AUTO_ROUTER_ACTIVE_ENTRY;
 const FOOTER_KEY = "auto-router";
 const PINNED_MODEL_PREFIX = `${AUTO_MODEL_ID}-`;
 
@@ -134,7 +140,7 @@ function formatTier(tier: AutoRouterEffortLevel): string {
  * changed. `/usage` is the place to see what actually got routed to.
  */
 function footerBadge(pinnedTier: AutoRouterEffortLevel | undefined): string {
-  return `🔀 Auto (${pinnedTier ?? "auto"})`;
+  return `Auto (${pinnedTier ?? "auto"})`;
 }
 
 /** A registered-but-inert `/model` entry: never actually dispatched to, since `before_agent_start` always swaps in a real routed model first. */
@@ -176,14 +182,33 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
    * every turn routes within that tier directly, skipping classification entirely. */
   let pinnedTier: AutoRouterEffortLevel | undefined;
   let routingInFlight = false;
+  let modelTransitionTail = Promise.resolve();
+  let compactionLease = false;
+  let preflightPromptRouted = false;
+  let postTurnCompactionRoutePending = false;
+  let postTurnCompactionPreviousRoute: string | undefined;
   const healthStore = new AutoRouterHealthStore();
+
+  async function withModelTransition<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = modelTransitionTail;
+    let release!: () => void;
+    modelTransitionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
 
   function publishFooter(): void {
     if (!currentSessionId) return;
     pi.events.emit(FOOTER_CONTRIBUTION_EVENT, {
       sessionId: currentSessionId,
       key: FOOTER_KEY,
-      identitySuffix: (theme: Theme) => theme.fg("accent", footerBadge(pinnedTier)),
+      modelPrefix: (theme: Theme) => theme.fg("accent", footerBadge(pinnedTier)),
     } satisfies FooterContribution);
   }
 
@@ -202,12 +227,16 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       currentAutoModelId(),
     );
     if (!placeholder) return;
-    routingInFlight = true;
-    try {
-      await pi.setModel(placeholder);
-    } finally {
-      routingInFlight = false;
-    }
+    await withModelTransition(async () => {
+      routingInFlight = true;
+      publishModelRouting(pi, ctx, true);
+      try {
+        await pi.setModel(placeholder);
+      } finally {
+        routingInFlight = false;
+        publishModelRouting(pi, ctx, false);
+      }
+    });
   }
 
   function clearFooter(): void {
@@ -386,28 +415,44 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     return undefined;
   }
 
+  function publishModelRouting(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    active: boolean,
+  ): void {
+    pi.events.emit(AUTO_ROUTER_MODEL_ROUTING_EVENT, {
+      action: active ? "start" : "end",
+      ctx,
+    });
+  }
+
   async function applyRouting(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
     model: Model<Api>,
     effort: AutoRouterEffortLevel,
-  ): Promise<void> {
-    routingInFlight = true;
-    try {
-      const success = await pi.setModel(model);
-      if (!success) {
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Auto: no credentials configured for ${model.provider}/${model.id}`,
-            "warning",
-          );
+  ): Promise<boolean> {
+    return withModelTransition(async () => {
+      routingInFlight = true;
+      publishModelRouting(pi, ctx, true);
+      try {
+        const success = await pi.setModel(model);
+        if (!success) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `Auto: no credentials configured for ${model.provider}/${model.id}`,
+              "warning",
+            );
+          }
+          return false;
         }
-        return;
+        await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
+        return true;
+      } finally {
+        routingInFlight = false;
+        publishModelRouting(pi, ctx, false);
       }
-      await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
-    } finally {
-      routingInFlight = false;
-    }
+    });
   }
 
   async function routeForCompaction(
@@ -422,7 +467,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       throw new Error(
         "Auto could not select a configured model for compaction.",
       );
-    await applyRouting(pi, ctx, selected.model, selected.effort);
+    if (!(await applyRouting(pi, ctx, selected.model, selected.effort)))
+      throw new Error(
+        `Auto could not authenticate ${selected.model.provider}/${selected.model.id} for compaction`,
+      );
   }
 
   async function routeForPrompt(
@@ -430,7 +478,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     ctx: ExtensionContext,
     prompt: string,
     hasImages: boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const settings = await readAutoRouterSettings();
 
     let tier: AutoRouterEffortLevel;
@@ -504,8 +552,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
           "warning",
         );
       }
-      return;
+      return false;
     }
+    if (!(await applyRouting(pi, ctx, picked.model, picked.effort))) return false;
     // Persisted so `/usage` can show what the classifier actually said - the classify call
     // itself is otherwise a throwaway completion whose result is discarded after parsing, which
     // made a prior misrouting report impossible to actually verify against real evidence.
@@ -516,8 +565,54 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       effort: picked.effort,
       model: picked.model,
     });
-    await applyRouting(pi, ctx, picked.model, picked.effort);
+    return true;
   }
+
+  pi.on("input", async (event, ctx) => {
+    // Steering/follow-up messages do not run core's pre-prompt compaction check,
+    // and changing the model while an agent is streaming would race its request.
+    if (event.streamingBehavior) return;
+    preflightPromptRouted = false;
+    // Core checks for threshold compaction before before_agent_start. Route away
+    // from Auto's inert placeholder during that preflight so summarization uses
+    // a real model instead of http://127.0.0.1:0. If placeholder restoration
+    // is still in flight, wait for that transition before deciding whether the
+    // current model is safe for core's preflight compaction check.
+    if (!autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID) return;
+    if (routingInFlight) await modelTransitionTail;
+    if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
+    if (!autoActive) {
+      autoActive = true;
+      pinnedTier = tierFromModelId(ctx.model.id);
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
+      publishFooter();
+    }
+    try {
+      if (
+        !(await routeForPrompt(
+          pi,
+          ctx,
+          event.text,
+          Boolean(event.images?.length),
+        ))
+      ) {
+        if (ctx.hasUI)
+          ctx.ui.notify("Auto could not route this prompt.", "error");
+        return { action: "handled" };
+      }
+      preflightPromptRouted = true;
+    } catch (error) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+      }
+      // Do not let core continue on Auto's inert placeholder or a preflight
+      // fallback when the prompt's final route could not be selected.
+      return { action: "handled" };
+    }
+  });
 
   async function reconcileAllProviders(
     modelRegistry: ModelRegistry,
@@ -552,11 +647,33 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     )
       return;
     if (action === "route") {
-      if (autoActive) waitUntil(routeForCompaction(pi, ctx));
+      const holdThroughCompaction = value.holdThroughCompaction === true;
+      if (holdThroughCompaction) compactionLease = true;
+      if (!autoActive) {
+        if (holdThroughCompaction) compactionLease = false;
+        return;
+      }
+      const route = routeForCompaction(pi, ctx);
+      waitUntil(
+        holdThroughCompaction
+          ? route.catch((error) => {
+              compactionLease = false;
+              throw error;
+            })
+          : route,
+      );
       return;
     }
-    if (autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID)
-      waitUntil(revertToAutoPlaceholder(pi, ctx));
+    waitUntil(
+      (async () => {
+        try {
+          if (autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID)
+            await revertToAutoPlaceholder(pi, ctx);
+        } finally {
+          compactionLease = false;
+        }
+      })(),
+    );
   });
 
   pi.on("model_select", (event, _ctx) => {
@@ -581,6 +698,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("session_start", async (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
+    compactionLease = false;
+    preflightPromptRouted = false;
+    postTurnCompactionRoutePending = false;
+    postTurnCompactionPreviousRoute = undefined;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -598,6 +719,11 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       restored.pinnedTier ??
       (modelIsAuto && ctx.model ? tierFromModelId(ctx.model.id) : undefined);
     if (autoActive) {
+      if (modelIsAuto && !restored.active)
+        pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, {
+          enabled: true,
+          pinnedTier,
+        });
       if (ctx.model && ctx.model.provider !== AUTO_PROVIDER_ID) {
         // Restored mid-turn (e.g. an interrupted process, before agent_settled could
         // revert it). Normalize back to the placeholder so /model shows Auto again.
@@ -611,13 +737,93 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     void ensureAutoModelScopedInGlobalSettings().catch(() => undefined);
   });
 
+  pi.on("agent_end", async (_event, ctx) => {
+    // A user can switch to Auto while a turn is still running. Core checks
+    // post-turn compaction immediately after agent_end, before agent_settled,
+    // so proactively replace the placeholder here if that happened mid-turn.
+    if (
+      !compactionLease &&
+      autoActive &&
+      ctx.model?.provider === AUTO_PROVIDER_ID
+    ) {
+      try {
+        postTurnCompactionPreviousRoute = lastAutoRoutedModelFromEntries(
+          ctx.sessionManager.getEntries(),
+        );
+        await routeForCompaction(pi, ctx);
+        postTurnCompactionRoutePending = true;
+      } catch (error) {
+        postTurnCompactionPreviousRoute = undefined;
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            error instanceof Error ? error.message : String(error),
+            "error",
+          );
+        }
+      }
+    }
+  });
+
+  function commitPostTurnCompactionRoute(): void {
+    postTurnCompactionRoutePending = false;
+    postTurnCompactionPreviousRoute = undefined;
+  }
+
+  pi.on("session_before_compact", () => {
+    // Core has now committed to a real compaction attempt, so a model selected
+    // at agent_end is no longer speculative and should remain visible as used.
+    commitPostTurnCompactionRoute();
+  });
+
+  pi.on("agent_start", () => {
+    // A retry or queued continuation can begin after agent_end. In that case
+    // the candidate is handling a real request even if no compaction starts.
+    if (postTurnCompactionRoutePending) commitPostTurnCompactionRoute();
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
-    if (!autoActive) return;
+    if (!autoActive || compactionLease) return;
     if (!ctx.model || ctx.model.provider === AUTO_PROVIDER_ID) return;
+    if (postTurnCompactionRoutePending) {
+      const restoreRoute = postTurnCompactionPreviousRoute;
+      commitPostTurnCompactionRoute();
+      // The agent_end route existed only to make core's post-turn compaction
+      // check safe, but no compaction started. Roll it back in durable and live
+      // Web status without erasing an earlier model that Auto genuinely used.
+      pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, {
+        enabled: true,
+        pinnedTier,
+        resetRoute: true,
+        restoreRoute,
+      });
+      pi.events.emit(AUTO_ROUTER_MODEL_ROUTING_EVENT, {
+        action: "discard",
+        ctx,
+        restoreRoute,
+      });
+    }
     await revertToAutoPlaceholder(pi, ctx);
   });
 
+  pi.on("session_compact", () => {
+    // A successful compaction is the end of the lease even if the caller is
+    // interrupted before it can issue the paired restore action.
+    compactionLease = false;
+    commitPostTurnCompactionRoute();
+  });
+
+  pi.on("session_shutdown", async () => {
+    compactionLease = false;
+    routingInFlight = false;
+    preflightPromptRouted = false;
+    commitPostTurnCompactionRoute();
+  });
+
   pi.on("before_agent_start", async (event, ctx) => {
+    if (preflightPromptRouted) {
+      preflightPromptRouted = false;
+      return;
+    }
     if (!autoActive) {
       // `autoActive` is bookkeeping derived from model_select/session_start events, and every
       // path that's supposed to keep it in sync with reality is a separate thing to get right -

@@ -1,3 +1,8 @@
+import {
+  applyRuntimeModelStatus,
+  isAutoModelReference,
+  selectedModelReference,
+} from "../model-status.js";
 import type { WebSession } from "../protocol.js";
 import type { SessionFileCatalog, SessionRecord } from "./server-types.js";
 import type { ServerRuntimeState } from "./serverRuntimeState.js";
@@ -19,18 +24,58 @@ export function createRecordSync(options: {
     zeroWebUsage,
   } = catalog;
 
-  function updateRecordFromState(record: SessionRecord, state: unknown): void {
+  function updateRecordFromState(
+    record: SessionRecord,
+    state: unknown,
+    expectedModelTurnGeneration?: number,
+  ): void {
     const s = state as Record<string, unknown> | undefined;
     if (!s) return;
+    const modelStateIsCurrent =
+      expectedModelTurnGeneration === undefined ||
+      (record.modelTurnGeneration ?? 0) === expectedModelTurnGeneration;
     const model = s.model as Record<string, unknown> | null | undefined;
-    if (model && typeof model.id === "string") {
-      record.model =
+    if (modelStateIsCurrent && model && typeof model.id === "string") {
+      const runtimeModel =
         typeof model.provider === "string" && model.provider
           ? `${model.provider}/${model.id}`
           : model.id;
-    }
-    if (typeof s.thinkingLevel === "string")
+      const selectedModel = selectedModelReference(record);
+      const preservingAutoSelection =
+        record.autoTurnActive === true &&
+        isAutoModelReference(selectedModel) &&
+        !isAutoModelReference(runtimeModel);
+      // The settlement refresh can race Auto's asynchronous placeholder
+      // restore. While settling, retain the placeholder for any concrete
+      // snapshot and clear this phase only when the runtime reports Auto.
+      const preservingSettledAutoSelection =
+        record.autoTurnSettling === true &&
+        isAutoModelReference(selectedModel) &&
+        !isAutoModelReference(runtimeModel);
+      if (preservingSettledAutoSelection) {
+        record.model = selectedModel;
+        record.selectedModel = selectedModel;
+        record.lastModel = runtimeModel;
+        if (typeof s.thinkingLevel === "string")
+          record.thinkingLevel = s.thinkingLevel;
+      } else {
+        const next = applyRuntimeModelStatus(
+          record,
+          runtimeModel,
+          typeof s.thinkingLevel === "string" ? s.thinkingLevel : undefined,
+          preservingAutoSelection,
+        );
+        record.model = next.model;
+        record.thinkingLevel = next.thinkingLevel;
+        record.selectedModel = next.selectedModel;
+        record.lastModel = next.lastModel;
+        if (record.autoTurnSettling === true)
+          record.autoTurnSettling = false;
+      }
+      if (!preservingAutoSelection) record.autoTurnActive = false;
+    } else if (modelStateIsCurrent && typeof s.thinkingLevel === "string") {
       record.thinkingLevel = s.thinkingLevel;
+    }
     if (typeof s.sessionFile === "string") {
       record.file = s.sessionFile;
       runtime.sessionsByFile.set(normalizePath(s.sessionFile), record);
@@ -46,15 +91,45 @@ export function createRecordSync(options: {
         : undefined;
     if (typeof s.messageCount === "number")
       record.messageCount = s.messageCount;
-    if (s.isCompacting === true) {
+    if (modelStateIsCurrent && s.isCompacting === true) {
       record.compaction ??= { reason: "threshold", startedAt: Date.now() };
       record.status = "working";
-    } else if (s.isCompacting === false) {
+    } else if (modelStateIsCurrent && s.isCompacting === false) {
       record.compaction = undefined;
       if (s.isStreaming === false && record.status !== "error")
         record.status = "idle";
     }
     record.updatedAt = Date.now();
+  }
+
+  function beginTurnModelTracking(record: SessionRecord): number {
+    const generation = (record.modelTurnGeneration ?? 0) + 1;
+    record.modelTurnGeneration = generation;
+    record.autoTurnSettling = false;
+    record.autoTurnActive = isAutoModelReference(
+      selectedModelReference(record),
+    );
+    if (!record.autoTurnActive) {
+      record.selectedModel ??= record.model;
+      record.lastModel = undefined;
+    }
+    return generation;
+  }
+
+  function finishTurnModelTracking(record: SessionRecord): void {
+    record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
+    const selectedModel = selectedModelReference(record);
+    // Keep the preservation flag through the first settlement refresh. The
+    // Auto extension may still be finishing its asynchronous placeholder
+    // restore when that get_state request is answered.
+    if (record.autoTurnActive && isAutoModelReference(selectedModel)) {
+      record.model = selectedModel;
+      record.autoTurnSettling = true;
+      return;
+    }
+    record.autoTurnActive = false;
+    record.autoTurnSettling = false;
+    record.selectedModel ??= record.model;
   }
 
   function updateRecordFromStats(record: SessionRecord, value: unknown): void {
@@ -188,6 +263,8 @@ export function createRecordSync(options: {
       previous.branch !== next.branch ||
       previous.model !== next.model ||
       previous.thinkingLevel !== next.thinkingLevel ||
+      previous.selectedModel !== next.selectedModel ||
+      (previous.lastModel ?? undefined) !== (next.lastModel ?? undefined) ||
       previous.status !== next.status ||
       previous.source !== next.source ||
       previous.messageCount !== next.messageCount ||
@@ -202,6 +279,8 @@ export function createRecordSync(options: {
 
   return {
     updateRecordFromState,
+    beginTurnModelTracking,
+    finishTurnModelTracking,
     updateRecordFromStats,
     updateSubagentsFromToolEvent,
     catalogSessionChanged,

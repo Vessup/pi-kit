@@ -41,7 +41,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  CircleGauge,
   FilePenLine,
   FileText,
   FileUp,
@@ -87,6 +86,7 @@ import {
   type SemanticImage,
   type WebQueuedMessage,
   type WebQueueReplacement,
+  type WebModelOption,
   type WebSession,
   type WebSessionOptions,
   type WebSlashCommand,
@@ -110,8 +110,17 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "./components/ui/tooltip";
+import {
+  autoTierFromReference,
+  isAutoModelReference,
+  selectedModelReference,
+} from "../model-status";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
+import {
+  thinkingLevelsForSelectedModel,
+  visibleRoutedThinkingLevel,
+} from "./model-options";
 import { anchoredScrollTop, resolveScrollFollow } from "./scroll-follow";
 import { hasActiveSessionWork } from "./session-status";
 import { toolHasArgumentDetails } from "./tool-expansion";
@@ -598,6 +607,12 @@ function FormattedOutput({
   ) : null;
 }
 
+function formatModelReference(reference: string): string {
+  const slashIndex = reference.indexOf("/");
+  if (slashIndex < 0) return reference;
+  return `(${reference.slice(0, slashIndex)}) ${reference.slice(slashIndex + 1)}`;
+}
+
 function formatTokenCount(count: number): string {
   if (count < 1_000) return String(count);
   if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -649,9 +664,15 @@ function combinedUsage(
   };
 }
 
-function TokenDetails({ session }: { session: WebSession }) {
-  const usage = combinedUsage(session.usage, session.subagentUsage);
-  const context = session.contextUsage;
+function TokenDetails({
+  session,
+  includeContext = true,
+}: {
+  session: WebSession | null;
+  includeContext?: boolean;
+}) {
+  const usage = combinedUsage(session?.usage, session?.subagentUsage);
+  const context = session?.contextUsage;
   return (
     <div className="semantic-token-details">
       <span>
@@ -674,19 +695,21 @@ function TokenDetails({ session }: { session: WebSession }) {
       <span>
         Cost <strong>${(usage?.cost.total ?? 0).toFixed(3)}</strong>
       </span>
-      {context?.contextWindow ? (
-        <span>
-          Context{" "}
-          <strong>
-            {context.percent == null ? "?" : `${context.percent.toFixed(1)}%`} /{" "}
-            {formatTokenCount(context.contextWindow)}
-          </strong>
-        </span>
-      ) : (
-        <span>
-          Context <strong>unknown</strong>
-        </span>
-      )}
+      {includeContext &&
+        (context?.contextWindow ? (
+          <span>
+            Context{" "}
+            <strong>
+              {context.percent == null ? "?" : `${context.percent.toFixed(1)}%`} ·{" "}
+              {context.tokens == null ? "?" : formatTokenCount(context.tokens)} /{" "}
+              {formatTokenCount(context.contextWindow)}
+            </strong>
+          </span>
+        ) : (
+          <span>
+            Context <strong>unknown</strong>
+          </span>
+        ))}
     </div>
   );
 }
@@ -727,6 +750,7 @@ function sameTokenTelemetry(
       usage?.cacheRead ?? 0,
       usage?.cacheWrite ?? 0,
       usage?.cost.total ?? 0,
+      session.contextUsage?.tokens ?? null,
       session.contextUsage?.percent ?? null,
       session.contextUsage?.contextWindow ?? 0,
     ];
@@ -738,7 +762,6 @@ function sameTokenTelemetry(
 
 const ComposerTokenInfo = React.memo(
   function ComposerTokenInfo({ session }: { session: WebSession | null }) {
-    const [open, setOpen] = React.useState(false);
     if (!session) return null;
     const usage = combinedUsage(session.usage, session.subagentUsage);
     const context = session.contextUsage;
@@ -754,29 +777,7 @@ const ComposerTokenInfo = React.memo(
         ? `${context.percent == null ? "?" : `${context.percent.toFixed(1)}%`}/${formatTokenCount(context.contextWindow)}`
         : "?/?",
     ].join(" ");
-    return (
-      <>
-        <span className="semantic-token-inline">{compact}</span>
-        <span className="semantic-token-mobile">
-          <TooltipProvider>
-            <Tooltip open={open} onOpenChange={setOpen}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Token usage"
-                  onClick={() => setOpen((value) => !value)}
-                >
-                  <CircleGauge className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top">
-                <TokenDetails session={session} />
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </span>
-      </>
-    );
+    return <span className="semantic-token-inline">{compact}</span>;
   },
   (previous, next) => sameTokenTelemetry(previous.session, next.session),
 );
@@ -789,6 +790,7 @@ const ContextProgressCircle = React.memo(
     session: WebSession | null;
     interactive?: boolean;
   }) {
+    const [open, setOpen] = React.useState(false);
     const context = session?.contextUsage;
     const contextTokens = context?.tokens ?? 0;
     const rawPercent =
@@ -843,15 +845,21 @@ const ContextProgressCircle = React.memo(
       );
     return (
       <TooltipProvider>
-        <Tooltip>
+        <Tooltip open={open} onOpenChange={setOpen}>
           <TooltipTrigger asChild>
-            <button type="button" className={className} aria-label={label}>
+            <button
+              type="button"
+              className={className}
+              aria-label={label}
+              onClick={() => setOpen((value) => !value)}
+            >
               {ring}
             </button>
           </TooltipTrigger>
           <TooltipContent side="top">
             <div className="semantic-context-progress-details">
               <strong>{compacting ? "Compacting context…" : "Context"}</strong>
+              {session && <TokenDetails session={session} includeContext={false} />}
               <span>{contextText}</span>
             </div>
           </TooltipContent>
@@ -861,13 +869,7 @@ const ContextProgressCircle = React.memo(
   },
   (previous, next) =>
     previous.interactive === next.interactive &&
-    previous.session?.id === next.session?.id &&
-    previous.session?.contextUsage?.tokens ===
-      next.session?.contextUsage?.tokens &&
-    previous.session?.contextUsage?.contextWindow ===
-      next.session?.contextUsage?.contextWindow &&
-    previous.session?.contextUsage?.percent ===
-      next.session?.contextUsage?.percent &&
+    sameTokenTelemetry(previous.session, next.session) &&
     previous.session?.compaction?.reason === next.session?.compaction?.reason,
 );
 
@@ -2600,7 +2602,6 @@ export function SemanticSession({
     setControlBusy(true);
     try {
       await onSelectModel(provider, modelId);
-      setModelMenuOpen(false);
       setActionError(null);
     } catch (cause) {
       reportActionError(cause);
@@ -2616,7 +2617,6 @@ export function SemanticSession({
     setControlBusy(true);
     try {
       await onSelectThinkingLevel(level);
-      setModelMenuOpen(false);
       setActionError(null);
     } catch (cause) {
       reportActionError(cause);
@@ -2628,27 +2628,64 @@ export function SemanticSession({
     }
   };
 
-  const modelLabel = session?.model?.split("/").pop() ?? "Model";
-  const effortLabel = session?.thinkingLevel ?? "off";
-  const availableModels =
+  const selectedModelRef = selectedModelReference(session ?? {});
+  const selectedModelIdLabel = selectedModelRef?.split("/").pop() ?? "Model";
+  const autoSelected = isAutoModelReference(selectedModelRef);
+  const autoTier = autoTierFromReference(selectedModelRef);
+  const fallbackModelLabel = autoSelected
+    ? `Auto (${autoTier ?? "auto"})`
+    : selectedModelIdLabel;
+  const rawThinkingLevel = session?.thinkingLevel;
+  const effortLabel =
+    autoSelected
+      ? `(${autoTier ?? "auto"})`
+      : rawThinkingLevel && rawThinkingLevel !== "off"
+        ? rawThinkingLevel
+        : "";
+  const availableModels: WebModelOption[] =
     sessionOptions.models.length > 0
       ? sessionOptions.models
       : (() => {
-          const slashIndex = session?.model?.indexOf("/") ?? -1;
-          if (!session?.model || slashIndex < 0) return [];
+          const slashIndex = selectedModelRef?.indexOf("/") ?? -1;
+          if (!selectedModelRef || slashIndex < 0) return [];
           return [
             {
-              provider: session.model.slice(0, slashIndex),
-              id: session.model.slice(slashIndex + 1),
-              name: modelLabel,
+              provider: selectedModelRef.slice(0, slashIndex),
+              id: selectedModelRef.slice(slashIndex + 1),
+              name: fallbackModelLabel,
               reasoning: true,
             },
           ];
         })();
-  const availableEfforts =
-    sessionOptions.thinkingLevels.length > 0
-      ? sessionOptions.thinkingLevels
-      : ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const selectedModelOption = availableModels.find(
+    (model) => `${model.provider}/${model.id}` === selectedModelRef,
+  );
+  const modelLabel = autoSelected
+    ? "Auto"
+    : (selectedModelOption?.name ?? fallbackModelLabel);
+  const effectiveModelReference =
+    autoSelected && session?.model && !isAutoModelReference(session.model)
+      ? session.model
+      : autoSelected
+        ? session?.lastModel
+        : undefined;
+  const routedEffortLabel = visibleRoutedThinkingLevel(rawThinkingLevel);
+  const turnModelSummary =
+    effectiveModelReference && !isAutoModelReference(effectiveModelReference)
+      ? routedEffortLabel
+        ? `${formatModelReference(effectiveModelReference)} · ${routedEffortLabel}`
+        : formatModelReference(effectiveModelReference)
+      : undefined;
+  const availableEfforts = thinkingLevelsForSelectedModel(
+    sessionOptions.models,
+    selectedModelRef,
+  );
+  const orderedModels = [
+    ...availableModels.filter((model) => model.provider === "auto"),
+    ...availableModels
+      .filter((model) => model.provider !== "auto")
+      .sort((a, b) => a.provider.localeCompare(b.provider)),
+  ];
   const slashMatch = editingQueueId ? null : draft.match(/^\/([^\s]*)$/);
   const slashQuery = slashMatch?.[1] ?? "";
   const matchingSlashCommands = React.useMemo(
@@ -3405,12 +3442,33 @@ export function SemanticSession({
                   variant="ghost"
                   size="sm"
                   disabled={controlBusy || !connected}
+                  title={
+                    turnModelSummary
+                      ? `Selected ${modelLabel}${effortLabel ? ` ${effortLabel}` : ""}; using ${turnModelSummary}`
+                      : undefined
+                  }
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => setModelMenuOpen((open) => !open)}
                 >
-                  {modelLabel}
-                  <span className="text-zinc-600">·</span>
-                  <span>{effortLabel}</span>
+                  <span className="semantic-model-selection">{modelLabel}</span>
+                  {autoSelected ? (
+                    <span>{effortLabel}</span>
+                  ) : (
+                    effortLabel && (
+                      <>
+                        <span className="text-zinc-600">·</span>
+                        <span>{effortLabel}</span>
+                      </>
+                    )
+                  )}
+                  {turnModelSummary && (
+                    <>
+                      <span className="text-zinc-600">→</span>
+                      <span className="semantic-turn-model">
+                        {turnModelSummary}
+                      </span>
+                    </>
+                  )}
                   <ChevronDown className="h-3.5 w-3.5" />
                 </Button>
                 <AnchoredPopover
@@ -3422,47 +3480,53 @@ export function SemanticSession({
                 >
                   <div className="semantic-model-menu-sections">
                     <section className="semantic-model-menu-section">
-                      <div className="semantic-composer-menu-label">Model</div>
-                      {availableModels.map((model) => {
-                        const value = `${model.provider}/${model.id}`;
-                        return (
-                          <button
-                            key={value}
-                            type="button"
-                            onClick={() =>
-                              void selectModel(model.provider, model.id)
-                            }
-                          >
-                            <span>
-                              <strong>{model.name}</strong>
-                              <small>{value}</small>
-                            </span>
-                            {session?.model === value && (
-                              <Check className="h-4 w-4 text-sky-300" />
-                            )}
-                          </button>
-                        );
-                      })}
+                      {orderedModels.length > 0 &&
+                        orderedModels.map((model) => {
+                          const value = `${model.provider}/${model.id}`;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              disabled={controlBusy || !connected}
+                              onClick={() =>
+                                void selectModel(model.provider, model.id)
+                              }
+                            >
+                              <span>
+                                <strong>{model.name}</strong>
+                                <small>{value}</small>
+                              </span>
+                              {selectedModelRef === value && (
+                                <Check className="h-4 w-4 text-sky-300" />
+                              )}
+                            </button>
+                          );
+                        })}
                     </section>
-                    <section className="semantic-model-menu-section semantic-model-menu-effort">
-                      <div className="semantic-composer-menu-label">Effort</div>
-                      <div className="semantic-effort-grid">
-                        {availableEfforts.map((level) => (
-                          <button
-                            key={level}
-                            type="button"
-                            onClick={() => void selectEffort(level)}
-                          >
-                            <span>
-                              <strong>{level}</strong>
-                            </span>
-                            {effortLabel === level && (
-                              <Check className="h-4 w-4 text-sky-300" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </section>
+                    {!autoSelected && availableEfforts.length > 0 && (
+                      <section className="semantic-model-menu-section semantic-model-menu-effort">
+                        <div className="semantic-composer-menu-label">
+                          Effort
+                        </div>
+                        <div className="semantic-effort-grid">
+                          {availableEfforts.map((level) => (
+                            <button
+                              key={level}
+                              type="button"
+                              disabled={controlBusy || !connected}
+                              onClick={() => void selectEffort(level)}
+                            >
+                              <span>
+                                <strong>{level}</strong>
+                              </span>
+                              {rawThinkingLevel === level && (
+                                <Check className="h-4 w-4 text-sky-300" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    )}
                   </div>
                 </AnchoredPopover>
                 <ContextProgressCircle session={session} />

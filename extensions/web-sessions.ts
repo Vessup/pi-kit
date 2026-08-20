@@ -10,6 +10,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { agentEndTerminalNotice } from "../web/assistant-message.js";
 import {
+  applyRuntimeModelStatus,
+  isAutoModelReference,
+  isAutoRuntimeModelSwap,
+  lastAutoRoutedModelFromEntries,
+  selectedAutoModelFromEntries,
+  selectedModelReference,
+  webModelReference,
+} from "../web/model-status.js";
+import {
   WEB_COMPACT_COMMAND,
   WEB_COMPACT_EXTENSION_COMMAND,
 } from "../web/compact-command.js";
@@ -36,7 +45,10 @@ import {
   isSkillSlashCommand,
 } from "../web/slash-commands.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
-import { AUTO_ROUTER_COMPACTION_EVENT } from "./auto-router.js";
+import {
+  AUTO_ROUTER_COMPACTION_EVENT,
+  AUTO_ROUTER_MODEL_ROUTING_EVENT,
+} from "./auto-router.js";
 import {
   FOOTER_CONTRIBUTION_EVENT,
   type FooterContribution,
@@ -80,9 +92,12 @@ function modelThinkingLevels(model: {
   thinkingLevelMap?: Partial<Record<string, string | null>>;
 }): string[] {
   if (!model.reasoning) return ["off"];
-  return THINKING_LEVELS.filter(
-    (level) => model.thinkingLevelMap?.[level] !== null,
-  );
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
 }
 
 export function isScopedModelAllowed(
@@ -243,6 +258,10 @@ type BridgeState = {
   reconnectTimer?: ReturnType<typeof setTimeout>;
   reconnectAttempt: number;
   pending: AgentToServerMessage[];
+  /** Set before Auto's before_agent_start hook swaps in the concrete model. */
+  autoTurnRouting: boolean;
+  /** True while Auto itself is applying a runtime model swap. */
+  autoRuntimeRouting: boolean;
   metrics: Pick<WebSession, "usage" | "contextUsage">;
   sourceReplacement?: WorktreeSessionReplacement;
 };
@@ -255,11 +274,13 @@ function runAutoRouterCompactionAction(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   action: "route" | "restore",
+  holdThroughCompaction = false,
 ): Promise<void> {
   const operations: Promise<void>[] = [];
   pi.events.emit(AUTO_ROUTER_COMPACTION_EVENT, {
     action,
     ctx,
+    holdThroughCompaction,
     waitUntil(operation: Promise<void>) {
       operations.push(operation);
     },
@@ -285,7 +306,7 @@ async function compactWithWebRouting(
   bridge?: BridgeState,
 ): Promise<unknown> {
   try {
-    await runAutoRouterCompactionAction(pi, ctx, "route");
+    await runAutoRouterCompactionAction(pi, ctx, "route", true);
     return await new Promise<unknown>((resolveCompaction, rejectCompaction) => {
       try {
         ctx.compact({
@@ -570,8 +591,11 @@ function hyperlink(url: string, label: string): string {
   return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
 }
 
-function renderGlobe(theme: Theme, url: string): string {
-  return hyperlink(url, theme.fg("accent", "🌐"));
+function renderWebLink(theme: Theme, url: string): string {
+  // Some terminals eat the trailing space between the OSC 8 link close and
+  // the following glyph, leaving the icon visually glued to the directory
+  // text. Wrapping the trailing space inside the hyperlink avoids that.
+  return hyperlink(url, `${theme.fg("accent", "⧉")} `);
 }
 
 function publishFooter(pi: ExtensionAPI, state: BridgeState): void {
@@ -580,7 +604,7 @@ function publishFooter(pi: ExtensionAPI, state: BridgeState): void {
     sessionId: state.session.id,
     key: FOOTER_KEY,
     identityPrefix: server
-      ? (theme) => renderGlobe(theme, sessionUrl(server, state.session.id))
+      ? (theme) => renderWebLink(theme, sessionUrl(server, state.session.id))
       : undefined,
     onBranchChange: () => {
       void refreshGitMetadata(pi, state);
@@ -922,7 +946,14 @@ async function executeAgentCommand(
           throw new Error(
             `No credentials available for ${command.provider}/${command.modelId}`,
           );
-        updateSession(state, { model: `${model.provider}/${model.id}` });
+        // A browser model change is explicit user selection, not Auto's
+        // transient model swap for the current turn.
+        state.autoTurnRouting = false;
+        updateSession(state, {
+          model: `${model.provider}/${model.id}`,
+          selectedModel: `${model.provider}/${model.id}`,
+          lastModel: null,
+        });
         respond(state, requestId, true);
         return;
       }
@@ -1247,6 +1278,10 @@ function makeSession(
     branch,
     model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
     thinkingLevel: ctx.thinkingLevel,
+    selectedModel:
+      selectedAutoModelFromEntries(entries) ??
+      (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+    lastModel: lastAutoRoutedModelFromEntries(entries),
     status: statusForContext(ctx),
     source: "tui",
     createdAt: header ? Date.parse(header.timestamp) || Date.now() : Date.now(),
@@ -1261,6 +1296,33 @@ function makeSession(
 
 export default function webSessions(pi: ExtensionAPI): void {
   let bridge: BridgeState | undefined;
+
+  pi.events.on(AUTO_ROUTER_MODEL_ROUTING_EVENT, (value) => {
+    if (!isRecord(value)) return;
+    const action = value.action;
+    const ctx = value.ctx as ExtensionContext | undefined;
+    if (
+      (action !== "start" && action !== "end" && action !== "discard") ||
+      !ctx ||
+      !bridge ||
+      bridge.closed ||
+      ctx.sessionManager.getSessionId() !== bridge.session.id
+    )
+      return;
+    bridge.autoRuntimeRouting = action === "start";
+    if (action === "discard") {
+      const selectedModel = selectedModelReference(bridge.session);
+      if (isAutoModelReference(selectedModel)) {
+        updateSession(bridge, {
+          model: selectedModel,
+          lastModel:
+            typeof value.restoreRoute === "string"
+              ? value.restoreRoute
+              : null,
+        });
+      }
+    }
+  });
 
   // RPC mode normally expands /skill:name before the agent sees it. Pi Web keeps
   // skill invocations as user-authored text so the agent follows the advertised
@@ -1336,6 +1398,17 @@ export default function webSessions(pi: ExtensionAPI): void {
         ? bridge.session.messageCount + 1
         : bridge.session.messageCount,
     });
+  };
+
+  const activeBridgeFor = (
+    ctx: ExtensionContext,
+  ): BridgeState | undefined => {
+    const state = bridge;
+    return state &&
+      !state.closed &&
+      ctx.sessionManager.getSessionId() === state.session.id
+      ? state
+      : undefined;
   };
 
   // Managed RPC sessions use this private command so compaction can route
@@ -1575,6 +1648,8 @@ export default function webSessions(pi: ExtensionAPI): void {
       closed: false,
       reconnectAttempt: 0,
       pending: [],
+      autoTurnRouting: false,
+      autoRuntimeRouting: false,
       metrics: { usage: session.usage, contextUsage: session.contextUsage },
       sourceReplacement,
     };
@@ -1626,19 +1701,48 @@ export default function webSessions(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("before_agent_start", (_event, ctx) => {
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge)
+      activeBridge.autoTurnRouting = isAutoModelReference(
+        selectedModelReference(activeBridge.session),
+      );
+  });
   pi.on("session_info_changed", (event, ctx) => {
-    if (bridge) updateSession(bridge, { name: event.name });
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) updateSession(activeBridge, { name: event.name });
     forward(event, ctx);
   });
   pi.on("model_select", (event, ctx) => {
-    if (bridge)
-      updateSession(bridge, {
-        model: `${event.model.provider}/${event.model.id}`,
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) {
+      const runtimeModel = webModelReference(event.model);
+      const previousModel = event.previousModel
+        ? webModelReference(event.previousModel)
+        : undefined;
+      const selectedModel = selectedModelReference(activeBridge.session);
+      const autoRoute = activeBridge.autoRuntimeRouting
+        ? isAutoModelReference(selectedModel) &&
+          !isAutoModelReference(runtimeModel)
+        : activeBridge.autoTurnRouting &&
+          isAutoRuntimeModelSwap(selectedModel, previousModel, runtimeModel);
+      const next = applyRuntimeModelStatus(
+        activeBridge.session,
+        runtimeModel,
+        ctx.thinkingLevel,
+        autoRoute,
+      );
+      if (!autoRoute) activeBridge.autoTurnRouting = false;
+      updateSession(activeBridge, {
+        ...next,
+        lastModel: next.lastModel,
       });
+    }
     forward(event, ctx);
   });
   pi.on("thinking_level_select", (event, ctx) => {
-    if (bridge) updateSession(bridge, { thinkingLevel: event.level });
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) updateSession(activeBridge, { thinkingLevel: event.level });
     forward(event, ctx);
   });
   pi.on("agent_start", (event, ctx) => forward(event, ctx, "working"));
@@ -1650,14 +1754,29 @@ export default function webSessions(pi: ExtensionAPI): void {
     forward(event, ctx, status);
   });
   pi.on("agent_settled", (event, ctx) => {
-    if (bridge?.session.compaction) {
-      endBridgeCompaction(bridge, {
+    const activeBridge = activeBridgeFor(ctx);
+    if (activeBridge) {
+      activeBridge.autoTurnRouting = false;
+      activeBridge.autoRuntimeRouting = false;
+      const selectedModel = selectedModelReference(activeBridge.session);
+      if (
+        isAutoModelReference(selectedModel) &&
+        activeBridge.session.model !== selectedModel
+      )
+        updateSession(activeBridge, { model: selectedModel });
+    }
+    if (activeBridge?.session.compaction) {
+      endBridgeCompaction(activeBridge, {
         aborted: false,
         willRetry: false,
         errorMessage: "Compaction stopped before completion",
       });
     }
-    forward(event, ctx, bridge?.session.status === "error" ? "error" : "idle");
+    forward(
+      event,
+      ctx,
+      activeBridge?.session.status === "error" ? "error" : "idle",
+    );
   });
   pi.on("turn_start", (event, ctx) => forward(event, ctx, "working"));
   pi.on("turn_end", (event, ctx) => forward(event, ctx));

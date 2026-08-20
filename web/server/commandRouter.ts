@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { isPrivateWebSessionCommand } from "../compact-command.js";
 import type {
   ClientCommandMessage,
@@ -455,26 +457,33 @@ export function createCommandRouter(options: {
                 (model) => `${model.provider}/${model.id}`,
               )
             : await readEnabledModelPatterns(options.config.settingsPath);
-          const modelOptions = models.map((model) => ({
-            provider: String(model.provider ?? ""),
-            id: String(model.id ?? ""),
-            name: String(model.name ?? model.id ?? ""),
-            reasoning: model.reasoning === true,
-          }));
+          const modelOptions = models.map((model) => {
+            const thinkingLevels = getSupportedThinkingLevels(
+              model as unknown as Model<Api>,
+            );
+            return {
+              provider: String(model.provider ?? ""),
+              id: String(model.id ?? ""),
+              name: String(model.name ?? model.id ?? ""),
+              reasoning: model.reasoning === true,
+              thinkingLevels: [...thinkingLevels],
+            };
+          });
           return {
-            models: filterModelsByScopePatterns(
-              modelOptions,
-              scopePatterns,
-            ).map((model) => ({
-              ...model,
-              thinkingLevels: levels,
-            })),
+            models: filterModelsByScopePatterns(modelOptions, scopePatterns),
             thinkingLevels: levels,
             commands: webCommands,
           };
         }
         case "set_model":
+          // A browser model change is explicit user selection, not the Auto
+          // router's transient runtime swap. Only invalidate Auto tracking
+          // after the runtime accepts the new model.
           await record.managed.setModel(command.provider, command.modelId);
+          record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
+          record.autoTurnActive = false;
+          record.autoTurnSettling = false;
+          record.lastModel = undefined;
           await refreshManagedSession(record);
           return;
         case "set_thinking_level":

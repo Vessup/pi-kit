@@ -45,6 +45,8 @@ export type SessionRecord = {
   branch?: string;
   model?: string;
   thinkingLevel?: string;
+  selectedModel?: string;
+  lastModel?: string | null;
   status: SessionStatus;
   source: SessionSource;
   createdAt: number;
@@ -64,6 +66,12 @@ export type SessionRecord = {
   historyBytes?: number;
   active: boolean;
   agentRunning?: boolean;
+  /** Internal generation used to ignore stale get_state responses from prior turns. */
+  modelTurnGeneration?: number;
+  /** True while an Auto selection is being resolved for the current turn. */
+  autoTurnActive?: boolean;
+  /** True until the settlement refresh observes Auto's restored placeholder. */
+  autoTurnSettling?: boolean;
   agentStartGeneration?: number;
   activityGeneration?: number;
   settlingGeneration?: number;

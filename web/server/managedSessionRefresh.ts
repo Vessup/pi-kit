@@ -111,6 +111,10 @@ export function createManagedSessionRefresh(options: {
       nextFile: string,
     ) => ManagedIdentityTransition,
   ): Promise<void> {
+    // A settlement refresh may finish after a queued prompt starts. Keep the
+    // generation from request time so its model snapshot cannot cancel the
+    // newer turn's Auto tracking.
+    const modelTurnGeneration = record.modelTurnGeneration ?? 0;
     await runManagedRefresh(
       () =>
         serializeManagedRefresh(record, async () => {
@@ -267,7 +271,11 @@ export function createManagedSessionRefresh(options: {
               );
             }
 
-            updateRecordFromState(record, nextState);
+            updateRecordFromState(
+              record,
+              nextState,
+              modelTurnGeneration,
+            );
             try {
               replaceRecordHistory(
                 record,

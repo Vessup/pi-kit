@@ -148,8 +148,13 @@ export type WebSession = {
   cwd: string;
   name?: string;
   branch?: string;
+  /** The runtime model currently assigned to the session. */
   model?: string;
   thinkingLevel?: string;
+  /** The model selected by the user; remains Auto while routing a turn. */
+  selectedModel?: string;
+  /** The most recent concrete model used by Auto, if any. Null explicitly clears it. */
+  lastModel?: string | null;
   status: SessionStatus;
   source: SessionSource;
   createdAt: number;

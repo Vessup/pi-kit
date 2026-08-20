@@ -13,6 +13,15 @@ import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { WebSession } from "../protocol.js";
 import {
+  AUTO_ROUTER_ACTIVE_ENTRY,
+  type AutoRoutingState,
+  autoRoutingStateFromEntries,
+  lastAutoRoutedModelFromEntries,
+  lastAutoRoutedModelFromState,
+  selectedAutoModelFromEntries,
+  selectedAutoModelFromState,
+} from "../model-status.js";
+import {
   replacementFromEntries,
   WORKTREE_REPLACEMENT_ENTRY,
 } from "../worktree-replacement.js";
@@ -46,6 +55,7 @@ export function createSessionFileCatalog(options: {
       parsedBytes: number;
       scan: SessionFileScan;
       metadataEntries: Record<string, unknown>[];
+      autoRoutingState: AutoRoutingState;
     }
   >();
 
@@ -238,7 +248,13 @@ export function createSessionFileCatalog(options: {
     entries: unknown[],
   ): Pick<
     WebSession,
-    "name" | "model" | "thinkingLevel" | "parentSession" | "messageCount"
+    | "name"
+    | "model"
+    | "thinkingLevel"
+    | "selectedModel"
+    | "lastModel"
+    | "parentSession"
+    | "messageCount"
   > {
     let name: string | undefined;
     let model: string | undefined;
@@ -252,7 +268,10 @@ export function createSessionFileCatalog(options: {
       if (entry.type === "session_info" && typeof entry.name === "string")
         name = entry.name;
       if (entry.type === "model_change" && typeof entry.modelId === "string")
-        model = entry.modelId;
+        model =
+          typeof entry.provider === "string" && entry.provider
+            ? `${entry.provider}/${entry.modelId}`
+            : entry.modelId;
       if (
         entry.type === "thinking_level_change" &&
         typeof entry.thinkingLevel === "string"
@@ -261,7 +280,15 @@ export function createSessionFileCatalog(options: {
       if (entry.type === "session" && typeof entry.parentSession === "string")
         parentSession = entry.parentSession;
     }
-    return { name, model, thinkingLevel, parentSession, messageCount };
+    return {
+      name,
+      model,
+      thinkingLevel,
+      selectedModel: selectedAutoModelFromEntries(entries),
+      lastModel: lastAutoRoutedModelFromEntries(entries),
+      parentSession,
+      messageCount,
+    };
   }
 
   function readManagedWorktreePrefix(
@@ -336,6 +363,8 @@ export function createSessionFileCatalog(options: {
         name: meta.name,
         model: meta.model,
         thinkingLevel: meta.thinkingLevel,
+        selectedModel: meta.selectedModel,
+        lastModel: meta.lastModel,
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
         createdAt:
@@ -446,6 +475,10 @@ export function createSessionFileCatalog(options: {
       let messageCount = incremental ? cached.scan.session.messageCount : 0;
       let preview = incremental ? cached.scan.session.preview : undefined;
       const metadataEntries = incremental ? [...cached.metadataEntries] : [];
+      let autoRoutingState: AutoRoutingState = incremental
+        ? { ...cached.autoRoutingState }
+        : { active: false };
+      const autoRoutingEntries: Record<string, unknown>[] = [];
       const usage = zeroWebUsage();
       if (incremental) addWebUsage(usage, cached.scan.session.usage);
       for (const line of lines) {
@@ -459,8 +492,12 @@ export function createSessionFileCatalog(options: {
         if (!entry || typeof entry.type !== "string") continue;
         if (entry.type === "session_info" && typeof entry.name === "string")
           name = entry.name;
-        if (entry.type === "model_change" && typeof entry.modelId === "string")
-          model = entry.modelId;
+        if (entry.type === "model_change" && typeof entry.modelId === "string") {
+          model =
+            typeof entry.provider === "string" && entry.provider
+              ? `${entry.provider}/${entry.modelId}`
+              : entry.modelId;
+        }
         if (
           entry.type === "thinking_level_change" &&
           typeof entry.thinkingLevel === "string"
@@ -472,6 +509,13 @@ export function createSessionFileCatalog(options: {
             entry.customType === WORKTREE_REPLACEMENT_ENTRY)
         ) {
           metadataEntries.push(entry);
+        }
+        if (
+          entry.type === "model_change" ||
+          (entry.type === "custom" &&
+            entry.customType === AUTO_ROUTER_ACTIVE_ENTRY)
+        ) {
+          autoRoutingEntries.push(entry);
         }
         if (entry.type === "message") {
           messageCount += 1;
@@ -502,6 +546,10 @@ export function createSessionFileCatalog(options: {
         : typeof header?.cwd === "string" && header.cwd
           ? header.cwd
           : dirname(file);
+      autoRoutingState = autoRoutingStateFromEntries(
+        autoRoutingEntries,
+        autoRoutingState,
+      );
       const managedWorktree = managedWorktreeFromEntries(metadataEntries);
       const session: WebSession = {
         id,
@@ -510,6 +558,8 @@ export function createSessionFileCatalog(options: {
         name,
         model,
         thinkingLevel,
+        selectedModel: selectedAutoModelFromState(autoRoutingState),
+        lastModel: lastAutoRoutedModelFromState(autoRoutingState),
         status: "offline",
         source: isManagedSessionFile(file) ? "web" : "saved",
         createdAt: incremental
@@ -544,6 +594,7 @@ export function createSessionFileCatalog(options: {
         parsedBytes,
         scan,
         metadataEntries,
+        autoRoutingState,
       });
       return freshMetadataScan(scan, file);
     } catch {

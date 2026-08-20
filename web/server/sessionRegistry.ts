@@ -3,6 +3,7 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { boundedWebHistory, webHistoryByteLength } from "../history.js";
+import { isAutoModelReference } from "../model-status.js";
 import { compareWebSessions, type WebSession } from "../protocol.js";
 import type { MissingSessions } from "./missingSessions.js";
 import { resolveSessionProject } from "./projects.js";
@@ -18,6 +19,20 @@ import type { ServerRuntimeState } from "./serverRuntimeState.js";
 import type { ServerStores } from "./serverStores.js";
 import type { SessionHistory } from "./sessionHistory.js";
 import { managedWorktreeFromEntries } from "./worktrees.js";
+
+export function mergedLastModel(
+  previous: Pick<WebSession, "model" | "selectedModel" | "lastModel">,
+  session: Pick<WebSession, "model" | "selectedModel" | "lastModel">,
+): string | undefined {
+  if (typeof session.lastModel === "string") return session.lastModel;
+  if (session.lastModel === null) return undefined;
+  const selectedModel = session.selectedModel ?? session.model;
+  if (!isAutoModelReference(selectedModel)) return undefined;
+  const previousSelection = previous.selectedModel ?? previous.model;
+  return previousSelection === selectedModel
+    ? (previous.lastModel ?? undefined)
+    : undefined;
+}
 
 /**
  * Owns the live session catalog: the id- and file-keyed record maps, record
@@ -62,6 +77,8 @@ export function createSessionRegistry(options: {
       branch: session.branch,
       model: session.model,
       thinkingLevel: session.thinkingLevel,
+      selectedModel: session.selectedModel,
+      lastModel: session.lastModel,
       status: session.status,
       source: session.source,
       createdAt: session.createdAt,
@@ -124,7 +141,9 @@ export function createSessionRegistry(options: {
           images: item.images?.map((image) => ({ ...image })),
         })),
       }) as SessionRecord;
+    const nextLastModel = mergedLastModel(record, session);
     Object.assign(record, session);
+    record.lastModel = nextLastModel;
     record.kind = kind;
     if (history.length > 0 && !existing) {
       record.history = displayHistory;
@@ -153,7 +172,9 @@ export function createSessionRegistry(options: {
       makeSessionRecord(session, kind, history, managedWorktreeScanned);
     const historyManagedWorktree =
       history.length > 0 ? managedWorktreeFromEntries(history) : undefined;
+    const nextLastModel = mergedLastModel(record, session);
     Object.assign(record, session);
+    record.lastModel = nextLastModel;
     record.kind = kind;
     if (history.length > 0)
       replaceRecordHistory(

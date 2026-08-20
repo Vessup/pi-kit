@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAutoModelReference } from "../model-status.js";
 import {
   agentEndTerminalNotice,
   assistantTerminalNotice,
@@ -93,6 +94,8 @@ export function createManagedSessionLauncher(options: {
   const { replaceRecordHistory, appendRecordHistory } = history;
   const {
     updateRecordFromState,
+    beginTurnModelTracking,
+    finishTurnModelTracking,
     updateRecordFromStats,
     updateSubagentsFromToolEvent,
   } = recordSync;
@@ -147,6 +150,12 @@ export function createManagedSessionLauncher(options: {
       name: name ?? resumed?.session.name,
       model: resumed?.session.model,
       thinkingLevel: resumed?.session.thinkingLevel,
+      selectedModel: resumed?.session.selectedModel ?? resumed?.session.model,
+      lastModel: resumed?.session.lastModel,
+      autoTurnActive: isAutoModelReference(
+        resumed?.session.selectedModel ?? resumed?.session.model,
+      ),
+      autoTurnSettling: false,
       status: "starting",
       source: "web",
       createdAt: resumed?.session.createdAt ?? Date.now(),
@@ -193,6 +202,35 @@ export function createManagedSessionLauncher(options: {
           record.status = "working";
           record.agentRunning = true;
         }
+        if (event.type === "turn_start") {
+          const generation = beginTurnModelTracking(record);
+          const managedAtTurnStart = record.managed;
+          if (record.autoTurnActive && managedAtTurnStart) {
+            void managedAtTurnStart
+              .getState()
+              .then((state) => {
+                if (
+                  runtime.sessions.get(record.id) !== record ||
+                  record.managed !== managedAtTurnStart ||
+                  record.modelTurnGeneration !== generation ||
+                  !record.autoTurnActive
+                )
+                  return;
+                const snapshot = isRecord(state) ? state : {};
+                updateRecordFromState(
+                  record,
+                  {
+                    model: snapshot.model,
+                    thinkingLevel: snapshot.thinkingLevel,
+                    sessionName: snapshot.sessionName,
+                  },
+                  generation,
+                );
+                broadcastSessionToAll(record);
+              })
+              .catch(() => undefined);
+          }
+        }
         if (event.type === "agent_end" && !record.compaction) {
           markAgentSettling(record);
           record.status =
@@ -227,6 +265,7 @@ export function createManagedSessionLauncher(options: {
           event.type === "agent_settled" &&
           isCurrentAgentSettlement(record)
         ) {
+          finishTurnModelTracking(record);
           cancelQueueSettleFallback(record);
           record.settlingGeneration = undefined;
           // Pi emits agent_settled only when no retry, compaction, or internal
