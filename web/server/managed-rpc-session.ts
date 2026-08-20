@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { WEB_COMPACT_EXTENSION_COMMAND } from "../compact-command.js";
 import type { RpcSessionCommand } from "../protocol.js";
 import { SerializedWriter } from "./serialized-writer.js";
 
@@ -124,6 +125,7 @@ export class ManagedRpcSession {
   private readonly requestPrefix = `web-${randomUUID()}`;
   private worktreeError: Error | undefined;
   private reloadError: Error | undefined;
+  private compactError: Error | undefined;
   private reloadInFlight: Promise<void> | undefined;
   private readonly lineWriter = new SerializedWriter<string>((line) =>
     this.writeLineNow(line),
@@ -287,6 +289,8 @@ export class ManagedRpcSession {
         this.worktreeError = new Error(parsed.error);
       if (parsed.extensionPath === "command:web-reload")
         this.reloadError = new Error(parsed.error);
+      if (parsed.extensionPath === `command:${WEB_COMPACT_EXTENSION_COMMAND}`)
+        this.compactError = new CommandRejectedError(parsed.error);
     }
     if (parsed.type === "response") {
       const response = parsed as RpcResponse;
@@ -535,10 +539,36 @@ export class ManagedRpcSession {
   }
 
   async compact(customInstructions?: string): Promise<unknown> {
-    return await this.send(
-      { type: "compact", customInstructions },
+    this.compactError = undefined;
+    // The web extension command gives Auto Router a chance to replace its inert
+    // placeholder before Pi resolves compaction auth. Older runtimes still use
+    // the native RPC command for compatibility.
+    let supportsWebCompact = false;
+    try {
+      const commands = await this.getCommands();
+      supportsWebCompact = commands.commands.some(
+        (command) => command.name === WEB_COMPACT_EXTENSION_COMMAND,
+      );
+    } catch {
+      // Fall back to the native RPC compact command for older runtimes.
+    }
+    if (!supportsWebCompact)
+      return await this.send(
+        { type: "compact", customInstructions },
+        LONG_RUNNING_COMMAND_TIMEOUT_MS,
+      );
+
+    const message = customInstructions
+      ? `/${WEB_COMPACT_EXTENSION_COMMAND} ${JSON.stringify(customInstructions)}`
+      : `/${WEB_COMPACT_EXTENSION_COMMAND}`;
+    await this.send(
+      { type: "prompt", message },
       LONG_RUNNING_COMMAND_TIMEOUT_MS,
     );
+    const error = this.compactError;
+    this.compactError = undefined;
+    if (error) throw error;
+    return undefined;
   }
 
   async setSessionName(name: string): Promise<void> {

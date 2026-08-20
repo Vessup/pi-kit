@@ -700,7 +700,7 @@ function CompactionStatus({ session }: { session: WebSession }) {
         : "Compacting context…";
   return (
     <output className="semantic-compaction-status">
-      <LoaderCircle className="h-4 w-4 animate-spin" />
+      <ContextProgressCircle session={session} interactive={false} />
       <div>
         <strong>{title}</strong>
         <small>
@@ -780,7 +780,13 @@ const ComposerTokenInfo = React.memo(
 );
 
 const ContextProgressCircle = React.memo(
-  function ContextProgressCircle({ session }: { session: WebSession | null }) {
+  function ContextProgressCircle({
+    session,
+    interactive = true,
+  }: {
+    session: WebSession | null;
+    interactive?: boolean;
+  }) {
     const context = session?.contextUsage;
     const contextTokens = context?.tokens ?? 0;
     const rawPercent =
@@ -803,35 +809,42 @@ const ContextProgressCircle = React.memo(
     const label = compacting
       ? `Compacting context, ${contextText}`
       : `Context usage ${contextText}`;
+    const className = cn(
+      "semantic-context-progress",
+      !interactive && "is-decorative",
+      compacting && "is-compacting",
+      !compacting && percent >= 90 && "is-critical",
+      !compacting && percent >= 70 && percent < 90 && "is-warning",
+    );
+    const ring = (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <circle
+          className="semantic-context-progress-track"
+          cx="10"
+          cy="10"
+          r={radius}
+        />
+        <circle
+          className="semantic-context-progress-value"
+          cx="10"
+          cy="10"
+          r={radius}
+          strokeDasharray={`${dash} ${circumference - dash}`}
+        />
+      </svg>
+    );
+    if (!interactive)
+      return (
+        <span className={className} aria-hidden="true">
+          {ring}
+        </span>
+      );
     return (
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
-            <button
-              type="button"
-              className={cn(
-                "semantic-context-progress",
-                compacting && "is-compacting",
-                !compacting && percent >= 90 && "is-critical",
-                !compacting && percent >= 70 && percent < 90 && "is-warning",
-              )}
-              aria-label={label}
-            >
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <circle
-                  className="semantic-context-progress-track"
-                  cx="10"
-                  cy="10"
-                  r={radius}
-                />
-                <circle
-                  className="semantic-context-progress-value"
-                  cx="10"
-                  cy="10"
-                  r={radius}
-                  strokeDasharray={`${dash} ${circumference - dash}`}
-                />
-              </svg>
+            <button type="button" className={className} aria-label={label}>
+              {ring}
             </button>
           </TooltipTrigger>
           <TooltipContent side="top">
@@ -845,6 +858,7 @@ const ContextProgressCircle = React.memo(
     );
   },
   (previous, next) =>
+    previous.interactive === next.interactive &&
     previous.session?.id === next.session?.id &&
     previous.session?.contextUsage?.tokens ===
       next.session?.contextUsage?.tokens &&

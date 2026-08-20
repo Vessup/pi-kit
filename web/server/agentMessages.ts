@@ -21,7 +21,10 @@ import {
   type ServerSessionMessage,
 } from "../protocol.js";
 import type { ClientBroadcast } from "./clientBroadcast.js";
-import type { CompactionNotice } from "./compactionNotice.js";
+import {
+  type CompactionNotice,
+  isSuccessfulCompactionEnd,
+} from "./compactionNotice.js";
 import type { GitMetadata } from "./gitMetadata.js";
 import { CommandRejectedError } from "./managed-rpc-session.js";
 import type { RecordSync } from "./recordSync.js";
@@ -242,7 +245,7 @@ export function createAgentMessages(options: {
           scheduleQueueSettleFallback(record);
           lifecycleChanged = true;
         }
-        if (event.event.aborted !== true) {
+        if (isSuccessfulCompactionEnd(event.event)) {
           broadcastCompactionNotice(record);
         }
       }

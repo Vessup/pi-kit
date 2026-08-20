@@ -1,5 +1,7 @@
 import type { WebSlashCommand } from "./protocol.js";
 
+export const WEB_COMPACT_EXTENSION_COMMAND = "web-compact";
+
 export const WEB_COMPACT_COMMAND: WebSlashCommand = {
   name: "compact",
   description: "Compact the current session context",
