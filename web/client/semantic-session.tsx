@@ -1413,11 +1413,10 @@ function ArgumentDetails({
       </div>
     );
   }
-  const hidden = new Set(["path", "command", "content", "edits", "name", "id"]);
-  const rest = Object.fromEntries(
-    Object.entries(args).filter(([key]) => !hidden.has(key)),
-  );
-  return Object.keys(rest).length > 0 ? <DataValue value={rest} /> : null;
+  // Tool metadata already has a concise summary in the card header. Rendering
+  // the remaining argument JSON as a key/value grid adds redundant visual
+  // noise above the actual tool output.
+  return null;
 }
 
 function ToolCallCard({
