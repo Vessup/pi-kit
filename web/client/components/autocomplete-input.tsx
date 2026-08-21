@@ -147,7 +147,19 @@ export function AutocompleteInput({
                     : "text-zinc-300"
                 }`}
                 onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => accept(suggestion)}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  // Accept before focus/portal changes can cancel the later
+                  // click. This is especially important inside the modal,
+                  // where the branch menu is rendered through a body portal.
+                  event.preventDefault();
+                  accept(suggestion);
+                }}
+                onClick={(event) => {
+                  // Preserve keyboard and assistive-technology activation.
+                  // Pointer activation was already handled above.
+                  if (event.detail === 0) accept(suggestion);
+                }}
               >
                 <span className="truncate">{suggestion.value}</span>
                 {suggestion.label ? (
