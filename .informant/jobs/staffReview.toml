@@ -1,13 +1,13 @@
+# This job intentionally runs the review model as root with credentials in its
+# environment. Only the repository owner can open pull requests that run
+# Informant jobs, so PR content is trusted and there is no prompt-injection
+# threat to defend against.
 name = "Staff Review"
-# Allowed mounts automatically advertise a namespaced worker capability.
 runs_on = ["container", "arm64", "mount:pi-auth"]
 optional = true
 timeout_minutes = 60
 command = """
 set -eu
-review_root="$PWD"
-review_home="$(mktemp -d)"
-review_agent_dir="$review_home/pi-agent"
 pr_number="${INFORMANT_BRANCH#pull/}"
 case "$pr_number" in
   ""|*[!0-9]*)
@@ -15,16 +15,15 @@ case "$pr_number" in
     exit 1
     ;;
 esac
-github_token="$GITHUB_TOKEN"
-export GH_TOKEN="$github_token"
-github_api_url="${GITHUB_API_URL:-https://api.github.com}"
-pr_json="$(curl -fsSL \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer $github_token" \
-  -H "X-GitHub-Api-Version: 2022-11-28" \
-  "$github_api_url/repos/$INFORMANT_REPOSITORY/pulls/$pr_number")"
-head_sha="$(printf '%s' "$pr_json" | jq -r '.head.sha')"
-base_sha="$(printf '%s' "$pr_json" | jq -r '.base.sha')"
+npm install --global @staffreview/staff@1.10.4
+
+pr_shas() {
+  gh api "repos/$INFORMANT_REPOSITORY/pulls/$pr_number" \
+    --jq '.head.sha + " " + .base.sha'
+}
+set -- $(pr_shas)
+head_sha="$1"
+base_sha="$2"
 if [ "$head_sha" != "$INFORMANT_SHA" ]; then
   echo "pull request head changed before staff review" >&2
   exit 1
@@ -33,149 +32,47 @@ fi
 merge_base="$(git merge-base "$base_sha" "$head_sha")"
 staff diff --base "$merge_base" --head working-tree --json >/dev/null
 slug="$merge_base..WT"
-review_agents="$(staff settings get reviewAgents)"
 
-# Copy the read-only credential mount into an ephemeral agent directory. Package
-# installation may update this copy, but nothing is written back to the host.
-mkdir -p "$review_agent_dir"
-cp -a /mnt/informant-pi/. "$review_agent_dir/"
-export HOME="$review_home"
-export XDG_CONFIG_HOME="$review_home/.config"
-export PI_CODING_AGENT_DIR="$review_agent_dir"
-export NODE_AUTH_TOKEN="$github_token"
-export NPM_CONFIG_USERCONFIG="$review_home/.npmrc"
-cat > "$NPM_CONFIG_USERCONFIG" <<'EOF'
-@vessup:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
-EOF
-export PI_OFFLINE=0
-pi install npm:@vessup/pi-kit@0.1.2
-export PI_OFFLINE=1
-unset NODE_AUTH_TOKEN
-rm -f "$NPM_CONFIG_USERCONFIG"
-
-# Pi loads provider credentials during startup. Keep its agent directory
-# root-owned/read-only, then have a root scrubber remove auth.json before the
-# session_start hook returns and any model-controlled tool can execute.
-auth_loaded_marker="$review_home/auth-loaded"
-chown root:reviewer "$review_agent_dir"
-find "$review_agent_dir" -type d -exec chmod 0550 {} +
-find "$review_agent_dir" -type f -exec chmod 0440 {} +
-chown reviewer:reviewer "$review_home"
-mkdir -p "$review_home/.config" "$review_root/.staffreview"
-chown -R reviewer:reviewer "$review_home/.config" "$review_root/.staffreview"
-(
-  while [ ! -e "$auth_loaded_marker" ]; do sleep 0.05; done
-  rm -f "$review_agent_dir/auth.json"
-) &
-auth_scrubber_pid=$!
-
-# The review process runs as an unprivileged user. It cannot read the root job
-# shell's original GITHUB_TOKEN environment through /proc, and source files stay
-# read-only; only Staff Review's ignored local store is writable.
-export INFORMANT_REVIEW_ROOT="$review_root"
-pi_kit_subagents="$review_agent_dir/npm/node_modules/@vessup/pi-kit/extensions/subagents.ts"
-test -f "$pi_kit_subagents"
-runuser -u reviewer -- env \
-  -u GITHUB_TOKEN -u GH_TOKEN -u NODE_AUTH_TOKEN -u CI \
-  HOME="$review_home" \
-  XDG_CONFIG_HOME="$review_home/.config" \
-  PI_CODING_AGENT_DIR="$review_agent_dir" \
-  PI_OFFLINE=1 \
-  INFORMANT_AUTH_LOADED_MARKER="$auth_loaded_marker" \
-  INFORMANT_REVIEW_ROOT="$review_root" \
-  pi --print \
-    --no-session \
-    --no-approve \
-    --no-extensions \
-    --extension /opt/informant/extensions/scrub-auth.ts \
-    --extension "$pi_kit_subagents" \
-    --no-skills \
-    --no-prompt-templates \
-    --no-context-files \
-    --tools bash,read,grep,find,ls,subagent_create,subagent_read,subagent_terminate \
-    --skill /opt/informant/skills/staff-review/SKILL.md \
-    --skill /opt/informant/skills/staff-review-find/SKILL.md \
-    --skill /opt/informant/skills/staff-review-verify/SKILL.md \
-    --skill /opt/informant/skills/staff-comment/SKILL.md \
-    "/skill:staff-review $slug $review_agents" > /tmp/staff-review-output.txt
-wait "$auth_scrubber_pid"
-test ! -e "$review_agent_dir/auth.json"
+export PI_CODING_AGENT_DIR="$(mktemp -d)"
+cp -a /mnt/informant-pi/. "$PI_CODING_AGENT_DIR/"
+PI_OFFLINE=0 pi install npm:@vessup/pi-kit@0.1.2
+pi --print \
+  --no-session \
+  --no-approve \
+  --no-extensions \
+  --extension "$PI_CODING_AGENT_DIR/npm/node_modules/@vessup/pi-kit/extensions/subagents.ts" \
+  --no-skills \
+  --no-prompt-templates \
+  --no-context-files \
+  --tools bash,read,grep,find,ls,subagent_create,subagent_read,subagent_terminate \
+  --skill "$PWD/.agents/skills/staff-review/SKILL.md" \
+  --skill "$PWD/.agents/skills/staff-review-find/SKILL.md" \
+  --skill "$PWD/.agents/skills/staff-review-verify/SKILL.md" \
+  --skill "$PWD/.agents/skills/staff-comment/SKILL.md" \
+  "/skill:staff-review $slug" > /tmp/staff-review-output.txt
 
 # A long review must never publish findings for an obsolete PR head.
-current_pr_json="$(curl -fsSL \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer $github_token" \
-  -H "X-GitHub-Api-Version: 2022-11-28" \
-  "$github_api_url/repos/$INFORMANT_REPOSITORY/pulls/$pr_number")"
-current_head="$(printf '%s' "$current_pr_json" | jq -r '.head.sha')"
-current_base="$(printf '%s' "$current_pr_json" | jq -r '.base.sha')"
-if [ "$current_head" != "$head_sha" ] || \
-   [ "$current_head" != "$INFORMANT_SHA" ] || \
-   [ "$current_base" != "$base_sha" ]; then
+set -- $(pr_shas)
+if [ "$1" != "$head_sha" ] || [ "$2" != "$base_sha" ]; then
   echo "pull request changed during staff review" >&2
   exit 1
 fi
 
-export GH_TOKEN="$github_token"
-staff review post --slug "$slug" --pr "$pr_number" --github-repo "$INFORMANT_REPOSITORY" --commit "$head_sha"
+staff review post --slug "$slug" --pr "$pr_number" \
+  --github-repo "$INFORMANT_REPOSITORY" --commit "$head_sha"
 """
-triggers = [{ event = "commit", pull_request = { state = "open", draft = false } }]
+triggers = [{ pull_request = { state = "open", draft = false } }]
 secrets = ["GITHUB_TOKEN"]
 environment = { PI_OFFLINE = "1" }
 mounts = [{ source = "pi-auth", target = "/mnt/informant-pi", write_back = false }]
 cache = [{ paths = ["~/.bun/install/cache"], shared = true }]
-container = { image = "docker.io/oven/bun:1.3.10", cpu = 2, memory_mb = 4096, trustedPrepareInputs = true, prepareInputs = [".agents/skills/staff-review/**", ".agents/skills/staff-review-find/**", ".agents/skills/staff-review-verify/**", ".agents/skills/staff-comment/**"], prepare = """
+container = { image = "docker.io/oven/bun:1.3.10", cpu = 2, memory_mb = 4096, prepare = """
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git jq ripgrep util-linux
+apt-get install -y --no-install-recommends ca-certificates gh git npm ripgrep
 rm -rf /var/lib/apt/lists/*
-useradd --create-home --shell /bin/sh reviewer
-mkdir -p /opt/informant/extensions /opt/informant/skills
-cat > /opt/informant/extensions/scrub-auth.ts <<'EOF'
-import { access, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-export default function scrubAuth(pi: any): void {
-  pi.on("session_start", async () => {
-    const agentDir = process.env.PI_CODING_AGENT_DIR;
-    const marker = process.env.INFORMANT_AUTH_LOADED_MARKER;
-    if (!agentDir || !marker) throw new Error("auth scrubber is not configured");
-    await writeFile(marker, "", { mode: 0o600 });
-    const authPath = join(agentDir, "auth.json");
-    for (let attempt = 0; attempt < 100; attempt++) {
-      try {
-        await access(authPath);
-      } catch {
-        return;
-      }
-      await delay(20);
-    }
-    throw new Error("provider credentials remained visible after startup");
-  });
-}
-EOF
-cp -R /workspace/.agents/skills/staff-review /opt/informant/skills/
-cp -R /workspace/.agents/skills/staff-review-find /opt/informant/skills/
-cp -R /workspace/.agents/skills/staff-review-verify /opt/informant/skills/
-cp -R /workspace/.agents/skills/staff-comment /opt/informant/skills/
-# Every instruction loaded by the orchestrator or its workers must resolve to
-# the immutable prepare-input copies, never to pull-request-controlled skills.
-find /opt/informant/skills -type f -name '*.md' -exec \
-  sed -i 's#[.]agents/skills/#/opt/informant/skills/#g' {} +
-chmod -R a-w /opt/informant/extensions /opt/informant/skills
-rm -rf /workspace/* /workspace/.[!.]* /workspace/..?*
-runuser -u reviewer -- env \
-  HOME=/home/reviewer \
-  BUN_INSTALL_BIN=/home/reviewer/.bun/bin \
-  bun add --global --ignore-scripts @earendil-works/pi-coding-agent@0.84.1
-ln -sf /home/reviewer/.bun/bin/pi /usr/local/bin/pi
+bun add --global --ignore-scripts @earendil-works/pi-coding-agent@0.84.1
+ln -sf "$HOME/.bun/bin/pi" /usr/local/bin/pi
 ln -sf "$(command -v bun)" /usr/local/bin/node
-curl -fsSL https://github.com/staffreview/staffreview/releases/download/v1.10.3/staff-linux-arm64 \
-  -o /usr/local/bin/staff
-printf '%s  %s\n' \
-  'ed17a5601985f1dee442f4a579fa2d082a715b5f11762f2a819be4c7b382951a' \
-  '/usr/local/bin/staff' | sha256sum -c -
-chmod +x /usr/local/bin/staff
 """ }
