@@ -182,7 +182,7 @@ With the npm scope authenticated, install the package through Pi:
 ```sh
 pi install npm:@vessup/pi-kit
 # Pin CI and other reproducible installs to a release:
-pi install npm:@vessup/pi-kit@0.1.1
+pi install npm:@vessup/pi-kit@0.1.2
 ```
 
 In GitHub Actions, grant the job `packages: read`, expose its token as `NODE_AUTH_TOKEN`, and configure npm before Pi starts:
@@ -198,7 +198,7 @@ steps:
     run: |
       echo '@vessup:registry=https://npm.pkg.github.com' >> ~/.npmrc
       echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' >> ~/.npmrc
-  - run: pi install npm:@vessup/pi-kit@0.1.1
+  - run: pi install npm:@vessup/pi-kit@0.1.2
     env:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
