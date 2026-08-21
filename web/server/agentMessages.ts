@@ -109,11 +109,10 @@ export function createAgentMessages(options: {
       incomingSelection !== `${pending.provider}/${pending.modelId}`
     )
       return false;
-    const releasesBlockedQueue = Boolean(record.modelSelectionError);
     record.pendingModelSelection = undefined;
     record.modelSelectionTarget = undefined;
     record.modelSelectionError = undefined;
-    return releasesBlockedQueue;
+    return true;
   }
 
   async function handleAgentMessage(

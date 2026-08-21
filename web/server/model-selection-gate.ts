@@ -20,6 +20,25 @@ export function modelSelectionBlocksPrompts(
   );
 }
 
+export async function drainPendingModelSelections(
+  record: Pick<SessionRecord, "pendingModelSelection" | "modelSelectionError">,
+  apply: (selection: { provider: string; modelId: string }) => Promise<void>,
+  onError?: (message: string) => void,
+): Promise<void> {
+  while (record.pendingModelSelection) {
+    const selection = record.pendingModelSelection;
+    record.pendingModelSelection = undefined;
+    try {
+      await apply(selection);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      record.modelSelectionError = message;
+      onError?.(message);
+    }
+  }
+  if (record.modelSelectionError) throw new Error(record.modelSelectionError);
+}
+
 export function queuedModelDependencyBlocksDelivery(
   record: Pick<SessionRecord, "queue" | "selectedModel" | "model">,
 ): boolean {

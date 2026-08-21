@@ -12,12 +12,21 @@ test("concurrent failed submissions are both restored", () => {
   );
   expect(
     restoreFailedImages(
-      [{ data: "current", mimeType: "image/png" }],
-      [{ data: "failed", mimeType: "image/jpeg" }],
+      [
+        { type: "image", data: "current-1", mimeType: "image/png" },
+        { type: "image", data: "current-2", mimeType: "image/png" },
+        { type: "image", data: "current-3", mimeType: "image/png" },
+      ],
+      [
+        { type: "image", data: "failed-1", mimeType: "image/jpeg" },
+        { type: "image", data: "failed-2", mimeType: "image/jpeg" },
+      ],
     ),
   ).toEqual([
-    { data: "failed", mimeType: "image/jpeg" },
-    { data: "current", mimeType: "image/png" },
+    { type: "image", data: "failed-1", mimeType: "image/jpeg" },
+    { type: "image", data: "failed-2", mimeType: "image/jpeg" },
+    { type: "image", data: "current-1", mimeType: "image/png" },
+    { type: "image", data: "current-2", mimeType: "image/png" },
   ]);
 });
 

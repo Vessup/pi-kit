@@ -103,13 +103,17 @@ wait "$auth_scrubber_pid"
 test ! -e "$review_agent_dir/auth.json"
 
 # A long review must never publish findings for an obsolete PR head.
-current_head="$(curl -fsSL \
+current_pr_json="$(curl -fsSL \
   -H "Accept: application/vnd.github+json" \
   -H "Authorization: Bearer $github_token" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  "$github_api_url/repos/$INFORMANT_REPOSITORY/pulls/$pr_number" | jq -r '.head.sha')"
-if [ "$current_head" != "$head_sha" ] || [ "$current_head" != "$INFORMANT_SHA" ]; then
-  echo "pull request head changed during staff review" >&2
+  "$github_api_url/repos/$INFORMANT_REPOSITORY/pulls/$pr_number")"
+current_head="$(printf '%s' "$current_pr_json" | jq -r '.head.sha')"
+current_base="$(printf '%s' "$current_pr_json" | jq -r '.base.sha')"
+if [ "$current_head" != "$head_sha" ] || \
+   [ "$current_head" != "$INFORMANT_SHA" ] || \
+   [ "$current_base" != "$base_sha" ]; then
+  echo "pull request changed during staff review" >&2
   exit 1
 fi
 

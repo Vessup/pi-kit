@@ -1907,12 +1907,15 @@ export default function webSessions(pi: ExtensionAPI): void {
         errorMessage: "Compaction stopped before completion",
       });
     }
-    if (activeBridge) await applyPendingBridgeModelSelection(pi, activeBridge);
     forward(
       event,
       ctx,
       activeBridge?.session.status === "error" ? "error" : "idle",
     );
+    // Settlement must remain observable even if provider credential resolution
+    // for the deferred model is slow. The server-side pending-model gate keeps
+    // queued prompts blocked until the following model update succeeds.
+    if (activeBridge) await applyPendingBridgeModelSelection(pi, activeBridge);
   });
   pi.on("turn_start", (event, ctx) => forward(event, ctx, "working"));
   pi.on("turn_end", (event, ctx) => forward(event, ctx));

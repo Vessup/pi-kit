@@ -12,7 +12,10 @@ export function restoreFailedImages(
   current: SemanticImage[],
   failedImages: SemanticImage[],
 ): SemanticImage[] {
-  return failedImages.length > 0 ? [...failedImages, ...current] : current;
+  if (failedImages.length === 0) return current;
+  // Prioritize the failed payload being restored, then retain as many newer
+  // draft attachments as fit within the composer's four-image limit.
+  return [...failedImages, ...current].slice(0, 4);
 }
 
 export function shouldDefaultToQueueFollowUp(

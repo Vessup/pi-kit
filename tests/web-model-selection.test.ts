@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { shouldDeferManagedModelSelection } from "../web/server/commandRouter";
 import {
+  drainPendingModelSelections,
   modelSelectionBlocksPrompts,
   queuedModelDependencyBlocksDelivery,
 } from "../web/server/model-selection-gate";
@@ -57,6 +58,30 @@ test("durable queue dependencies block the wrong selected model", () => {
       model: "test/next",
     }),
   ).toBe(false);
+});
+
+test("deferred model draining consumes the latest choice and retains failures", async () => {
+  const record: {
+    pendingModelSelection?: { provider: string; modelId: string };
+    modelSelectionError?: string;
+  } = {
+    pendingModelSelection: { provider: "test", modelId: "first" },
+  };
+  const applied: string[] = [];
+  await drainPendingModelSelections(record, async (selection) => {
+    applied.push(selection.modelId);
+    if (selection.modelId === "first")
+      record.pendingModelSelection = { provider: "test", modelId: "latest" };
+  });
+  expect(applied).toEqual(["first", "latest"]);
+
+  record.pendingModelSelection = { provider: "test", modelId: "broken" };
+  await expect(
+    drainPendingModelSelections(record, async () => {
+      throw new Error("No credentials");
+    }),
+  ).rejects.toThrow("No credentials");
+  expect(record.modelSelectionError).toBe("No credentials");
 });
 
 test("managed model selection applies immediately only after settlement", () => {

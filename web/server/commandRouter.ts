@@ -19,6 +19,7 @@ import {
   isUncertainRpcDeliveryCommand,
 } from "./managed-rpc-session.js";
 import type { ManagedSessionRefresh } from "./managedSessionRefresh.js";
+import { drainPendingModelSelections } from "./model-selection-gate.js";
 import {
   filterModelsByScopePatterns,
   readEnabledModelPatterns,
@@ -135,37 +136,34 @@ export function createCommandRouter(options: {
     if (record.modelSelectionFlush) return record.modelSelectionFlush;
     if (!record.managed || !record.pendingModelSelection) return undefined;
     record.applyingModelSelection = true;
-    const operation = (async () => {
-      try {
-        while (record.pendingModelSelection && record.managed) {
-          const selection = record.pendingModelSelection;
-          record.pendingModelSelection = undefined;
-          try {
-            await applyManagedModelSelection(record, selection);
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : String(error);
-            record.modelSelectionError = message;
-            console.error(
-              `Could not apply deferred model selection for ${record.id}: ${message}`,
-            );
-            broadcastToSessionClients(record.id, {
-              type: "server.event",
-              sessionId: record.id,
-              event: { type: "model_selection_error", message },
-            } satisfies ServerEventMessage);
-          }
-        }
-        if (record.modelSelectionError)
-          throw new Error(record.modelSelectionError);
-      } finally {
-        record.applyingModelSelection = false;
-      }
-    })();
+    const operation = drainPendingModelSelections(
+      record,
+      async (selection) => {
+        if (!record.managed)
+          throw new Error(`Session ${record.id} is not managed`);
+        await applyManagedModelSelection(record, selection);
+      },
+      (message) => {
+        console.error(
+          `Could not apply deferred model selection for ${record.id}: ${message}`,
+        );
+        broadcastToSessionClients(record.id, {
+          type: "server.event",
+          sessionId: record.id,
+          event: { type: "model_selection_error", message },
+        } satisfies ServerEventMessage);
+      },
+    ).finally(() => {
+      record.applyingModelSelection = false;
+    });
     record.modelSelectionFlush = operation;
     const clearOperation = () => {
       if (record.modelSelectionFlush === operation)
         record.modelSelectionFlush = undefined;
+      if (record.pendingModelSelection && record.managed) {
+        const next = flushPendingModelSelection(record);
+        void next?.catch(() => undefined);
+      }
     };
     void operation.then(clearOperation, clearOperation);
     return operation;

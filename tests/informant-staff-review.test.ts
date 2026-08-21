@@ -48,6 +48,7 @@ test("Staff Review Informant job uses trusted review resources", async () => {
     "--extension /opt/informant/extensions/scrub-auth.ts",
   );
   expect(job.command).not.toContain("staff-review-findings.json");
+  expect(job.command).toContain('current_base="$(printf');
   expect(job.container.trustedPrepareInputs).toBe(true);
   expect(job.container.prepareInputs).toEqual([
     ".agents/skills/staff-review/**",
