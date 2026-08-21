@@ -1975,6 +1975,7 @@ export function SemanticSession({
     }),
   );
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
+  const [effortMenuOpen, setEffortMenuOpen] = React.useState(false);
   const [sendMenuOpen, setSendMenuOpen] = React.useState(false);
   const [selectedSubagentId, setSelectedSubagentId] = React.useState<
     string | null
@@ -1996,6 +1997,7 @@ export function SemanticSession({
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const slashMenuRef = React.useRef<HTMLDivElement | null>(null);
   const modelButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const effortButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const sendMenuButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const draftBeforeQueueEditRef = React.useRef<{
     draft: string;
@@ -2609,6 +2611,8 @@ export function SemanticSession({
   };
 
   const selectModel = async (provider: string, modelId: string) => {
+    setModelMenuOpen(false);
+    setEffortMenuOpen(false);
     setControlBusy(true);
     try {
       await onSelectModel(provider, modelId);
@@ -2624,6 +2628,8 @@ export function SemanticSession({
   };
 
   const selectEffort = async (level: string) => {
+    setEffortMenuOpen(false);
+    setModelMenuOpen(false);
     setControlBusy(true);
     try {
       await onSelectThinkingLevel(level);
@@ -3457,16 +3463,7 @@ export function SemanticSession({
                   onClick={() => setModelMenuOpen((open) => !open)}
                 >
                   <span className="semantic-model-selection">{modelLabel}</span>
-                  {autoSelected ? (
-                    <span>{effortLabel}</span>
-                  ) : (
-                    effortLabel && (
-                      <>
-                        <span className="text-zinc-600">·</span>
-                        <span>{effortLabel}</span>
-                      </>
-                    )
-                  )}
+                  {autoSelected && <span>{effortLabel}</span>}
                   <ChevronDown className="h-3.5 w-3.5" />
                 </Button>
                 {turnModelSummary && (
@@ -3509,32 +3506,49 @@ export function SemanticSession({
                           );
                         })}
                     </section>
-                    {!autoSelected && availableEfforts.length > 0 && (
-                      <section className="semantic-model-menu-section semantic-model-menu-effort">
-                        <div className="semantic-composer-menu-label">
-                          Effort
-                        </div>
-                        <div className="semantic-effort-grid">
-                          {availableEfforts.map((level) => (
-                            <button
-                              key={level}
-                              type="button"
-                              disabled={controlBusy || !connected}
-                              onClick={() => void selectEffort(level)}
-                            >
-                              <span>
-                                <strong>{level}</strong>
-                              </span>
-                              {rawThinkingLevel === level && (
-                                <Check className="h-4 w-4 text-sky-300" />
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      </section>
-                    )}
                   </div>
                 </AnchoredPopover>
+                {!autoSelected && availableEfforts.length > 0 && (
+                  <>
+                    <Button
+                      ref={effortButtonRef}
+                      className="semantic-composer-control h-9 max-w-28 px-2"
+                      variant="ghost"
+                      size="sm"
+                      disabled={controlBusy || !connected}
+                      title={`Thinking effort: ${effortLabel || "off"}`}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => setEffortMenuOpen((open) => !open)}
+                    >
+                      <span>{effortLabel || "off"}</span>
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </Button>
+                    <AnchoredPopover
+                      open={effortMenuOpen}
+                      onOpenChange={setEffortMenuOpen}
+                      anchorRef={effortButtonRef}
+                      align="start"
+                      className="semantic-composer-menu w-40"
+                    >
+                      <div className="semantic-composer-menu-label">Effort</div>
+                      {availableEfforts.map((level) => (
+                        <button
+                          key={level}
+                          type="button"
+                          disabled={controlBusy || !connected}
+                          onClick={() => void selectEffort(level)}
+                        >
+                          <span>
+                            <strong>{level}</strong>
+                          </span>
+                          {rawThinkingLevel === level && (
+                            <Check className="h-4 w-4 text-sky-300" />
+                          )}
+                        </button>
+                      ))}
+                    </AnchoredPopover>
+                  </>
+                )}
               </div>
               <div className="ml-auto flex min-w-0 items-center gap-2">
                 <div className="semantic-composer-metrics">

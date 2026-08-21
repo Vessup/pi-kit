@@ -396,22 +396,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
         effort: resolveEffort(fallbackRefs, fallback, fallbackTier),
       };
     }
-    // Nothing configured for Auto at all (or resolvable) - the "auto" placeholder has no real
-    // backend, so leaving it selected here would send the actual request to it and fail with a
-    // connection error instead of a clear message. Fall back to any authenticated model in the
-    // whole catalog rather than ever letting a turn run against the placeholder.
-    const anyModel = ctx.modelRegistry
-      .getAvailable()
-      .find((candidate) => candidate.provider !== AUTO_PROVIDER_ID);
-    if (anyModel) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `Auto has no configured models. Add an \`autoRouter\` entry to ~/.pi/agent/settings.json — falling back to ${anyModel.provider}/${anyModel.id} for now.`,
-          "warning",
-        );
-      }
-      return { model: anyModel, tier, effort: tier };
-    }
+    // Never dispatch an arbitrary model from the registry. Auto must only use models that are
+    // explicitly listed in autoRouter; if the config is empty, stale, or none of its entries can
+    // be resolved, the caller will stop the turn with a clear configuration warning.
     return undefined;
   }
 
@@ -546,6 +533,11 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
 
     const picked = pickForTier(ctx, settings, tier);
     if (!picked) {
+      // Do not leave a previously routed real model active when the current config no longer
+      // contains a resolvable Auto model. Returning to the inert placeholder makes the failure
+      // explicit and prevents the next prompt from accidentally reusing stale runtime state.
+      if (ctx.model?.provider !== AUTO_PROVIDER_ID)
+        await revertToAutoPlaceholder(pi, ctx);
       if (ctx.hasUI) {
         ctx.ui.notify(
           "Auto has no configured models yet. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
@@ -575,13 +567,12 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     preflightPromptRouted = false;
     // Core checks for threshold compaction before before_agent_start. Route away
     // from Auto's inert placeholder during that preflight so summarization uses
-    // a real model instead of http://127.0.0.1:0. If placeholder restoration
-    // is still in flight, wait for that transition before deciding whether the
-    // current model is safe for core's preflight compaction check.
+    // a real model instead of http://127.0.0.1:0. If an earlier failed turn left
+    // a real model selected, route again rather than reusing that stale model.
     if (!autoActive && ctx.model?.provider !== AUTO_PROVIDER_ID) return;
     if (routingInFlight) await modelTransitionTail;
-    if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
     if (!autoActive) {
+      if (ctx.model?.provider !== AUTO_PROVIDER_ID) return;
       autoActive = true;
       pinnedTier = tierFromModelId(ctx.model.id);
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });

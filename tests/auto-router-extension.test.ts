@@ -1248,6 +1248,56 @@ test("deactivating Auto removes its footer badge", async () => {
   expect(fake.footerEvents.at(-1)).toMatchObject({ remove: true });
 });
 
+test("Auto never falls back to an unconfigured catalog model", async () => {
+  await writeConfig({ efforts: {} });
+  const stray = model("anthropic", "claude-fable-5");
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [stray] }),
+    currentModel: fake.currentModel,
+  });
+
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  fake.currentModel.value = stray;
+  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+
+  expect(fake.setModelCalls).toEqual([AUTO_PLACEHOLDER]);
+  expect(
+    ctx.notifications.some((n) => n.message.includes("no configured models")),
+  ).toBe(true);
+});
+
+test(
+  "active Auto reroutes instead of reusing a real model left after a failed turn",
+  async () => {
+    const configured = model("prov", "configured-model");
+    const stale = model("anthropic", "claude-fable-5");
+    await writeConfig({
+      efforts: {
+        medium: { models: [{ provider: "prov", id: "configured-model" }] },
+      },
+    });
+
+    const fake = createFakePi();
+    await autoRouter(fake.pi);
+    const ctx = fakeCtx({
+      modelRegistry: fakeModelRegistry({ models: [configured, stale] }),
+      currentModel: fake.currentModel,
+    });
+
+    await fake.fire("session_start", {}, ctx);
+    await selectAuto(fake, ctx);
+    fake.currentModel.value = stale;
+    fake.setModelCalls.length = 0;
+
+    await fake.fire("input", { text: "next prompt" }, ctx);
+
+    expect(fake.setModelCalls).toEqual([configured]);
+  },
+);
+
 test("/usage with no configured models notifies instead of throwing", async () => {
   const fake = createFakePi();
   await autoRouter(fake.pi);
