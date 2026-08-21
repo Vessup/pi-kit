@@ -559,10 +559,12 @@ function worktreeNameFromBranch(branch: string): string {
 
 function NewSessionDialog({
   open,
+  initialRepository,
   onOpenChange,
   onCreate,
 }: {
   open: boolean;
+  initialRepository?: string;
   onOpenChange: (open: boolean) => void;
   onCreate: (value: CreateSessionRequest) => Promise<void>;
 }) {
@@ -582,7 +584,7 @@ function NewSessionDialog({
   const repositoryListId = React.useId();
   React.useEffect(() => {
     if (!open) return;
-    setRepository("~/");
+    setRepository(initialRepository?.trim() || "~/");
     setRepositorySuggestions([]);
     setBranch("");
     setBranchSuggestions({ local: [], remote: [] });
@@ -592,7 +594,7 @@ function NewSessionDialog({
     setNameEdited(false);
     setBusy(false);
     setCreateError(null);
-  }, [open]);
+  }, [initialRepository, open]);
   React.useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -1495,6 +1497,98 @@ function SessionListItem({
   );
 }
 
+function ProjectSessionGroupSection({
+  group,
+  collapsed,
+  onToggle,
+  onNewSession,
+  children,
+}: {
+  group: ProjectSessionGroup;
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewSession: (directory: string) => void;
+  children: React.ReactNode;
+}) {
+  const [contextPoint, setContextPoint] = React.useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const contextAnchorRef = React.useRef<HTMLSpanElement | null>(null);
+  const directory =
+    group.sessions[0]?.repositoryRoot ?? group.sessions[0]?.cwd ?? "";
+  const itemClass =
+    "flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white";
+  return (
+    <div>
+      <button
+        type="button"
+        className="flex w-full min-w-0 items-center gap-2 rounded-full bg-zinc-900/90 px-3 py-2 text-sm text-zinc-300 transition hover:bg-zinc-800/90"
+        aria-expanded={!collapsed}
+        onClick={onToggle}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setContextPoint({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        {collapsed ? (
+          <ChevronRight className="h-4 w-4 shrink-0 text-zinc-500" />
+        ) : (
+          <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400" />
+        )}
+        <FolderGit2 className="h-4 w-4 shrink-0 text-white" />
+        <span className="truncate font-semibold text-zinc-200">
+          {group.name}
+        </span>
+        <span className="h-px min-w-4 flex-1 bg-zinc-700" />
+        <span className="shrink-0 text-xs tabular-nums text-zinc-500">
+          {group.sessions.length}
+        </span>
+      </button>
+      {!collapsed && <div className="mt-3">{children}</div>}
+      <span
+        ref={contextAnchorRef}
+        className="pointer-events-none fixed h-0 w-0"
+        style={
+          contextPoint
+            ? { left: contextPoint.x, top: contextPoint.y }
+            : undefined
+        }
+      />
+      <AnchoredPopover
+        open={contextPoint !== null}
+        onOpenChange={(open) => {
+          if (!open) setContextPoint(null);
+        }}
+        anchorRef={contextAnchorRef}
+        align="start"
+        className="w-44"
+      >
+        <div
+          role="menu"
+          tabIndex={-1}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className={itemClass}
+            disabled={!directory}
+            onClick={() => {
+              setContextPoint(null);
+              if (directory) onNewSession(directory);
+            }}
+          >
+            <Plus className="h-4 w-4" /> New session
+          </button>
+        </div>
+      </AnchoredPopover>
+    </div>
+  );
+}
+
 export function App() {
   const [sessions, setSessions] = React.useState<WebSession[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(
@@ -1505,6 +1599,13 @@ export function App() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [newSessionOpen, setNewSessionOpen] = React.useState(false);
+  const [newSessionRepository, setNewSessionRepository] = React.useState<
+    string | undefined
+  >(undefined);
+  const openNewSession = React.useCallback((repository?: string) => {
+    setNewSessionRepository(repository);
+    setNewSessionOpen(true);
+  }, []);
   const [renameCandidate, setRenameCandidate] =
     React.useState<WebSession | null>(null);
   const [deleteCandidate, setDeleteCandidate] =
@@ -2742,31 +2843,15 @@ export function App() {
           const collapseKey = group.id;
           const collapsed = collapsedProjects.includes(collapseKey);
           return (
-            <div key={group.id}>
-              <button
-                type="button"
-                className="flex w-full min-w-0 items-center gap-2 rounded-full bg-zinc-900/90 px-3 py-2 text-sm text-zinc-300 transition hover:bg-zinc-800/90"
-                aria-expanded={!collapsed}
-                onClick={() => toggleProject(collapseKey)}
-              >
-                {collapsed ? (
-                  <ChevronRight className="h-4 w-4 shrink-0 text-zinc-500" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400" />
-                )}
-                <FolderGit2 className="h-4 w-4 shrink-0 text-white" />
-                <span className="truncate font-semibold text-zinc-200">
-                  {group.name}
-                </span>
-                <span className="h-px min-w-4 flex-1 bg-zinc-700" />
-                <span className="shrink-0 text-xs tabular-nums text-zinc-500">
-                  {group.sessions.length}
-                </span>
-              </button>
-              {!collapsed && (
-                <div className="mt-3">{sessionCardList(group.sessions)}</div>
-              )}
-            </div>
+            <ProjectSessionGroupSection
+              key={group.id}
+              group={group}
+              collapsed={collapsed}
+              onToggle={() => toggleProject(collapseKey)}
+              onNewSession={openNewSession}
+            >
+              {sessionCardList(group.sessions)}
+            </ProjectSessionGroupSection>
           );
         })}
       </div>
@@ -2777,6 +2862,7 @@ export function App() {
     <div className="pi-web-shell bg-[#09090b] text-zinc-100">
       <NewSessionDialog
         open={newSessionOpen}
+        initialRepository={newSessionRepository}
         onOpenChange={setNewSessionOpen}
         onCreate={handleCreate}
       />
@@ -2827,7 +2913,7 @@ export function App() {
             <div className="mb-4 flex gap-2">
               <Button
                 className="h-9 min-w-0 flex-1 justify-start"
-                onClick={() => setNewSessionOpen(true)}
+                onClick={() => openNewSession()}
               >
                 <Plus className="h-4 w-4" /> New session
               </Button>
