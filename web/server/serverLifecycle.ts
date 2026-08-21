@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rmSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type ServerStateFile, WEB_STATE_VERSION } from "../protocol.js";
 import type { TailscaleStatus } from "../tailscale.js";
@@ -141,9 +141,17 @@ export function createServerLifecycle(options: {
     setTimeout(() => process.exit(code), 25);
   }
 
-  // web/dist is not checked in; rebuild it on every startup so a long-running
-  // server always serves the client assets that match the checked-out source.
+  // Source and Git checkouts rebuild on every startup so a long-running server
+  // serves assets matching their checked-out source. Registry packages ship the
+  // prepack build without build-only devDependencies, so use those bundled assets.
   async function buildWebClientAssets(): Promise<void> {
+    if (!existsSync(join(config.rootDir, ".git"))) {
+      try {
+        if (statSync(join(config.distDir, "index.html")).isFile()) return;
+      } catch {
+        // Incomplete/source archives have no .git or bundled build; try rebuilding.
+      }
+    }
     // Test suites opt out of the per-startup rebuild: they spawn ~30 daemons per
     // run and never exercise asset freshness, and each rebuild puts the state
     // file behind a full vite build. Skip only when assets already exist.

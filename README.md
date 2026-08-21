@@ -153,7 +153,7 @@ Use `/web-tailscale off` to remove Pi's active Serve route immediately and disab
 
 To publish as a named entry on the Tailscale **Services** page, use `/web-tailscale on pi-web` or set `serviceName: "pi-web"`. Named Services require this machine to be a tagged node, an admin-defined `svc:pi-web` resource, approval (or auto-approval), and an access grant. Pi reports Tailscale's actionable error until those requirements are met.
 
-For frontend development, run `bun run webDev`. Production assets in `web/dist` are not checked in — `bun install` builds them via `postinstall`, and `bun run webServer` rebuilds them on every startup, so a manual `bun run webBuild` is only needed to preview the production bundle without starting the server.
+For frontend development, run `bun run webDev`. Production assets in `web/dist` are not checked in. Source and Git checkouts rebuild them whenever the web server starts, while registry releases build and bundle them during `npm pack`/`npm publish`; run `bun run webBuild` manually only to preview a production build without starting the server.
 
 ## Prompt templates
 
@@ -161,24 +161,63 @@ For frontend development, run `bun run webDev`. Production assets in `web/dist` 
 
 ## Install
 
-From this checkout:
+### GitHub Packages
+
+GitHub's npm registry requires authentication. Create a [classic personal access token](https://github.com/settings/tokens) with `read:packages`, then either log npm in or configure the scope in `~/.npmrc`:
 
 ```sh
-pi install ~/vessup/pi-kit
+npm login --scope=@vessup --auth-type=legacy --registry=https://npm.pkg.github.com
 ```
 
-After pushing this repository to GitHub, install it on another machine with either SSH or HTTPS:
+```ini
+# ~/.npmrc
+@vessup:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+```
+
+With the npm scope authenticated, install the package through Pi:
 
 ```sh
-pi install git:git@github.com:Vessup/pi-kit.git
-# or
-pi install git:github.com/Vessup/pi-kit
+pi install npm:@vessup/pi-kit
+# Pin CI and other reproducible installs to a release:
+pi install npm:@vessup/pi-kit@0.1.0
 ```
 
-Use `/reload` in a running Pi session after installing. Update a Git installation later with:
+In GitHub Actions, grant the job `packages: read`, expose its token as `NODE_AUTH_TOKEN`, and configure npm before Pi starts:
+
+```yaml
+permissions:
+  contents: read
+  packages: read
+
+steps:
+  - name: Configure GitHub Packages
+    shell: bash
+    run: |
+      echo '@vessup:registry=https://npm.pkg.github.com' >> ~/.npmrc
+      echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' >> ~/.npmrc
+  - run: pi install npm:@vessup/pi-kit@0.1.0
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+If a consuming repository cannot read the package with its `GITHUB_TOKEN`, grant that repository access in the package settings or use a `read:packages` token stored as a repository secret.
+
+Use `/reload` in a running Pi session after installing. Update an unpinned registry installation later with:
 
 ```sh
 pi update --extensions
+```
+
+### Source checkout
+
+For local development, or as an alternative to the registry, install this checkout or Git repository directly:
+
+```sh
+pi install ~/vessup/pi-kit
+pi install git:git@github.com:Vessup/pi-kit.git
+# or
+pi install git:github.com/Vessup/pi-kit
 ```
 
 ## Development

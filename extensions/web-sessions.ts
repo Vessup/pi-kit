@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type ExtensionAPI,
@@ -10,6 +10,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { agentEndTerminalNotice } from "../web/assistant-message.js";
 import {
+  WEB_COMPACT_COMMAND,
+  WEB_COMPACT_EXTENSION_COMMAND,
+} from "../web/compact-command.js";
+import { boundedWebHistory } from "../web/history.js";
+import {
   applyRuntimeModelStatus,
   isAutoModelReference,
   isAutoRuntimeModelSwap,
@@ -18,11 +23,6 @@ import {
   selectedModelReference,
   webModelReference,
 } from "../web/model-status.js";
-import {
-  WEB_COMPACT_COMMAND,
-  WEB_COMPACT_EXTENSION_COMMAND,
-} from "../web/compact-command.js";
-import { boundedWebHistory } from "../web/history.js";
 import type {
   AgentCommand,
   AgentEventMessage,
@@ -72,6 +72,26 @@ import {
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_ENTRY = join(PACKAGE_ROOT, "web", "server", "index.ts");
+
+// The detached Bun daemon runs outside Pi's extension loader. Point it at the
+// host Pi modules because registry installs intentionally omit optional peers.
+function hostNodeModulesPath(): string | undefined {
+  try {
+    let directory = dirname(
+      fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")),
+    );
+    while (true) {
+      if (basename(directory) === "node_modules") return directory;
+      const parent = dirname(directory);
+      if (parent === directory) return undefined;
+      directory = parent;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+const HOST_NODE_MODULES = hostNodeModulesPath();
 const STATE_FILE = process.env.PI_WEB_STATE_FILE
   ? resolve(process.env.PI_WEB_STATE_FILE)
   : join(getAgentDir(), "web", "server.json");
@@ -465,12 +485,16 @@ async function ensureServer(): Promise<ServerStateFile> {
     }
   }
 
+  const nodePath = [HOST_NODE_MODULES, process.env.NODE_PATH]
+    .filter((path): path is string => Boolean(path))
+    .join(delimiter);
   const child = spawn("bun", ["run", SERVER_ENTRY], {
     cwd: PACKAGE_ROOT,
     detached: true,
     stdio: "ignore",
     env: {
       ...process.env,
+      ...(nodePath ? { NODE_PATH: nodePath } : {}),
       PI_WEB_ROOT: PACKAGE_ROOT,
       PI_WEB_STATE_FILE: STATE_FILE,
     },
