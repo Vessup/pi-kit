@@ -1730,6 +1730,55 @@ function waitForSemanticHistory(
   });
 }
 
+test("isolated daemon state cannot overwrite the canonical Tailscale route", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-isolated-daemon-test-"));
+  const agentDir = join(tempDir, "pi-agent");
+  const statePath = join(tempDir, "isolated", "server.json");
+  const fakeBin = join(tempDir, "bin");
+  const calls = join(tempDir, "tailscale-calls.log");
+  await mkdir(fakeBin, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(
+    join(agentDir, "settings.json"),
+    JSON.stringify({
+      web: {
+        tailscale: {
+          enabled: true,
+          httpsPort: 443,
+          serviceName: "pi-web",
+        },
+      },
+    }),
+  );
+  const fakeTailscale = join(fakeBin, "tailscale");
+  await writeFile(
+    fakeTailscale,
+    `#!/bin/sh\necho "$@" >> ${JSON.stringify(calls)}\nexit 1\n`,
+  );
+  await chmod(fakeTailscale, 0o755);
+  child = Bun.spawn({
+    cmd: ["bun", "run", "web/server/index.ts"],
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PI_WEB_PORT: "0",
+      PI_WEB_ROOT: process.cwd(),
+      PI_WEB_STATE_FILE: statePath,
+      PI_CODING_AGENT_DIR: agentDir,
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const state = await waitForState(statePath);
+  expect(state.tailscale).toMatchObject({
+    enabled: true,
+    published: false,
+  });
+  expect(state.tailscale?.error).toContain("canonical Pi web daemon");
+  expect(await Bun.file(calls).exists()).toBe(false);
+});
+
 test("TUI metadata changes update every connected web catalog", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "pi-kit-live-tui-metadata-test-"));
   const agentDir = join(tempDir, "pi-agent");

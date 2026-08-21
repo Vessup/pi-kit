@@ -9,6 +9,8 @@ export type WebServerConfig = {
   distDir: string;
   /** Machine-wide daemon discovery state file. */
   stateFilePath: string;
+  /** Only the canonical machine-wide daemon may own the shared Serve route. */
+  manageTailscaleServe: boolean;
   agentDir: string;
   settingsPath: string;
   sessionsDir: string;
@@ -32,6 +34,13 @@ function envPath(name: string, fallback: string): string {
   );
 }
 
+export function canManageTailscaleServe(
+  stateFilePath: string,
+  agentDir: string,
+): boolean {
+  return resolve(stateFilePath) === resolve(agentDir, "web", "server.json");
+}
+
 /** Resolve daemon-wide paths and settings from the process environment. */
 export function resolveWebServerConfig(): WebServerConfig {
   const rootDir = resolve(
@@ -41,12 +50,12 @@ export function resolveWebServerConfig(): WebServerConfig {
         : join(process.cwd(), process.env.PI_WEB_ROOT)
       : process.cwd(),
   );
-  const stateFilePath = envPath(
-    "PI_WEB_STATE_FILE",
-    join(homedir(), ".pi", "agent", "web", "server.json"),
-  );
   const agentDir = resolve(
     process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+  );
+  const stateFilePath = envPath(
+    "PI_WEB_STATE_FILE",
+    join(agentDir, "web", "server.json"),
   );
   const configuredPortEnv =
     process.env.PI_WEB_PORT === undefined
@@ -58,6 +67,7 @@ export function resolveWebServerConfig(): WebServerConfig {
     rootDir,
     distDir: join(rootDir, "web", "dist"),
     stateFilePath,
+    manageTailscaleServe: canManageTailscaleServe(stateFilePath, agentDir),
     agentDir,
     settingsPath: join(agentDir, "settings.json"),
     sessionsDir: join(agentDir, "sessions"),

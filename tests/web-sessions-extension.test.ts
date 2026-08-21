@@ -10,6 +10,7 @@ import {
   daemonIsAdoptable,
   isScopedModelAllowed,
   parseDaemonHealth,
+  reconcileBackgroundWebServer,
   splitWebWorktreeCommandArgs,
 } from "../extensions/web-sessions.ts";
 import type { ServerStateFile } from "../web/protocol.ts";
@@ -211,6 +212,66 @@ test("web model selection honors the session model scope", () => {
   expect(isScopedModelAllowed(scoped, "anthropic", "excluded")).toBe(false);
   expect(isScopedModelAllowed(scoped, "openai", "allowed")).toBe(false);
   expect(isScopedModelAllowed([], "any", "model")).toBe(true);
+});
+
+test("background handoff keeps a detached local daemon without touching disabled Tailscale", async () => {
+  const server: ServerStateFile = {
+    pid: 7,
+    port: 31415,
+    startedAt: 1,
+    version: 1,
+  };
+  let updates = 0;
+  expect(
+    await reconcileBackgroundWebServer({
+      ensure: async () => server,
+      readSetting: async () => ({ enabled: false, httpsPort: 443 }),
+      updateTailscale: async () => {
+        updates += 1;
+        throw new Error("must not publish");
+      },
+    }),
+  ).toBe(server);
+  expect(updates).toBe(0);
+});
+
+test("background handoff republishes enabled Tailscale to the live daemon", async () => {
+  const server: ServerStateFile = {
+    pid: 7,
+    port: 31415,
+    startedAt: 1,
+    version: 1,
+  };
+  const setting = {
+    enabled: true,
+    httpsPort: 443,
+    serviceName: "pi-web",
+  };
+  let appliedState: ServerStateFile | undefined;
+  let locked = false;
+  const result = await reconcileBackgroundWebServer({
+    withLock: async (operation) => {
+      locked = true;
+      return await operation();
+    },
+    ensure: async () => server,
+    readSetting: async () => setting,
+    updateTailscale: async (state, next, current) => {
+      appliedState = state;
+      expect(next).toEqual(setting);
+      expect(current).toEqual(setting);
+      return {
+        installed: true,
+        enabled: true,
+        available: true,
+        published: true,
+        url: "https://pi-web.example/",
+      };
+    },
+  });
+  expect(locked).toBe(true);
+  expect(appliedState).toBe(server);
+  expect(result.tailscale?.url).toBe("https://pi-web.example/");
 });
 
 test("Tailscale setting persistence failure rolls the live route back", async () => {

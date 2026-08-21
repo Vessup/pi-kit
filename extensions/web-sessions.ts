@@ -35,6 +35,7 @@ import type {
   AgentUpdateMessage,
   RpcSessionCommand,
   ServerStateFile,
+  TailscaleWebStatus,
   WebSession,
 } from "../web/protocol.js";
 import { mergeWebSubagentUpdates, WEB_STATE_VERSION } from "../web/protocol.js";
@@ -44,6 +45,7 @@ import {
   expandSlashCommand,
   isSkillSlashCommand,
 } from "../web/slash-commands.js";
+import type { TailscaleWebSettings } from "../web/tailscale.js";
 import { formatWorktreeCreateCommandArgs } from "../web/worktree-command.js";
 import {
   AUTO_ROUTER_COMPACTION_EVENT,
@@ -61,6 +63,7 @@ import {
 } from "./subagent-events.js";
 import {
   readWebTailscaleSetting,
+  withWebTailscaleLock,
   writeWebTailscaleSetting,
 } from "./web-settings.js";
 import {
@@ -392,13 +395,9 @@ function publishedServerBase(state: ServerStateFile): string {
 
 async function updateTailscaleServer(
   state: ServerStateFile,
-  setting: { enabled: boolean; httpsPort: number; serviceName?: string },
-  currentSetting?: {
-    enabled: boolean;
-    httpsPort: number;
-    serviceName?: string;
-  },
-): Promise<NonNullable<ServerStateFile["tailscale"]>> {
+  setting: TailscaleWebSettings,
+  currentSetting?: TailscaleWebSettings,
+): Promise<TailscaleWebStatus> {
   const url = new URL("/api/tailscale", serverBase(state));
   const response = await fetch(url, {
     method: "POST",
@@ -419,7 +418,41 @@ async function updateTailscaleServer(
   }
   if (!isRecord(payload) || !isRecord(payload.tailscale))
     throw new Error("Pi web returned an invalid Tailscale response");
-  return payload.tailscale as NonNullable<ServerStateFile["tailscale"]>;
+  return payload.tailscale as TailscaleWebStatus;
+}
+
+/** Verify the detached daemon and make its tailnet route authoritative before exit. */
+export async function reconcileBackgroundWebServer(options: {
+  ensure: () => Promise<ServerStateFile>;
+  readSetting: () => Promise<TailscaleWebSettings>;
+  withLock?: <T>(operation: () => Promise<T>) => Promise<T>;
+  updateTailscale: (
+    state: ServerStateFile,
+    setting: TailscaleWebSettings,
+    currentSetting: TailscaleWebSettings,
+  ) => Promise<TailscaleWebStatus>;
+}): Promise<ServerStateFile> {
+  const withLock = options.withLock ?? (async (operation) => await operation());
+  return await withLock(async () => {
+    const server = await options.ensure();
+    const setting = await options.readSetting();
+    if (!setting.enabled) return server;
+    const tailscale = await options.updateTailscale(server, setting, setting);
+    if (!tailscale.published || tailscale.error)
+      throw new Error(
+        tailscale.error ?? "Tailscale Serve did not publish Pi web",
+      );
+    return { ...server, tailscale };
+  });
+}
+
+async function keepWebServerBackgrounded(): Promise<ServerStateFile> {
+  return await reconcileBackgroundWebServer({
+    ensure: ensureServer,
+    readSetting: readWebTailscaleSetting,
+    withLock: withWebTailscaleLock,
+    updateTailscale: updateTailscaleServer,
+  });
 }
 
 /** The /api/health fields the bridge cares about when adopting a daemon. */
@@ -1467,6 +1500,28 @@ export default function webSessions(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("web-background", {
+    description: "Keep Pi web and its tailnet route running without this TUI",
+    handler: async (_args, ctx) => {
+      try {
+        const server = await keepWebServerBackgrounded();
+        if (bridge) {
+          bridge.server = server;
+          publishFooter(pi, bridge);
+        }
+        ctx.ui.notify(
+          `Pi web is running in the background at ${publishedServerBase(server)}`,
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          `Could not background Pi web: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
+    },
+  });
+
   pi.registerCommand("web-reload", {
     description: `Internal web reload ${WEB_RELOAD_GENERATION}`,
     handler: async (args, ctx) => {
@@ -1522,34 +1577,37 @@ export default function webSessions(pi: ExtensionAPI): void {
         );
         return;
       }
-      const setting = await readWebTailscaleSetting();
-      const serviceName =
-        rawServiceName?.trim().replace(/^svc:/, "") || setting.serviceName;
-      const nextSetting = {
-        ...setting,
-        enabled: action === "on",
-        ...(serviceName ? { serviceName } : {}),
-      };
-      const server = bridge?.server ?? (await ensureServer());
-      let appliedSetting = setting;
-      const status = await applyTailscaleSettingTransaction({
-        current: setting,
-        next: nextSetting,
-        apply: async (target) => {
-          const applied = await updateTailscaleServer(
-            server,
-            target,
-            appliedSetting,
-          );
-          if ((target.enabled && !applied.published) || applied.error) {
-            throw new Error(
-              applied.error ?? "Tailscale Serve did not publish Pi web",
+      const { server, status } = await withWebTailscaleLock(async () => {
+        const setting = await readWebTailscaleSetting();
+        const serviceName =
+          rawServiceName?.trim().replace(/^svc:/, "") || setting.serviceName;
+        const nextSetting = {
+          ...setting,
+          enabled: action === "on",
+          ...(serviceName ? { serviceName } : {}),
+        };
+        const server = bridge?.server ?? (await ensureServer());
+        let appliedSetting = setting;
+        const status = await applyTailscaleSettingTransaction({
+          current: setting,
+          next: nextSetting,
+          apply: async (target) => {
+            const applied = await updateTailscaleServer(
+              server,
+              target,
+              appliedSetting,
             );
-          }
-          appliedSetting = target;
-          return applied;
-        },
-        persist: writeWebTailscaleSetting,
+            if ((target.enabled && !applied.published) || applied.error) {
+              throw new Error(
+                applied.error ?? "Tailscale Serve did not publish Pi web",
+              );
+            }
+            appliedSetting = target;
+            return applied;
+          },
+          persist: writeWebTailscaleSetting,
+        });
+        return { server, status };
       });
       server.tailscale = status;
       if (bridge) {
@@ -1850,10 +1908,19 @@ export default function webSessions(pi: ExtensionAPI): void {
     forward(event, ctx);
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     const state = bridge;
     if (!state || state.session.id !== ctx.sessionManager.getSessionId())
       return;
+    if (event.reason === "quit" && ctx.mode === "tui") {
+      try {
+        state.server = await keepWebServerBackgrounded();
+      } catch (error) {
+        console.warn(
+          `Could not keep Pi web running after the TUI exits: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     state.closed = true;
     // Expected replacement requests survive extension-runtime reload and are
     // rebound by the next session_start through the module-global pending map.

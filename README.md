@@ -128,7 +128,9 @@ A linked `⧉` appears at the far left of Pi's first footer line, immediately be
 
 The server is intentionally tokenless so installed iOS home-screen links remain stable. It binds only to localhost unless explicitly published through Tailscale Serve. Local machine users are therefore inside the trust boundary; remote access relies on Tailscale Service grants, which must be limited to trusted identities. Browser WebSockets also require an exact same-host `Origin`, preventing unrelated websites from driving shell-capable sessions. Do not expose the localhost port with a generic reverse proxy or Tailscale Funnel.
 
-Only one daemon owns machine-wide discovery (the shared state file and the Tailscale Serve route) at a time. A newly started daemon defers to a healthy one instead of racing it for the port, and `/api/health` reports the daemon's checkout root and whether its client assets are servable. A later spawn replaces a daemon whose checkout no longer exists (so a deleted install can never keep serving 404s while still passing health checks), and Pi sessions only adopt daemons that can actually serve the web app.
+The daemon is detached from the Pi process and remains available after every TUI closes. On normal TUI exit, the extension verifies that daemon and republishes the configured Tailscale route to its live port before disconnecting. Run `/web-background` to perform the same handoff explicitly and show the resulting URL.
+
+Only one daemon owns machine-wide discovery (the shared state file and the Tailscale Serve route) at a time. A newly started daemon defers to a healthy one instead of racing it for the port, and `/api/health` reports the daemon's checkout root and whether its client assets are servable. A later spawn replaces a daemon whose checkout no longer exists (so a deleted install can never keep serving 404s while still passing health checks), and Pi sessions only adopt daemons that can actually serve the web app. Isolated daemons using a custom `PI_WEB_STATE_FILE` cannot modify the machine-wide Tailscale route.
 
 Browser-created sessions use Pi's RPC mode, while native Pi processes keep their physical TUI and publish semantic session events. The browser never requests an isolated TUI repaint or resizes the native terminal, avoiding the CPU starvation that full viewport rendering can cause on long sessions. Bun must be installed on the machine running the web server.
 
@@ -180,7 +182,7 @@ With the npm scope authenticated, install the package through Pi:
 ```sh
 pi install npm:@vessup/pi-kit
 # Pin CI and other reproducible installs to a release:
-pi install npm:@vessup/pi-kit@0.1.0
+pi install npm:@vessup/pi-kit@0.1.1
 ```
 
 In GitHub Actions, grant the job `packages: read`, expose its token as `NODE_AUTH_TOKEN`, and configure npm before Pi starts:
@@ -196,7 +198,7 @@ steps:
     run: |
       echo '@vessup:registry=https://npm.pkg.github.com' >> ~/.npmrc
       echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' >> ~/.npmrc
-  - run: pi install npm:@vessup/pi-kit@0.1.0
+  - run: pi install npm:@vessup/pi-kit@0.1.1
     env:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```

@@ -6,6 +6,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { TailscaleWebSettings } from "../web/tailscale.js";
 
 const SETTINGS_PATH = join(getAgentDir(), "settings.json");
+const TAILSCALE_LOCK_PATH = join(getAgentDir(), "web", "tailscale-route");
 type ReleaseLock = () => Promise<void>;
 type LockSettingsFile = (
   path: string,
@@ -67,6 +68,22 @@ export async function readWebTailscaleSetting(): Promise<TailscaleWebSettings> {
     };
   } catch {
     return { enabled: false, httpsPort: 8443 };
+  }
+}
+
+/** Serialize route reconciliation and settings changes across Pi processes. */
+export async function withWebTailscaleLock<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  await mkdir(dirname(TAILSCALE_LOCK_PATH), { recursive: true });
+  const release = await lockfile.lock(TAILSCALE_LOCK_PATH, {
+    realpath: false,
+    retries: { retries: 750, minTimeout: 20, maxTimeout: 20 },
+  });
+  try {
+    return await operation();
+  } finally {
+    await release();
   }
 }
 

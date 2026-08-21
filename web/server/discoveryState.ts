@@ -35,6 +35,22 @@ export function createDiscoveryState(options: {
   ): Promise<TailscaleStatus> {
     const resolvedSettings =
       settings ?? (await readTailscaleWebSettings(settingsPath));
+    if (!config.manageTailscaleServe) {
+      const status: TailscaleStatus = {
+        installed: false,
+        enabled: resolvedSettings.enabled,
+        available: false,
+        published: false,
+        ...(resolvedSettings.enabled
+          ? {
+              error:
+                "Tailscale Serve is reserved for the canonical Pi web daemon; isolated state cannot publish it.",
+            }
+          : {}),
+      };
+      publishTailscaleStatus(status);
+      return status;
+    }
     const status = currentSettings
       ? await replaceTailscaleServe({
           currentSettings,
@@ -52,6 +68,18 @@ export function createDiscoveryState(options: {
   async function removeTailscaleServe(
     settings: TailscaleWebSettings,
   ): Promise<TailscaleStatus> {
+    if (!config.manageTailscaleServe) {
+      const status: TailscaleStatus = {
+        installed: false,
+        enabled: settings.enabled,
+        available: false,
+        published: false,
+        error:
+          "Tailscale Serve is reserved for the canonical Pi web daemon; isolated state cannot modify it.",
+      };
+      publishTailscaleStatus(status);
+      return status;
+    }
     const status = await disableTailscaleServe({
       settings,
       localPort: runtime.port,
