@@ -1542,9 +1542,6 @@ function ProjectSessionGroupSection({
           {group.name}
         </span>
         <span className="h-px min-w-4 flex-1 bg-zinc-700" />
-        <span className="shrink-0 text-xs tabular-nums text-zinc-500">
-          {group.sessions.length}
-        </span>
       </button>
       {!collapsed && <div className="mt-3">{children}</div>}
       <span
