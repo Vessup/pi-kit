@@ -484,6 +484,15 @@ function AutocompleteInput({
         onFocus={() => setOpen(true)}
         onKeyDown={(event) => {
           if (!popoverOpen) return;
+          // Let the form-level handler submit Cmd/Ctrl+Enter. In particular,
+          // do not accept the highlighted suggestion for that shortcut.
+          if (
+            event.key === "Enter" &&
+            (event.metaKey || event.ctrlKey) &&
+            !event.altKey &&
+            !event.shiftKey
+          )
+            return;
           if (event.key === "ArrowDown") {
             event.preventDefault();
             setActiveIndex((index) => Math.min(index + 1, filtered.length - 1));

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { anchoredPopoverPosition } from "../web/client/anchored-position.ts";
+import {
+  anchoredPopoverBelowPosition,
+  anchoredPopoverPosition,
+} from "../web/client/anchored-position.ts";
 
 test("send menu opens above a bottom mobile anchor inside the visual viewport", () => {
   expect(
@@ -23,4 +26,33 @@ test("portaled menus clamp to shifted mobile visual viewports", () => {
       align: "end",
     }),
   ).toEqual({ left: 20, top: 172 });
+});
+
+test("below placement flips above the anchor when the keyboard leaves little room", () => {
+  expect(
+    anchoredPopoverBelowPosition({
+      anchor: { left: 20, right: 380, top: 300, bottom: 336 },
+      panelWidth: 360,
+      panelMaxHeight: 256,
+      viewport: { offsetLeft: 0, offsetTop: 120, width: 390, height: 250 },
+      align: "start",
+    }),
+  ).toEqual({
+    left: 20,
+    top: 128,
+    maxHeight: 166,
+    placement: "above",
+    visible: true,
+  });
+});
+
+test("below placement hides a menu when neither side has room", () => {
+  expect(
+    anchoredPopoverBelowPosition({
+      anchor: { left: 20, right: 380, top: 10, bottom: 46 },
+      panelWidth: 360,
+      viewport: { offsetLeft: 0, offsetTop: 0, width: 390, height: 0 },
+      align: "start",
+    }),
+  ).toMatchObject({ maxHeight: 0, visible: false });
 });

@@ -1,6 +1,9 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { anchoredPopoverPosition } from "../anchored-position";
+import {
+  anchoredPopoverBelowPosition,
+  anchoredPopoverPosition,
+} from "../anchored-position";
 import { cn } from "../lib/utils";
 
 type AnchoredPopoverProps = {
@@ -15,10 +18,6 @@ type AnchoredPopoverProps = {
   /** Size the panel to the anchor's width instead of its content. */
   matchAnchorWidth?: boolean;
 };
-
-const MIN_PANEL_HEIGHT = 96;
-const POPUP_GAP = 6;
-const POPUP_MARGIN = 8;
 
 function panelMaxHeightCap(panel: HTMLElement | null): number | undefined {
   if (!panel) return undefined;
@@ -45,6 +44,7 @@ export function AnchoredPopover({
   const [maxHeight, setMaxHeight] = React.useState<number | undefined>(
     undefined,
   );
+  const [hasRoom, setHasRoom] = React.useState(true);
   // Computed maxHeight reflects our inline override once applied, so remember
   // the stylesheet cap (e.g. max-h-64) separately to avoid ratcheting down.
   const classMaxHeightRef = React.useRef<number | undefined>(undefined);
@@ -52,6 +52,11 @@ export function AnchoredPopover({
 
   React.useLayoutEffect(() => {
     if (!open) return;
+    classMaxHeightRef.current = undefined;
+    appliedMaxHeightRef.current = undefined;
+    panelRef.current?.style.removeProperty("max-height");
+    setMaxHeight(undefined);
+    setHasRoom(true);
     let frame: number | undefined;
     const update = () => {
       const anchor = anchorRef.current;
@@ -75,13 +80,6 @@ export function AnchoredPopover({
         // Prefer the conventional position under the field, but with the
         // mobile keyboard open there may be no room: cap the panel height to
         // the available space and flip above rather than covering the input.
-        const viewportBottom = viewportBox.offsetTop + viewportBox.height;
-        const roomBelow =
-          viewportBottom - POPUP_MARGIN - (rect.bottom + POPUP_GAP);
-        const roomAbove =
-          rect.top - POPUP_GAP - (viewportBox.offsetTop + POPUP_MARGIN);
-        const below = roomBelow >= MIN_PANEL_HEIGHT || roomBelow >= roomAbove;
-        const room = below ? roomBelow : roomAbove;
         const computedCap = panelMaxHeightCap(panel);
         if (
           computedCap !== undefined &&
@@ -89,33 +87,20 @@ export function AnchoredPopover({
         ) {
           classMaxHeightRef.current = computedCap;
         }
-        const cssCap = classMaxHeightRef.current;
-        const capped = Math.max(
-          Math.min(MIN_PANEL_HEIGHT, room),
-          Math.min(room, cssCap ?? Number.POSITIVE_INFINITY),
+        const next = anchoredPopoverBelowPosition({
+          anchor: rect,
+          panelWidth,
+          viewport: viewportBox,
+          align,
+          panelMaxHeight: classMaxHeightRef.current,
+        });
+        setHasRoom((current) =>
+          current === next.visible ? current : next.visible,
         );
-        appliedMaxHeightRef.current = capped;
-        setMaxHeight((current) => (current === capped ? current : capped));
-        const desiredLeft =
-          align === "start" ? rect.left : rect.right - panelWidth;
-        const next = {
-          left: Math.max(
-            viewportBox.offsetLeft + POPUP_MARGIN,
-            Math.min(
-              viewportBox.offsetLeft +
-                viewportBox.width -
-                panelWidth -
-                POPUP_MARGIN,
-              desiredLeft,
-            ),
-          ),
-          top: below
-            ? rect.bottom + POPUP_GAP
-            : Math.max(
-                viewportBox.offsetTop + POPUP_MARGIN,
-                rect.top - POPUP_GAP - capped,
-              ),
-        };
+        appliedMaxHeightRef.current = next.maxHeight;
+        setMaxHeight((current) =>
+          current === next.maxHeight ? current : next.maxHeight,
+        );
         setPosition((current) =>
           current.left === next.left && current.top === next.top
             ? current
@@ -142,7 +127,16 @@ export function AnchoredPopover({
       });
     };
 
+    // iOS can change the visual viewport while the keyboard opens or pans
+    // without dispatching a resize/scroll event. Keep the menu aligned while
+    // it is open so it never settles over the field after that transition.
+    let pollFrame: number | undefined;
+    const poll = () => {
+      update();
+      pollFrame = requestAnimationFrame(poll);
+    };
     update();
+    pollFrame = requestAnimationFrame(poll);
     window.addEventListener("resize", scheduleUpdate);
     window.addEventListener("scroll", scheduleUpdate, true);
     const viewport = window.visualViewport;
@@ -154,6 +148,7 @@ export function AnchoredPopover({
 
     return () => {
       if (frame !== undefined) cancelAnimationFrame(frame);
+      if (pollFrame !== undefined) cancelAnimationFrame(pollFrame);
       observer.disconnect();
       window.removeEventListener("resize", scheduleUpdate);
       window.removeEventListener("scroll", scheduleUpdate, true);
@@ -199,6 +194,9 @@ export function AnchoredPopover({
           : {}),
         ...(placement === "below" && maxHeight !== undefined
           ? { maxHeight }
+          : {}),
+        ...(placement === "below" && !hasRoom
+          ? { pointerEvents: "none", visibility: "hidden" }
           : {}),
       }}
     >
