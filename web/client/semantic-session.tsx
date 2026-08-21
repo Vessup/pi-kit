@@ -3550,7 +3550,7 @@ export function SemanticSession({
                   </>
                 )}
               </div>
-              <div className="ml-auto flex min-w-0 items-center gap-2">
+              <div className="ml-auto flex min-w-0 items-center gap-4">
                 <div className="semantic-composer-metrics">
                   <ComposerTokenInfo session={session} />
                   <ContextProgressCircle
