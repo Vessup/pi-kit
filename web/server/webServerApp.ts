@@ -139,6 +139,7 @@ export function createWebServerApp() {
     git,
     compactionNotice,
     rpcSessions,
+    router,
   });
   const clientMessages = createClientMessages({
     state,

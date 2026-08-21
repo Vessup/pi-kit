@@ -40,6 +40,23 @@ import {
   removeManagedWorktree,
 } from "./worktrees.js";
 
+export function shouldDeferManagedModelSelection(
+  record: Pick<
+    SessionRecord,
+    | "agentRunning"
+    | "settlingGeneration"
+    | "compaction"
+    | "applyingModelSelection"
+  >,
+): boolean {
+  return Boolean(
+    record.agentRunning ||
+      record.settlingGeneration !== undefined ||
+      record.compaction ||
+      record.applyingModelSelection,
+  );
+}
+
 /**
  * Routes client commands to the right transport: the managed RPC runtime,
  * the external agent socket, or an ad-hoc RPC session for saved sessions.
@@ -87,6 +104,57 @@ export function createCommandRouter(options: {
       onExit: () => undefined,
     }),
   );
+
+  async function applyManagedModelSelection(
+    record: SessionRecord,
+    selection: { provider: string; modelId: string },
+  ): Promise<void> {
+    if (!record.managed) throw new Error(`Session ${record.id} is not managed`);
+    await record.managed.setModel(selection.provider, selection.modelId);
+    record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
+    record.autoTurnActive = false;
+    record.autoTurnSettling = false;
+    record.lastModel = undefined;
+    await refreshManagedSession(record);
+  }
+
+  function flushPendingModelSelection(
+    record: SessionRecord,
+  ): Promise<void> | undefined {
+    if (record.modelSelectionFlush) return record.modelSelectionFlush;
+    if (!record.managed || !record.pendingModelSelection) return undefined;
+    record.applyingModelSelection = true;
+    const operation = (async () => {
+      try {
+        while (record.pendingModelSelection && record.managed) {
+          const selection = record.pendingModelSelection;
+          record.pendingModelSelection = undefined;
+          try {
+            await applyManagedModelSelection(record, selection);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            console.error(
+              `Could not apply deferred model selection for ${record.id}: ${message}`,
+            );
+            broadcastToSessionClients(record.id, {
+              type: "server.event",
+              sessionId: record.id,
+              event: { type: "model_selection_error", message },
+            } satisfies ServerEventMessage);
+          }
+        }
+      } finally {
+        record.applyingModelSelection = false;
+      }
+    })();
+    record.modelSelectionFlush = operation;
+    void operation.finally(() => {
+      if (record.modelSelectionFlush === operation)
+        record.modelSelectionFlush = undefined;
+    });
+    return operation;
+  }
 
   async function runRpcSessionCommand(
     record: SessionRecord,
@@ -476,15 +544,19 @@ export function createCommandRouter(options: {
           };
         }
         case "set_model":
+          if (shouldDeferManagedModelSelection(record)) {
+            // Keep only the latest choice. Applying set_model while Pi is still
+            // settling aborts the active run and surfaces a misleading failure.
+            record.pendingModelSelection = {
+              provider: command.provider,
+              modelId: command.modelId,
+            };
+            return { deferred: true };
+          }
           // A browser model change is explicit user selection, not the Auto
           // router's transient runtime swap. Only invalidate Auto tracking
           // after the runtime accepts the new model.
-          await record.managed.setModel(command.provider, command.modelId);
-          record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
-          record.autoTurnActive = false;
-          record.autoTurnSettling = false;
-          record.lastModel = undefined;
-          await refreshManagedSession(record);
+          await applyManagedModelSelection(record, command);
           return;
         case "set_thinking_level":
           await record.managed.setThinkingLevel(command.level);
@@ -655,6 +727,7 @@ export function createCommandRouter(options: {
 
   return {
     routeCommand,
+    flushPendingModelSelection,
     slashCommands,
   };
 }

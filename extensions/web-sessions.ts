@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   type ExtensionAPI,
   type ExtensionContext,
@@ -285,6 +286,9 @@ type BridgeState = {
   autoTurnRouting: boolean;
   /** True while Auto itself is applying a runtime model swap. */
   autoRuntimeRouting: boolean;
+  /** Latest browser model choice waiting for the active turn to settle. */
+  pendingModelSelection?: { provider: string; modelId: string };
+  applyingModelSelection?: boolean;
   metrics: Pick<WebSession, "usage" | "contextUsage">;
   sourceReplacement?: WorktreeSessionReplacement;
 };
@@ -907,6 +911,74 @@ async function requestFork(
   });
 }
 
+function resolveBridgeModel(
+  state: BridgeState,
+  provider: string,
+  modelId: string,
+): Model<Api> {
+  if (!isScopedModelAllowed(state.ctx.scopedModels, provider, modelId)) {
+    throw new Error(
+      `Model is outside this session's configured scope: ${provider}/${modelId}`,
+    );
+  }
+  const model = state.ctx.modelRegistry.find(provider, modelId);
+  if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+  return model;
+}
+
+async function applyBridgeModelSelection(
+  pi: ExtensionAPI,
+  state: BridgeState,
+  selection: { provider: string; modelId: string },
+): Promise<void> {
+  const model = resolveBridgeModel(
+    state,
+    selection.provider,
+    selection.modelId,
+  );
+  if (!(await pi.setModel(model))) {
+    throw new Error(
+      `No credentials available for ${selection.provider}/${selection.modelId}`,
+    );
+  }
+  // A browser model change is explicit user selection, not Auto's transient
+  // model swap for the current turn.
+  state.autoTurnRouting = false;
+  updateSession(state, {
+    model: `${model.provider}/${model.id}`,
+    selectedModel: `${model.provider}/${model.id}`,
+    lastModel: null,
+  });
+}
+
+async function applyPendingBridgeModelSelection(
+  pi: ExtensionAPI,
+  state: BridgeState,
+): Promise<void> {
+  if (!state.pendingModelSelection || state.applyingModelSelection) return;
+  state.applyingModelSelection = true;
+  try {
+    while (state.pendingModelSelection) {
+      const selection = state.pendingModelSelection;
+      state.pendingModelSelection = undefined;
+      try {
+        await applyBridgeModelSelection(pi, state, selection);
+      } catch (error) {
+        send(state, {
+          type: "agent.event",
+          sessionId: state.session.id,
+          event: {
+            type: "model_selection_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        } satisfies AgentEventMessage);
+      }
+    }
+  } finally {
+    state.applyingModelSelection = false;
+  }
+}
+
 async function executeAgentCommand(
   pi: ExtensionAPI,
   state: BridgeState,
@@ -980,37 +1052,18 @@ async function executeAgentCommand(
         return;
       }
       case "set_model": {
-        if (
-          !isScopedModelAllowed(
-            state.ctx.scopedModels,
-            command.provider,
-            command.modelId,
-          )
-        ) {
-          throw new Error(
-            `Model is outside this session's configured scope: ${command.provider}/${command.modelId}`,
-          );
+        // Validate now so an invalid browser choice still gets an immediate
+        // response, but never mutate Pi's runtime model during an active turn.
+        resolveBridgeModel(state, command.provider, command.modelId);
+        if (!state.ctx.isIdle() || state.applyingModelSelection) {
+          state.pendingModelSelection = {
+            provider: command.provider,
+            modelId: command.modelId,
+          };
+          respond(state, requestId, true, { deferred: true });
+          return;
         }
-        const model = state.ctx.modelRegistry.find(
-          command.provider,
-          command.modelId,
-        );
-        if (!model)
-          throw new Error(
-            `Model not found: ${command.provider}/${command.modelId}`,
-          );
-        if (!(await pi.setModel(model)))
-          throw new Error(
-            `No credentials available for ${command.provider}/${command.modelId}`,
-          );
-        // A browser model change is explicit user selection, not Auto's
-        // transient model swap for the current turn.
-        state.autoTurnRouting = false;
-        updateSession(state, {
-          model: `${model.provider}/${model.id}`,
-          selectedModel: `${model.provider}/${model.id}`,
-          lastModel: null,
-        });
+        await applyBridgeModelSelection(pi, state, command);
         respond(state, requestId, true);
         return;
       }
@@ -1835,7 +1888,7 @@ export default function webSessions(pi: ExtensionAPI): void {
       agentEndTerminalNotice(event)?.kind === "error" ? "error" : "idle";
     forward(event, ctx, status);
   });
-  pi.on("agent_settled", (event, ctx) => {
+  pi.on("agent_settled", async (event, ctx) => {
     const activeBridge = activeBridgeFor(ctx);
     if (activeBridge) {
       activeBridge.autoTurnRouting = false;
@@ -1854,6 +1907,7 @@ export default function webSessions(pi: ExtensionAPI): void {
         errorMessage: "Compaction stopped before completion",
       });
     }
+    if (activeBridge) await applyPendingBridgeModelSelection(pi, activeBridge);
     forward(
       event,
       ctx,

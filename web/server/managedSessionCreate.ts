@@ -11,6 +11,7 @@ import type {
   ServerSessionMessage,
 } from "../protocol.js";
 import type { ClientBroadcast } from "./clientBroadcast.js";
+import type { CommandRouter } from "./commandRouter.js";
 import {
   type CompactionNotice,
   isSuccessfulCompactionEnd,
@@ -51,6 +52,7 @@ export function createManagedSessionLauncher(options: {
   git: GitMetadata;
   compactionNotice: CompactionNotice;
   rpcSessions: RpcSessionFactory;
+  router: CommandRouter;
 }) {
   const {
     state: runtime,
@@ -65,6 +67,7 @@ export function createManagedSessionLauncher(options: {
     git,
     compactionNotice,
     rpcSessions,
+    router,
   } = options;
   const {
     normalizePath,
@@ -293,8 +296,17 @@ export function createManagedSessionLauncher(options: {
           // overflow compaction last advertised willRetry=true.
           if (record.status !== "error") record.status = "idle";
           record.agentRunning = false;
-          void refreshManagedSession(record, true);
-          void flushWebQueue(record);
+          const deferredModelSelection =
+            router.flushPendingModelSelection(record);
+          if (deferredModelSelection) {
+            void deferredModelSelection.finally(() => {
+              void refreshManagedSession(record, true);
+              void flushWebQueue(record);
+            });
+          } else {
+            void refreshManagedSession(record, true);
+            void flushWebQueue(record);
+          }
         }
 
         if (event.type === "message_end" && isRecord(event.message)) {

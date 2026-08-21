@@ -501,6 +501,13 @@ export function App() {
           if (eventType === "agent_end" || eventType === "agent_settled")
             setActiveTools([]);
         }
+        if (eventType === "model_selection_error") {
+          setError(
+            typeof event.message === "string"
+              ? event.message
+              : "Could not switch models",
+          );
+        }
         if (eventType === "subagents_update") {
           const updates = Array.isArray(event.agents)
             ? (event.agents as WebSubagentUpdate[])
@@ -835,6 +842,8 @@ export function App() {
     currentSession?.id === selectedId
       ? currentSession
       : (sessions.find((session) => session.id === selectedId) ?? null);
+  const selectedModelOptionKey =
+    selectedSession?.selectedModel ?? selectedSession?.model;
 
   const loadSessionOptions = React.useCallback(
     async (sessionId: string, generation = optionsGenerationRef.current) => {
@@ -911,11 +920,10 @@ export function App() {
     [],
   );
 
-  // Refire when the session identity or status changes, not on every agent
-  // update (which churns the selectedSession reference). Refiring on every
-  // reference races the in-flight RPC call against its successor; the
-  // failure of the latest generation would clear models and leave the picker
-  // stuck on the synthetic single-model fallback.
+  // Refire when the session identity, status, or explicit model selection
+  // changes, not on every agent update (which churns the selectedSession
+  // reference). The model key refreshes thinking levels after a deferred
+  // mid-turn selection is finally applied.
   React.useEffect(() => {
     const sessionId = selectedSession?.id;
     const status = selectedSession?.status;
@@ -924,10 +932,18 @@ export function App() {
       setSessionOptions({ models: [], thinkingLevels: [], commands: [] });
       return;
     }
+    // Reading the explicit selection makes this effect refresh the supported
+    // effort list when a deferred model change is finally applied.
+    void selectedModelOptionKey;
     // get_session_options already includes commands; avoid a second connection
     // and native get_commands process spawn on every session selection.
     void loadSessionOptions(sessionId, generation);
-  }, [loadSessionOptions, selectedSession?.id, selectedSession?.status]);
+  }, [
+    loadSessionOptions,
+    selectedModelOptionKey,
+    selectedSession?.id,
+    selectedSession?.status,
+  ]);
 
   const selectModel = React.useCallback(
     async (provider: string, modelId: string) => {
@@ -938,9 +954,8 @@ export function App() {
         provider,
         modelId,
       });
-      await loadSessionOptions(sessionId);
     },
-    [loadSessionOptions],
+    [],
   );
 
   const selectThinkingLevel = React.useCallback(async (level: string) => {
