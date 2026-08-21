@@ -643,125 +643,143 @@ function NewSessionDialog({
     if (nameEdited) return;
     setName(worktreeName.trim());
   }, [nameEdited, worktreeName]);
+  const submit = async () => {
+    if (busy || !repository.trim()) return;
+    setBusy(true);
+    setCreateError(null);
+    try {
+      const resolvedWorktreeName =
+        worktreeName.trim() || worktreeNameFromBranch(localBranch);
+      await onCreate({
+        cwd: repository.trim(),
+        name: name.trim() || undefined,
+        worktreeName: localBranch
+          ? resolvedWorktreeName || undefined
+          : undefined,
+        worktreeBranch: localBranch || undefined,
+        worktreeStartPoint: localBranch ? startPoint : undefined,
+      });
+      onOpenChange(false);
+    } catch (cause) {
+      setCreateError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <DialogHeader>
-          <DialogTitle>New session</DialogTitle>
-          <DialogDescription>
-            Choose a repository directory. Pick a branch to open it in a linked
-            worktree.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogBody className="space-y-4">
-          <AutocompleteInput
-            id={`${repositoryListId}-input`}
-            label="repository"
-            value={repository}
-            onChange={(value) => {
-              setRepository(value);
-              setCreateError(null);
-            }}
-            suggestions={repositorySuggestions}
-            placeholder="~/path/to/repository"
-            acceptSuffix="/"
-            hint="Suggestions list directories under ~ and stop once a Git repository is selected."
-          />
-          <AutocompleteInput
-            id={`${repositoryListId}-branch`}
-            label="worktree branch"
-            value={branch}
-            onChange={(value) => {
-              setBranch(value);
-              setCreateError(null);
-            }}
-            suggestions={branchSuggestionsForInput}
-            placeholder="Optional, e.g. main or origin/owner/topic"
-            hint="Local and remote branches of the repository. Choosing a remote branch creates a local branch that tracks it."
-          />
-          <div className="space-y-2">
-            <label
-              className="text-xs uppercase tracking-wider text-zinc-500"
-              htmlFor={`${repositoryListId}-worktree`}
-            >
-              worktree name
-            </label>
-            <Input
-              id={`${repositoryListId}-worktree`}
-              value={worktreeName}
-              onChange={(event) => {
-                setWorktreeName(event.target.value);
-                setWorktreeNameEdited(true);
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+          onKeyDown={(event) => {
+            // Cmd+Enter / Ctrl+Enter submits from any field, including while
+            // an autocomplete suggestion is highlighted (where plain Enter
+            // accepts the suggestion instead).
+            if (
+              event.key === "Enter" &&
+              (event.metaKey || event.ctrlKey) &&
+              !event.altKey &&
+              !event.shiftKey
+            ) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>New session</DialogTitle>
+            <DialogDescription>
+              Choose a repository directory. Pick a branch to open it in a
+              linked worktree.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <AutocompleteInput
+              id={`${repositoryListId}-input`}
+              label="repository"
+              value={repository}
+              onChange={(value) => {
+                setRepository(value);
                 setCreateError(null);
               }}
-              placeholder="Optional managed directory name"
+              suggestions={repositorySuggestions}
+              placeholder="~/path/to/repository"
+              acceptSuffix="/"
+              hint="Suggestions list directories under ~ and stop once a Git repository is selected."
             />
-            <p className="text-xs text-zinc-500">
-              Generated from the branch; edit to override. Creates or reuses{" "}
-              <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <label
-              className="text-xs uppercase tracking-wider text-zinc-500"
-              htmlFor={`${repositoryListId}-session-name`}
-            >
-              session name
-            </label>
-            <Input
-              id={`${repositoryListId}-session-name`}
-              value={name}
-              onChange={(event) => {
-                setName(event.target.value);
-                setNameEdited(true);
+            <AutocompleteInput
+              id={`${repositoryListId}-branch`}
+              label="worktree branch"
+              value={branch}
+              onChange={(value) => {
+                setBranch(value);
+                setCreateError(null);
               }}
-              placeholder="Optional display name"
+              suggestions={branchSuggestionsForInput}
+              placeholder="Optional, e.g. main or origin/owner/topic"
+              hint="Local and remote branches of the repository. Choosing a remote branch creates a local branch that tracks it."
             />
-            <p className="text-xs text-zinc-500">
-              Generated from the worktree name; edit to override.
-            </p>
-          </div>
-          {createError && (
-            <p
-              role="alert"
-              className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300"
-            >
-              {createError}
-            </p>
-          )}
-        </DialogBody>
-        <DialogFooter>
-          <DialogClose>Cancel</DialogClose>
-          <Button
-            onClick={async () => {
-              setBusy(true);
-              setCreateError(null);
-              try {
-                const resolvedWorktreeName =
-                  worktreeName.trim() || worktreeNameFromBranch(localBranch);
-                await onCreate({
-                  cwd: repository.trim(),
-                  name: name.trim() || undefined,
-                  worktreeName: localBranch
-                    ? resolvedWorktreeName || undefined
-                    : undefined,
-                  worktreeBranch: localBranch || undefined,
-                  worktreeStartPoint: localBranch ? startPoint : undefined,
-                });
-                onOpenChange(false);
-              } catch (cause) {
-                setCreateError(
-                  cause instanceof Error ? cause.message : String(cause),
-                );
-              } finally {
-                setBusy(false);
-              }
-            }}
-            disabled={busy || !repository.trim()}
-          >
-            {busy ? "Creating…" : "Create"}
-          </Button>
-        </DialogFooter>
+            <div className="space-y-2">
+              <label
+                className="text-xs uppercase tracking-wider text-zinc-500"
+                htmlFor={`${repositoryListId}-worktree`}
+              >
+                worktree name
+              </label>
+              <Input
+                id={`${repositoryListId}-worktree`}
+                value={worktreeName}
+                onChange={(event) => {
+                  setWorktreeName(event.target.value);
+                  setWorktreeNameEdited(true);
+                  setCreateError(null);
+                }}
+                placeholder="Optional managed directory name"
+              />
+              <p className="text-xs text-zinc-500">
+                Generated from the branch; edit to override. Creates or reuses{" "}
+                <code>&lt;repo-root&gt;/.pi/worktrees/&lt;name&gt;</code>.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label
+                className="text-xs uppercase tracking-wider text-zinc-500"
+                htmlFor={`${repositoryListId}-session-name`}
+              >
+                session name
+              </label>
+              <Input
+                id={`${repositoryListId}-session-name`}
+                value={name}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  setNameEdited(true);
+                }}
+                placeholder="Optional display name"
+              />
+              <p className="text-xs text-zinc-500">
+                Generated from the worktree name; edit to override.
+              </p>
+            </div>
+            {createError && (
+              <p
+                role="alert"
+                className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300"
+              >
+                {createError}
+              </p>
+            )}
+          </DialogBody>
+          <DialogFooter>
+            <DialogClose>Cancel</DialogClose>
+            <Button type="submit" disabled={busy || !repository.trim()}>
+              {busy ? "Creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );
