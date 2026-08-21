@@ -930,18 +930,20 @@ details[open] > summary .semantic-tool-chevron {
   gap: 0.4rem;
 }
 .semantic-token-inline {
-  display: inline-block;
+  display: inline-flex;
   width: clamp(12rem, 35vw, 25rem);
   margin-left: 0;
+  align-items: center;
+  justify-content: flex-end;
   overflow: hidden;
-  color: rgb(82 82 91);
+  color: rgb(113 113 122);
   font:
     12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
   font-variant-numeric: tabular-nums;
-  line-height: 1.25;
+  line-height: 1;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1049,6 +1051,7 @@ details[open] > summary .semantic-tool-chevron {
   overflow: hidden;
   color: rgb(161 161 170);
   font-size: 12px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1057,6 +1060,7 @@ details[open] > summary .semantic-tool-chevron {
   overflow: hidden;
   color: rgb(161 161 170);
   font-size: 12px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1064,17 +1068,20 @@ details[open] > summary .semantic-tool-chevron {
 .semantic-composer-control > svg {
   color: rgb(161 161 170);
   font-size: 12px;
+  line-height: 1;
 }
 .semantic-composer-control > .text-zinc-600 {
   color: rgb(82 82 91);
 }
 .semantic-turn-model {
-  display: inline-block;
+  display: inline-flex;
   min-width: 0;
   max-width: min(16rem, 28vw);
+  align-items: center;
   overflow: hidden;
   color: rgb(113 113 122);
   font-size: 12px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
