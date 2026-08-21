@@ -19,6 +19,8 @@ type AnchoredPopoverProps = {
   matchAnchorWidth?: boolean;
 };
 
+const MOBILE_REPOSITION_WINDOW_MS = 1200;
+
 function panelMaxHeightCap(panel: HTMLElement | null): number | undefined {
   if (!panel) return undefined;
   const css = window.getComputedStyle(panel).maxHeight;
@@ -128,20 +130,33 @@ export function AnchoredPopover({
     };
 
     // iOS can change the visual viewport while the keyboard opens or pans
-    // without dispatching a resize/scroll event. Keep the menu aligned while
-    // it is open so it never settles over the field after that transition.
+    // without dispatching a resize/scroll event. Poll briefly for the keyboard
+    // transition; the normal event listeners keep the menu updated after that
+    // without forcing layout on every frame for the rest of its lifetime.
     let pollFrame: number | undefined;
-    const poll = () => {
+    let pollDeadline = 0;
+    const poll = (timestamp: number) => {
+      pollFrame = undefined;
       update();
-      pollFrame = requestAnimationFrame(poll);
+      if (timestamp < pollDeadline)
+        pollFrame = requestAnimationFrame(poll);
+    };
+    const startPolling = () => {
+      if (placement !== "below") return;
+      pollDeadline = performance.now() + MOBILE_REPOSITION_WINDOW_MS;
+      if (pollFrame === undefined) pollFrame = requestAnimationFrame(poll);
+    };
+    const scheduleUpdateWithPolling = () => {
+      scheduleUpdate();
+      startPolling();
     };
     update();
-    pollFrame = requestAnimationFrame(poll);
-    window.addEventListener("resize", scheduleUpdate);
-    window.addEventListener("scroll", scheduleUpdate, true);
+    startPolling();
+    window.addEventListener("resize", scheduleUpdateWithPolling);
+    window.addEventListener("scroll", scheduleUpdateWithPolling, true);
     const viewport = window.visualViewport;
-    viewport?.addEventListener("resize", scheduleUpdate);
-    viewport?.addEventListener("scroll", scheduleUpdate);
+    viewport?.addEventListener("resize", scheduleUpdateWithPolling);
+    viewport?.addEventListener("scroll", scheduleUpdateWithPolling);
     const observer = new ResizeObserver(scheduleUpdate);
     if (anchorRef.current) observer.observe(anchorRef.current);
     if (panelRef.current) observer.observe(panelRef.current);
@@ -150,10 +165,10 @@ export function AnchoredPopover({
       if (frame !== undefined) cancelAnimationFrame(frame);
       if (pollFrame !== undefined) cancelAnimationFrame(pollFrame);
       observer.disconnect();
-      window.removeEventListener("resize", scheduleUpdate);
-      window.removeEventListener("scroll", scheduleUpdate, true);
-      viewport?.removeEventListener("resize", scheduleUpdate);
-      viewport?.removeEventListener("scroll", scheduleUpdate);
+      window.removeEventListener("resize", scheduleUpdateWithPolling);
+      window.removeEventListener("scroll", scheduleUpdateWithPolling, true);
+      viewport?.removeEventListener("resize", scheduleUpdateWithPolling);
+      viewport?.removeEventListener("scroll", scheduleUpdateWithPolling);
     };
   }, [align, anchorRef, matchAnchorWidth, open, placement]);
 

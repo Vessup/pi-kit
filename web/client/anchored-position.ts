@@ -74,7 +74,7 @@ export function anchoredPopoverBelowPosition(options: {
           ),
     maxHeight,
     placement,
-    visible: room > 0,
+    visible: maxHeight > 0,
   };
 }
 

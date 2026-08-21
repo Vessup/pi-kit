@@ -56,3 +56,15 @@ test("below placement hides a menu when neither side has room", () => {
     }),
   ).toMatchObject({ maxHeight: 0, visible: false });
 });
+
+test("below placement hides a menu capped to zero height", () => {
+  expect(
+    anchoredPopoverBelowPosition({
+      anchor: { left: 20, right: 380, top: 100, bottom: 136 },
+      panelWidth: 360,
+      panelMaxHeight: 0,
+      viewport: { offsetLeft: 0, offsetTop: 0, width: 390, height: 600 },
+      align: "start",
+    }),
+  ).toMatchObject({ maxHeight: 0, visible: false });
+});

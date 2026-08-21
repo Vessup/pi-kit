@@ -725,7 +725,6 @@ function CompactionStatus({ session }: { session: WebSession }) {
         : "Compacting context…";
   return (
     <output className="semantic-compaction-status">
-      <ContextProgressCircle session={session} interactive={false} />
       <div>
         <strong>{title}</strong>
         <small>
