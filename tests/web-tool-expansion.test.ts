@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { toolHasArgumentDetails } from "../web/client/tool-expansion.ts";
 
-test("Write and Edit cards auto-expand from their rendered arguments without tool output", () => {
+test("only specialized tool previews auto-expand without tool output", () => {
   expect(
     toolHasArgumentDetails("write", {
       path: "file.ts",
@@ -15,4 +15,10 @@ test("Write and Edit cards auto-expand from their rendered arguments without too
     }),
   ).toBe(true);
   expect(toolHasArgumentDetails("read", { path: "file.ts" })).toBe(false);
+  expect(
+    toolHasArgumentDetails("subagent_read", {
+      wait_seconds: 30,
+      include_transcript: false,
+    }),
+  ).toBe(false);
 });
