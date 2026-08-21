@@ -322,7 +322,10 @@ export function App() {
         window.clearTimeout(queueSyncRef.current.timer);
         queueSyncRef.current = null;
       }
-      const switchingSessions = activeSessionIdRef.current !== sessionId;
+      const previousSessionId = activeSessionIdRef.current;
+      const switchingSessions = previousSessionId !== sessionId;
+      if (switchingSessions && previousSessionId)
+        optimisticWorkingSessionsRef.current.delete(previousSessionId);
       const previousSocket = socketRef.current;
       socketRef.current = null;
       if (previousSocket) {

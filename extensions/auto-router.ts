@@ -182,6 +182,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
    * every turn routes within that tier directly, skipping classification entirely. */
   let pinnedTier: AutoRouterEffortLevel | undefined;
   let routingInFlight = false;
+  let modelTransitionTarget: Model<Api> | undefined;
+  let manualModelOverride: Model<Api> | undefined;
   let modelTransitionTail = Promise.resolve();
   let compactionLease = false;
   let preflightPromptRouted = false;
@@ -229,6 +231,14 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     return pinnedTier ? pinnedModelId(pinnedTier) : AUTO_MODEL_ID;
   }
 
+  async function restoreManualModelOverride(
+    pi: ExtensionAPI,
+  ): Promise<void> {
+    const override = manualModelOverride;
+    manualModelOverride = undefined;
+    if (override) await pi.setModel(override);
+  }
+
   /** Swap `ctx.model` back to the inert Auto placeholder (whichever one is selected - adaptive or a pinned tier) once a turn is fully done, so `/model` keeps showing it selected instead of whichever real model just handled the turn. */
   async function revertToAutoPlaceholder(
     pi: ExtensionAPI,
@@ -241,14 +251,17 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     if (!placeholder) return;
     await withModelTransition(async () => {
       routingInFlight = true;
+      modelTransitionTarget = placeholder;
       publishModelRouting(pi, ctx, true);
       try {
         await pi.setModel(placeholder);
       } finally {
         routingInFlight = false;
+        modelTransitionTarget = undefined;
         publishModelRouting(pi, ctx, false);
       }
     });
+    await restoreManualModelOverride(pi);
   }
 
   function clearFooter(): void {
@@ -438,8 +451,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     model: Model<Api>,
     effort: AutoRouterEffortLevel,
   ): Promise<boolean> {
-    return withModelTransition(async () => {
+    const applied = await withModelTransition(async () => {
       routingInFlight = true;
+      modelTransitionTarget = model;
       publishModelRouting(pi, ctx, true);
       try {
         const success = await pi.setModel(model);
@@ -452,13 +466,17 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
           }
           return false;
         }
-        await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
+        if (!manualModelOverride)
+          await pi.setThinkingLevel(resolveSupportedEffort(ctx, model, effort));
         return true;
       } finally {
         routingInFlight = false;
+        modelTransitionTarget = undefined;
         publishModelRouting(pi, ctx, false);
       }
     });
+    await restoreManualModelOverride(pi);
+    return applied;
   }
 
   async function routeForCompaction(
@@ -695,7 +713,18 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("model_select", (event, _ctx) => {
-    if (routingInFlight) return;
+    if (routingInFlight) {
+      const target = modelTransitionTarget;
+      if (
+        target?.provider === event.model.provider &&
+        target.id === event.model.id
+      )
+        return;
+      // An explicit selection that completes during Auto's own transition wins.
+      // The fallback path restores this model if its older setModel finishes last.
+      manualModelOverride = event.model;
+      runtimeGeneration += 1;
+    }
     if (event.model.provider === AUTO_PROVIDER_ID) {
       autoActive = true;
       pinnedTier = tierFromModelId(event.model.id);
@@ -716,6 +745,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("session_start", async (_event, ctx) => {
     currentSessionId = ctx.sessionManager.getSessionId();
     routingInFlight = false;
+    modelTransitionTarget = undefined;
+    manualModelOverride = undefined;
     compactionLease = false;
     preflightPromptRouted = false;
     postTurnCompactionRoutePending = false;
@@ -899,6 +930,8 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("session_shutdown", async () => {
     compactionLease = false;
     routingInFlight = false;
+    modelTransitionTarget = undefined;
+    manualModelOverride = undefined;
     preflightPromptRouted = false;
     runtimeGeneration += 1;
     pendingRuntimeFailure = undefined;

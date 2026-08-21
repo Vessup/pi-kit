@@ -88,7 +88,9 @@ type FakePi = {
 
 function createFakePi(
   options: {
-    setModelResult?: boolean | ((model: Model<Api>, call: number) => boolean);
+    setModelResult?:
+      | boolean
+      | ((model: Model<Api>, call: number) => boolean | Promise<boolean>);
   } = {},
 ): FakePi {
   const handlers = new Map<string, FakeHandler>();
@@ -132,7 +134,7 @@ function createFakePi(
       setModelCalls.push(m);
       const success =
         typeof options.setModelResult === "function"
-          ? options.setModelResult(m, setModelCalls.length)
+          ? await options.setModelResult(m, setModelCalls.length)
           : options.setModelResult !== false;
       if (success) currentModel.value = m;
       return success;
@@ -1212,6 +1214,65 @@ test("Auto continues a failed request on the next configured model after core re
   fake.setModelCalls.length = 0;
   await fake.fire("before_agent_start", { prompt: "next real prompt" }, ctx);
   expect(fake.setModelCalls).toEqual([b]);
+});
+
+test("an explicit model selection wins while runtime fallback is applying", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  const manual = model("prov", "manual");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  let releaseFallback!: (success: boolean) => void;
+  const fallbackBlocked = new Promise<boolean>((resolve) => {
+    releaseFallback = resolve;
+  });
+  const fake = createFakePi({
+    setModelResult: (selected) =>
+      selected.id === "model-b" ? fallbackBlocked : true,
+  });
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a, b, manual] }),
+    currentModel: fake.currentModel,
+  });
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "do the work" }, ctx);
+  await fake.fire(
+    "message_end",
+    {
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "503: Endpoint is unavailable",
+      },
+    },
+    ctx,
+  );
+
+  const settling = fake.fire("agent_settled", {}, ctx);
+  while (!fake.setModelCalls.includes(b)) await Bun.sleep(0);
+  fake.currentModel.value = manual;
+  await fake.fire(
+    "model_select",
+    { model: manual, previousModel: a, source: "set" },
+    ctx,
+  );
+  releaseFallback(true);
+  await settling;
+
+  expect(fake.currentModel.value).toBe(manual);
+  expect(fake.setModelCalls.at(-1)).toBe(manual);
+  expect(fake.sentMessages).toEqual([]);
 });
 
 test("Auto does not fallback when Pi's built-in retry eventually succeeds", async () => {

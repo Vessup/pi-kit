@@ -291,7 +291,8 @@ export function createCommandRouter(options: {
           record.modelSelectionOperation = undefined;
           record.applyingModelSelection = false;
           if (succeeded) {
-            record.modelSelectionTarget = undefined;
+            if (!record.pendingModelSelection)
+              record.modelSelectionTarget = undefined;
             record.modelSelectionError = undefined;
             if (record.status !== "working") void flushWebQueue(record);
           }
