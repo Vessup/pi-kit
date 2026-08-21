@@ -1294,6 +1294,32 @@ test("queued Auto turns stop when no configured model resolves", async () => {
   expect(fake.setModelCalls).toEqual([]);
 });
 
+test("Auto reports configured but unavailable models accurately", async () => {
+  await writeConfig({
+    efforts: {
+      medium: { models: [{ provider: "prov", id: "stale-model" }] },
+    },
+  });
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [] }),
+    currentModel: fake.currentModel,
+  });
+
+  await fake.fire("session_start", {}, ctx);
+  await expect(
+    fake.fire("before_agent_start", { prompt: "anything" }, ctx),
+  ).rejects.toThrow("Auto could not route this prompt");
+
+  const warning = ctx.notifications.find(({ type }) => type === "warning")?.message ?? "";
+  expect(warning).toContain("configured models");
+  expect(warning).toContain("model IDs");
+  expect(warning).toContain("provider credentials");
+  expect(warning).not.toContain("no configured models yet");
+});
+
 test(
   "active Auto reroutes instead of reusing a real model left after a failed turn",
   async () => {

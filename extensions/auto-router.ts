@@ -539,8 +539,11 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       if (ctx.model?.provider !== AUTO_PROVIDER_ID)
         await revertToAutoPlaceholder(pi, ctx);
       if (ctx.hasUI) {
+        const hasConfiguredModels = allConfiguredModels(settings).length > 0;
         ctx.ui.notify(
-          "Auto has no configured models yet. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
+          hasConfiguredModels
+            ? "Auto has configured models, but none are currently available. Check model IDs and provider credentials."
+            : "Auto has no configured models yet. Add an `autoRouter` entry to ~/.pi/agent/settings.json.",
           "warning",
         );
       }
