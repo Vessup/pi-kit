@@ -59,7 +59,12 @@ export function savePreference(key: string, value: string): void {
 
 export function hashSessionId(): string | null {
   const match = window.location.hash.match(/#\/sessions\/([^/?#]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 export function setHashSessionId(sessionId: string): void {

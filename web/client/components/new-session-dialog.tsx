@@ -69,12 +69,16 @@ export function NewSessionDialog({
     if (!open) return;
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      void listDirectorySuggestions(repository).then((directories) => {
-        if (!cancelled)
-          setRepositorySuggestions(
-            directories.map((directory) => ({ value: directory })),
-          );
-      });
+      void listDirectorySuggestions(repository)
+        .then((directories) => {
+          if (!cancelled)
+            setRepositorySuggestions(
+              directories.map((directory) => ({ value: directory })),
+            );
+        })
+        .catch(() => {
+          if (!cancelled) setRepositorySuggestions([]);
+        });
     }, 150);
     return () => {
       cancelled = true;
@@ -86,9 +90,13 @@ export function NewSessionDialog({
     if (!open || !repositoryQuery) return;
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      void listBranchSuggestions(repositoryQuery).then((branches) => {
-        if (!cancelled) setBranchSuggestions(branches);
-      });
+      void listBranchSuggestions(repositoryQuery)
+        .then((branches) => {
+          if (!cancelled) setBranchSuggestions(branches);
+        })
+        .catch(() => {
+          if (!cancelled) setBranchSuggestions({ local: [], remote: [] });
+        });
     }, 250);
     return () => {
       cancelled = true;

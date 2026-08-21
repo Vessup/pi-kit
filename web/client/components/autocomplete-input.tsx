@@ -48,7 +48,9 @@ export function AutocompleteInput({
     [suggestions, value],
   );
   React.useEffect(() => {
-    setActiveIndex((index) => Math.min(index, filtered.length - 1));
+    setActiveIndex((index) =>
+      Math.max(0, Math.min(index, filtered.length - 1)),
+    );
   }, [filtered.length]);
   const popoverOpen = open && filtered.length > 0;
   const accept = (suggestion: AutocompleteSuggestion) => {
@@ -75,6 +77,15 @@ export function AutocompleteInput({
         value={value}
         placeholder={placeholder}
         autoComplete="off"
+        role="combobox"
+        aria-expanded={popoverOpen}
+        aria-controls={`${id}-listbox`}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          popoverOpen && filtered[activeIndex]
+            ? `${id}-option-${activeIndex}`
+            : undefined
+        }
         onChange={(event) => {
           onChange(event.target.value);
           setOpen(true);
@@ -122,10 +133,13 @@ export function AutocompleteInput({
         matchAnchorWidth
         className="max-h-64 overflow-y-auto text-sm"
       >
-        <ul id={`${id}-listbox`}>
+        <div id={`${id}-listbox`} role="listbox">
           {filtered.map((suggestion, index) => (
-            <li key={suggestion.value}>
+            <div key={suggestion.value} role="presentation">
               <button
+                id={`${id}-option-${index}`}
+                role="option"
+                aria-selected={index === activeIndex}
                 type="button"
                 className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-1.5 text-left ${
                   index === activeIndex
@@ -142,9 +156,9 @@ export function AutocompleteInput({
                   </span>
                 ) : null}
               </button>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       </AnchoredPopover>
       {hint ? <p className="text-xs text-zinc-500">{hint}</p> : null}
     </div>

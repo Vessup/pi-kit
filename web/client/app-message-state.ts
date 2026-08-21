@@ -36,7 +36,8 @@ export function upsertActiveTool(
         ? event.toolName
         : (existing?.name ?? "tool"),
     args: event.args ?? existing?.args,
-    result: patch.result ?? existing?.result,
+    result:
+      patch.result !== undefined ? patch.result : existing?.result,
     isError: patch.isError ?? existing?.isError,
     running: patch.running,
   };
