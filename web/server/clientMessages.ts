@@ -139,7 +139,7 @@ export function createClientMessages(options: {
               id: message.requestId,
               message: message.message,
             });
-            responseData = { queued: true };
+            responseData = { queued: true, reason: "followUp" };
           } else {
             if (message.streamingBehavior === "steer")
               throw new Error("/reload must be queued or run while Pi is idle");
@@ -158,7 +158,7 @@ export function createClientMessages(options: {
               id: message.requestId,
               message: message.message,
             });
-            responseData = { queued: true };
+            responseData = { queued: true, reason: "followUp" };
           } else {
             if (message.streamingBehavior === "steer")
               throw new Error(
@@ -194,6 +194,10 @@ export function createClientMessages(options: {
           (message.streamingBehavior === "followUp" &&
             record.status === "working")
         ) {
+          const queueReason =
+            message.streamingBehavior === "followUp"
+              ? "followUp"
+              : "modelSelection";
           await enqueueWebFollowUp(record, {
             id: message.requestId,
             message: message.message,
@@ -202,7 +206,7 @@ export function createClientMessages(options: {
               ? { requiredModel: { ...record.modelSelectionTarget } }
               : {}),
           });
-          responseData = { queued: true };
+          responseData = { queued: true, reason: queueReason };
         } else {
           await routeCommand(record, {
             type: "prompt",

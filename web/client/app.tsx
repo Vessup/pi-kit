@@ -66,6 +66,10 @@ import {
 } from "./app-preferences";
 import { NewSessionDialog } from "./components/new-session-dialog";
 import {
+  isQueuedFollowUpResponse,
+  shouldShowOptimisticPrompt,
+} from "./composer-send";
+import {
   DeleteSessionDialog,
   ForkSessionDialog,
   RenameSessionDialog,
@@ -1031,9 +1035,11 @@ export function App() {
         streamingBehavior,
       } satisfies ClientPromptMessage;
       assertClientPromptPayloadFits(promptFrame);
-      const queuedFollowUp =
-        streamingBehavior === "followUp" &&
-        selectedSession?.status === "working";
+      const showOptimisticPrompt = shouldShowOptimisticPrompt(
+        streamingBehavior,
+        selectedSession?.status,
+      );
+      const queuedFollowUp = !showOptimisticPrompt;
       const worktreeCommand = /^\/worktree(?:\s|$)/.test(message.trim());
       const compactCommand = parseWebCompactCommand(message);
       const controlCommand =
@@ -1081,12 +1087,14 @@ export function App() {
           ],
         },
       };
-      const next = [...entriesRef.current, optimistic];
-      entriesRef.current = next;
-      setEntries(next);
-      // Paint every submitted prompt immediately, including follow-ups that
-      // have not been handed to Pi yet. Queue delivery reconciles this same id.
-      if (!controlCommand) await waitForVisibleBrowserPaint();
+      if (showOptimisticPrompt) {
+        const next = [...entriesRef.current, optimistic];
+        entriesRef.current = next;
+        setEntries(next);
+        // Immediate prompts paint before routing starts. Explicit follow-ups
+        // remain only in the queue until delivery actually begins.
+        if (!controlCommand) await waitForVisibleBrowserPaint();
+      }
       let responseData: unknown;
       try {
         responseData = await new Promise<unknown>((resolve, reject) => {
@@ -1100,13 +1108,11 @@ export function App() {
             socket.send(promptFrame);
           } catch (cause) {
             pendingRequestsRef.current.delete(requestId);
-            if (!queuedFollowUp) {
-              const next = entriesRef.current.filter(
-                (entry) => entry.id !== optimisticId,
-              );
-              entriesRef.current = next;
-              setEntries(next);
-            }
+            const next = entriesRef.current.filter(
+              (entry) => entry.id !== optimisticId,
+            );
+            entriesRef.current = next;
+            setEntries(next);
             reject(cause instanceof Error ? cause : new Error(String(cause)));
           }
         });
@@ -1137,10 +1143,34 @@ export function App() {
         "queued" in responseData &&
         responseData.queued === true
       ) {
-        // The server had to queue this otherwise-immediate prompt (for example,
-        // while a requested model is still being applied). Keep the already
-        // rendered optimistic bubble and working state; queue delivery will
-        // reconcile this same request id instead of inserting a duplicate.
+        if (isQueuedFollowUpResponse(responseData)) {
+          const next = entriesRef.current.filter(
+            (entry) => entry.id !== optimisticId,
+          );
+          entriesRef.current = next;
+          setEntries(next);
+          if (
+            optimisticallyWorking &&
+            previousStatus &&
+            optimisticWorkingSessionsRef.current.delete(sessionId)
+          ) {
+            setCurrentSession((current) =>
+              current?.id === sessionId
+                ? { ...current, status: previousStatus }
+                : current,
+            );
+            setSessions((previous) =>
+              previous.map((session) =>
+                session.id === sessionId
+                  ? { ...session, status: previousStatus }
+                  : session,
+              ),
+            );
+          }
+        }
+        // A model-selection gate represents an immediate prompt still being
+        // routed, so its bubble remains optimistic. Explicit follow-ups stay
+        // exclusively in the queue until web_queue_delivery starts.
         return;
       }
       if (isWebReloadCommand(message)) {

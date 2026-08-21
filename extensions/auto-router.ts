@@ -187,6 +187,18 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   let preflightPromptRouted = false;
   let postTurnCompactionRoutePending = false;
   let postTurnCompactionPreviousRoute: string | undefined;
+  let runtimeGeneration = 0;
+  let pendingRuntimeFailure:
+    | { model: ModelIdentity; errorMessage?: string; generation: number }
+    | undefined;
+  const runtimeFallbackTried = new Set<string>();
+  let lastAutoRoute:
+    | {
+        model: Model<Api>;
+        tier: AutoRouterEffortLevel;
+        effort: AutoRouterEffortLevel;
+      }
+    | undefined;
   const healthStore = new AutoRouterHealthStore();
 
   async function withModelTransition<T>(operation: () => Promise<T>): Promise<T> {
@@ -338,12 +350,15 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     ctx: ExtensionContext,
     settings: AutoRouterSettings,
     tier: AutoRouterEffortLevel,
+    excludedModels: ReadonlySet<string> = new Set(),
   ):
     | { model: Model<Api>; tier: AutoRouterEffortLevel; effort: AutoRouterEffortLevel }
     | undefined {
     for (const candidateTier of [tier, ...escalationTiers(settings, tier)]) {
       const refs = settings.efforts[candidateTier]?.models ?? [];
-      const available = resolveAvailableModels(ctx.modelRegistry, refs);
+      const available = resolveAvailableModels(ctx.modelRegistry, refs).filter(
+        (model) => !excludedModels.has(modelKey(model)),
+      );
       const healthy = healthStore.pickHealthy(available);
       if (healthy) {
         const model = available.find(
@@ -366,7 +381,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     // `tier`, since mislabeling it would apply the wrong thinking level to the model in use.
     const ownRefs = settings.efforts[tier]?.models;
     let fallback = ownRefs
-      ? resolveAvailableModels(ctx.modelRegistry, ownRefs)[0]
+      ? resolveAvailableModels(ctx.modelRegistry, ownRefs).find(
+          (model) => !excludedModels.has(modelKey(model)),
+        )
       : undefined;
     let fallbackTier = tier;
     let fallbackRefs = ownRefs ?? [];
@@ -374,7 +391,9 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       for (const candidateTier of AUTO_ROUTER_EFFORT_ORDER) {
         const refs = settings.efforts[candidateTier]?.models;
         if (!refs) continue;
-        const candidate = resolveAvailableModels(ctx.modelRegistry, refs)[0];
+        const candidate = resolveAvailableModels(ctx.modelRegistry, refs).find(
+          (model) => !excludedModels.has(modelKey(model)),
+        );
         if (candidate) {
           fallback = candidate;
           fallbackTier = candidateTier;
@@ -560,6 +579,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       effort: picked.effort,
       model: picked.model,
     });
+    lastAutoRoute = picked;
     return true;
   }
 
@@ -568,6 +588,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     // and changing the model while an agent is streaming would race its request.
     if (event.streamingBehavior) return;
     preflightPromptRouted = false;
+    runtimeGeneration += 1;
+    pendingRuntimeFailure = undefined;
+    runtimeFallbackTried.clear();
+    lastAutoRoute = undefined;
     // Core checks for threshold compaction before before_agent_start. Route away
     // from Auto's inert placeholder during that preflight so summarization uses
     // a real model instead of http://127.0.0.1:0. If an earlier failed turn left
@@ -696,6 +720,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     preflightPromptRouted = false;
     postTurnCompactionRoutePending = false;
     postTurnCompactionPreviousRoute = undefined;
+    runtimeGeneration += 1;
+    pendingRuntimeFailure = undefined;
+    runtimeFallbackTried.clear();
+    lastAutoRoute = undefined;
     // Reuse the single instance rather than replacing it: a stale instance's pending
     // debounced-save timer would otherwise still fire independently and could overwrite
     // this reload's freshly-loaded state on disk with the old in-memory data.
@@ -778,6 +806,68 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("agent_settled", async (_event, ctx) => {
     if (!autoActive || compactionLease) return;
     if (!ctx.model || ctx.model.provider === AUTO_PROVIDER_ID) return;
+    const runtimeFailure = pendingRuntimeFailure;
+    if (runtimeFailure) {
+      const generation = runtimeFailure.generation;
+      runtimeFallbackTried.add(modelKey(runtimeFailure.model));
+      const settings = await readAutoRouterSettings();
+      if (
+        generation !== runtimeGeneration ||
+        !ctx.isIdle() ||
+        ctx.hasPendingMessages()
+      )
+        return;
+      pendingRuntimeFailure = undefined;
+      const tier = lastAutoRoute?.tier ?? pinnedTier ?? "medium";
+      let fallback = pickForTier(ctx, settings, tier, runtimeFallbackTried);
+      while (fallback) {
+        runtimeFallbackTried.add(modelKey(fallback.model));
+        if (await applyRouting(pi, ctx, fallback.model, fallback.effort)) {
+          if (generation !== runtimeGeneration) return;
+          lastAutoRoute = fallback;
+          healthStore.recordClassification({
+            reply: `runtime fallback after ${modelKey(runtimeFailure.model)} failed`,
+            level: "(fallback)",
+            tier: fallback.tier,
+            effort: fallback.effort,
+            model: fallback.model,
+          });
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `Auto: ${modelKey(runtimeFailure.model)} failed; continuing with ${modelKey(fallback.model)}.`,
+              "warning",
+            );
+          }
+          // Custom continuations enter the agent directly (they do not emit
+          // before_agent_start), so the selected fallback handles this run
+          // without being classified as a new user prompt.
+          pi.sendMessage(
+            {
+              customType: "vessup:auto-router:fallback",
+              content:
+                "The previously selected model failed before completing the request. Continue the user's existing request from the conversation context without repeating completed work.",
+              display: false,
+              details: {
+                failedModel: modelKey(runtimeFailure.model),
+                fallbackModel: modelKey(fallback.model),
+                errorMessage: runtimeFailure.errorMessage,
+              },
+            },
+            { triggerTurn: true, deliverAs: "followUp" },
+          );
+          return;
+        }
+        fallback = pickForTier(ctx, settings, tier, runtimeFallbackTried);
+      }
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Auto: ${modelKey(runtimeFailure.model)} failed and no untried configured fallback model remains.`,
+          "error",
+        );
+      }
+    } else {
+      runtimeFallbackTried.clear();
+    }
     if (postTurnCompactionRoutePending) {
       const restoreRoute = postTurnCompactionPreviousRoute;
       commitPostTurnCompactionRoute();
@@ -810,6 +900,10 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
     compactionLease = false;
     routingInFlight = false;
     preflightPromptRouted = false;
+    runtimeGeneration += 1;
+    pendingRuntimeFailure = undefined;
+    runtimeFallbackTried.clear();
+    lastAutoRoute = undefined;
     commitPostTurnCompactionRoute();
   });
 
@@ -887,13 +981,28 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const message = event.message;
-    if (message.stopReason === "aborted") return; // user-cancelled, not a provider health signal
+    if (message.stopReason === "aborted") {
+      pendingRuntimeFailure = undefined;
+      runtimeFallbackTried.clear();
+      return; // user-cancelled, not a provider health signal or fallback trigger
+    }
     const model = await trackedModel(ctx.model);
     if (!model) return;
     if (message.stopReason === "error") {
-      healthStore.recordFailure(modelKey(model), inferFailureStatus(message.errorMessage), undefined);
+      healthStore.recordFailure(
+        modelKey(model),
+        inferFailureStatus(message.errorMessage),
+        undefined,
+      );
+      if (autoActive)
+        pendingRuntimeFailure = {
+          model,
+          errorMessage: message.errorMessage,
+          generation: runtimeGeneration,
+        };
       return;
     }
+    pendingRuntimeFailure = undefined;
     const usage = isRecord(message) ? message.usage : undefined;
     healthStore.recordSuccess(modelKey(model), {
       input: numeric(isRecord(usage) ? usage.input : undefined),

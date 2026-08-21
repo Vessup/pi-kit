@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
+  isQueuedFollowUpResponse,
   restoreFailedDraft,
   restoreFailedImages,
   shouldDefaultToQueueFollowUp,
+  shouldShowOptimisticPrompt,
 } from "../web/client/composer-send";
 
 test("concurrent failed submissions are both restored", () => {
@@ -28,6 +30,18 @@ test("concurrent failed submissions are both restored", () => {
     { type: "image", data: "current-1", mimeType: "image/png" },
     { type: "image", data: "current-2", mimeType: "image/png" },
   ]);
+});
+
+test("queued follow-ups stay out of the transcript until delivery", () => {
+  expect(shouldShowOptimisticPrompt("followUp", "working")).toBe(false);
+  expect(shouldShowOptimisticPrompt("steer", "working")).toBe(true);
+  expect(shouldShowOptimisticPrompt(undefined, "idle")).toBe(true);
+  expect(
+    isQueuedFollowUpResponse({ queued: true, reason: "followUp" }),
+  ).toBe(true);
+  expect(
+    isQueuedFollowUpResponse({ queued: true, reason: "modelSelection" }),
+  ).toBe(false);
 });
 
 test("compaction makes queue follow-up the default composer action", () => {

@@ -18,6 +18,26 @@ export function restoreFailedImages(
   return [...failedImages, ...current].slice(0, 4);
 }
 
+export function shouldShowOptimisticPrompt(
+  streamingBehavior: "steer" | "followUp" | undefined,
+  sessionStatus: WebSession["status"] | undefined,
+): boolean {
+  return !(
+    streamingBehavior === "followUp" && sessionStatus === "working"
+  );
+}
+
+export function isQueuedFollowUpResponse(value: unknown): boolean {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "queued" in value &&
+      value.queued === true &&
+      "reason" in value &&
+      value.reason === "followUp",
+  );
+}
+
 export function shouldDefaultToQueueFollowUp(
   session: Pick<WebSession, "status" | "compaction"> | null | undefined,
   immediateSendPending: boolean,
