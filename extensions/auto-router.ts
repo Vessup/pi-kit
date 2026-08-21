@@ -830,7 +830,16 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       pi.appendEntry(AUTO_ACTIVE_ENTRY_TYPE, { enabled: true, pinnedTier });
       publishFooter();
     }
-    await routeForPrompt(pi, ctx, event.prompt, Boolean(event.images?.length));
+    if (
+      !(await routeForPrompt(
+        pi,
+        ctx,
+        event.prompt,
+        Boolean(event.images?.length),
+      ))
+    ) {
+      throw new Error("Auto could not route this prompt.");
+    }
   });
 
   // Health/usage tracking isn't limited to turns Auto itself routed: any turn against a model

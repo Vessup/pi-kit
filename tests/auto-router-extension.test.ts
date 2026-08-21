@@ -1261,12 +1261,37 @@ test("Auto never falls back to an unconfigured catalog model", async () => {
   await fake.fire("session_start", {}, ctx);
   await selectAuto(fake, ctx);
   fake.currentModel.value = stray;
-  await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
+  await expect(
+    fake.fire("before_agent_start", { prompt: "anything" }, ctx),
+  ).rejects.toThrow("Auto could not route this prompt");
 
   expect(fake.setModelCalls).toEqual([AUTO_PLACEHOLDER]);
   expect(
     ctx.notifications.some((n) => n.message.includes("no configured models")),
   ).toBe(true);
+});
+
+test("queued Auto turns stop when no configured model resolves", async () => {
+  await writeConfig({ efforts: {} });
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  fake.currentModel.value = AUTO_PLACEHOLDER;
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [] }),
+    currentModel: fake.currentModel,
+  });
+
+  await fake.fire("session_start", {}, ctx);
+  await fake.fire(
+    "input",
+    { text: "queued prompt", streamingBehavior: "followUp" },
+    ctx,
+  );
+
+  await expect(
+    fake.fire("before_agent_start", { prompt: "queued prompt" }, ctx),
+  ).rejects.toThrow("Auto could not route this prompt");
+  expect(fake.setModelCalls).toEqual([]);
 });
 
 test(
