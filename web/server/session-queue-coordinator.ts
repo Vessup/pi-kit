@@ -13,7 +13,7 @@ import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { CommandDeliveryUncertainError } from "./managed-rpc-session.js";
 import {
   modelSelectionBlocksPrompts,
-  queuedModelDependencyBlocksDelivery,
+  queuedModelRequiredSelection,
 } from "./model-selection-gate.js";
 import {
   persistPreDeliveryTransition,
@@ -291,11 +291,31 @@ export function createSessionQueueCoordinator(
       record.queue.length === 0 ||
       record.queueDeliveryActive ||
       modelSelectionBlocksPrompts(record) ||
-      queuedModelDependencyBlocksDelivery(record) ||
       (record.status !== "idle" && record.status !== "error") ||
       hasActiveWebSubagents(record.subagents)
     )
       return;
+    const requiredModel = queuedModelRequiredSelection(record);
+    if (requiredModel) {
+      try {
+        await deliverCommand(record, {
+          type: "set_model",
+          provider: requiredModel.provider,
+          modelId: requiredModel.modelId,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        record.modelSelectionError = message;
+        broadcast(record.id, {
+          type: "server.event",
+          sessionId: record.id,
+          event: { type: "model_selection_error", message },
+        } satisfies ServerEventMessage);
+      }
+      // Model selection schedules another serialized flush after it succeeds.
+      // Never deliver the head item in the same pass that changed its model.
+      return;
+    }
     // Any uncertain delivery blocks the whole queue. replace_queue may move an
     // uncertain item behind an ordinary one, but that must never authorize a new
     // delivery until the uncertain item is explicitly reconciled.

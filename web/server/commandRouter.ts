@@ -117,7 +117,13 @@ export function createCommandRouter(options: {
     record.autoTurnActive = false;
     record.autoTurnSettling = false;
     record.lastModel = undefined;
-    record.modelSelectionTarget = undefined;
+    const appliedTarget = record.modelSelectionTarget;
+    if (
+      !record.pendingModelSelection &&
+      appliedTarget?.provider === selection.provider &&
+      appliedTarget.modelId === selection.modelId
+    )
+      record.modelSelectionTarget = undefined;
     record.modelSelectionError = undefined;
     try {
       await refreshManagedSession(record);
@@ -162,7 +168,12 @@ export function createCommandRouter(options: {
         record.modelSelectionFlush = undefined;
       if (record.pendingModelSelection && record.managed) {
         const next = flushPendingModelSelection(record);
-        void next?.catch(() => undefined);
+        void next?.then(
+          () => {
+            if (record.status !== "working") void flushWebQueue(record);
+          },
+          () => undefined,
+        );
       }
     };
     void operation.then(clearOperation, clearOperation);
@@ -249,28 +260,41 @@ export function createCommandRouter(options: {
     command: ClientCommandMessage["command"],
   ): Promise<unknown> {
     if (command.type === "set_model" && !record.managed) {
-      // A new explicit choice supersedes any earlier deferred/failed target.
+      // External bridges can receive choices from multiple browser clients.
+      // Keep the newest target visible to the prompt gate while forwarding all
+      // model changes in order; an older completion must never clear newer state.
       record.pendingModelSelection = undefined;
       record.modelSelectionTarget = {
         provider: command.provider,
         modelId: command.modelId,
       };
+      record.modelSelectionError = undefined;
       record.applyingModelSelection = true;
+      const previous = record.modelSelectionOperation;
+      const operation = (async () => {
+        if (previous) await previous.catch(() => undefined);
+        return await routeCommandCore(record, command);
+      })();
+      record.modelSelectionOperation = operation;
       let succeeded = false;
       try {
-        const result = await routeCommandCore(record, command);
+        const result = await operation;
         succeeded = true;
         return result;
       } catch (error) {
-        record.modelSelectionError =
-          error instanceof Error ? error.message : String(error);
+        if (record.modelSelectionOperation === operation)
+          record.modelSelectionError =
+            error instanceof Error ? error.message : String(error);
         throw error;
       } finally {
-        record.applyingModelSelection = false;
-        if (succeeded && !record.pendingModelSelection) {
-          record.modelSelectionTarget = undefined;
-          record.modelSelectionError = undefined;
-          if (record.status !== "working") void flushWebQueue(record);
+        if (record.modelSelectionOperation === operation) {
+          record.modelSelectionOperation = undefined;
+          record.applyingModelSelection = false;
+          if (succeeded) {
+            record.modelSelectionTarget = undefined;
+            record.modelSelectionError = undefined;
+            if (record.status !== "working") void flushWebQueue(record);
+          }
         }
       }
     }
@@ -582,7 +606,7 @@ export function createCommandRouter(options: {
             commands: webCommands,
           };
         }
-        case "set_model":
+        case "set_model": {
           record.modelSelectionTarget = {
             provider: command.provider,
             modelId: command.modelId,
@@ -609,8 +633,19 @@ export function createCommandRouter(options: {
           } finally {
             record.applyingModelSelection = false;
           }
-          if (record.status !== "working") void flushWebQueue(record);
+          const pendingFlush = flushPendingModelSelection(record);
+          if (pendingFlush) {
+            void pendingFlush.then(
+              () => {
+                if (record.status !== "working") void flushWebQueue(record);
+              },
+              () => undefined,
+            );
+          } else if (record.status !== "working") {
+            void flushWebQueue(record);
+          }
           return;
+        }
         case "set_thinking_level":
           await record.managed.setThinkingLevel(command.level);
           await refreshManagedSession(record);

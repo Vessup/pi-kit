@@ -6,11 +6,19 @@ import {
 import type { SemanticEntry } from "../web/client/semantic-session";
 
 function entry(id: string, timestamp: number, text: string): SemanticEntry {
+  return contentEntry(id, timestamp, [{ type: "text", text }]);
+}
+
+function contentEntry(
+  id: string,
+  timestamp: number,
+  content: NonNullable<SemanticEntry["message"]>["content"],
+): SemanticEntry {
   return {
     id,
     type: "message",
     timestamp: new Date(timestamp).toISOString(),
-    message: { role: "user", timestamp, content: [{ type: "text", text }] },
+    message: { role: "user", timestamp, content },
   };
 }
 
@@ -55,6 +63,38 @@ test("submitted prompts survive history refreshes until Pi records them", () => 
   expect(
     preserveLocalCommandEntries([before, optimistic], [before, confirmed]),
   ).toEqual([before, confirmed]);
+});
+
+test("optimistic prompt confirmations are consumed one-to-one", () => {
+  const first = entry("optimistic-request-1", 200, "same prompt");
+  const second = entry("optimistic-request-2", 300, "same prompt");
+  const confirmed = entry("confirmed", 250, "same prompt");
+  expect(
+    preserveLocalCommandEntries([first, second], [confirmed]).map(
+      (item) => item.id,
+    ),
+  ).toEqual(["confirmed", "optimistic-request-2"]);
+});
+
+test("image-only optimistic prompts reconcile by image content", () => {
+  const optimistic = contentEntry("optimistic-image", 200, [
+    { type: "image", data: "same-image", mimeType: "image/png" },
+  ]);
+  const confirmed = contentEntry("confirmed-image", 200, [
+    { type: "image", data: "same-image", mimeType: "image/png" },
+  ]);
+  expect(preserveLocalCommandEntries([optimistic], [confirmed])).toEqual([
+    confirmed,
+  ]);
+
+  const different = contentEntry("different-image", 200, [
+    { type: "image", data: "different-image", mimeType: "image/png" },
+  ]);
+  expect(
+    preserveLocalCommandEntries([optimistic], [different]).map(
+      (item) => item.id,
+    ),
+  ).toEqual(["different-image", "optimistic-image"]);
 });
 
 test("local command reconciliation does not duplicate an incoming command", () => {

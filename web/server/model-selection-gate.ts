@@ -39,13 +39,21 @@ export async function drainPendingModelSelections(
   if (record.modelSelectionError) throw new Error(record.modelSelectionError);
 }
 
+export function queuedModelRequiredSelection(
+  record: Pick<SessionRecord, "queue" | "selectedModel" | "model">,
+): { provider: string; modelId: string } | undefined {
+  const required = record.queue[0]?.requiredModel;
+  if (
+    !required ||
+    (record.selectedModel ?? record.model) ===
+      `${required.provider}/${required.modelId}`
+  )
+    return undefined;
+  return required;
+}
+
 export function queuedModelDependencyBlocksDelivery(
   record: Pick<SessionRecord, "queue" | "selectedModel" | "model">,
 ): boolean {
-  const required = record.queue[0]?.requiredModel;
-  if (!required) return false;
-  return (
-    (record.selectedModel ?? record.model) !==
-    `${required.provider}/${required.modelId}`
-  );
+  return queuedModelRequiredSelection(record) !== undefined;
 }

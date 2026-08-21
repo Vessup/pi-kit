@@ -89,6 +89,25 @@ test("pending model selection blocks every queue flush path", async () => {
   coordinator.cancelWebQueueWork(target);
 });
 
+test("a queued prompt reapplies its required model before delivery", async () => {
+  const target = record([
+    {
+      id: "queued",
+      message: "use model A",
+      requiredModel: { provider: "test", modelId: "model-a" },
+    },
+  ]);
+  target.selectedModel = "test/model-b";
+  const { coordinator, deliveries } = setup(target);
+
+  await coordinator.flushWebQueue(target);
+  expect(deliveries).toEqual([
+    { type: "set_model", provider: "test", modelId: "model-a" },
+  ]);
+  expect(target.queue).toHaveLength(1);
+  coordinator.cancelWebQueueWork(target);
+});
+
 test("subscribers receive persistent model-selection failures", () => {
   const target = record([{ id: "queued", message: "blocked" }]);
   target.modelSelectionError = "No credentials for requested model";

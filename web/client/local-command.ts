@@ -14,20 +14,27 @@ function isOptimisticPromptEntry(entry: SemanticEntry): boolean {
   return Boolean(entry.id?.startsWith("optimistic-"));
 }
 
-function entryText(entry: SemanticEntry): string {
+function entryContentIdentity(entry: SemanticEntry): string | undefined {
   const content = entry.message?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter(
-      (part): part is { type: "text"; text: string } =>
-        Boolean(part) &&
-        typeof part === "object" &&
-        (part as { type?: unknown }).type === "text" &&
-        typeof (part as { text?: unknown }).text === "string",
-    )
-    .map((part) => part.text)
-    .join("\n");
+  if (typeof content === "string") return JSON.stringify([["text", content]]);
+  if (!Array.isArray(content)) return undefined;
+  const parts = content.flatMap((part) => {
+    if (!part || typeof part !== "object") return [];
+    const value = part as Record<string, unknown>;
+    if (value.type === "text" && typeof value.text === "string")
+      return [["text", value.text]];
+    if (value.type === "image")
+      return [
+        [
+          "image",
+          typeof value.mimeType === "string" ? value.mimeType : "",
+          typeof value.data === "string" ? value.data : "",
+          value.source ?? null,
+        ],
+      ];
+    return [];
+  });
+  return parts.length > 0 ? JSON.stringify(parts) : undefined;
 }
 
 function entryTime(entry: SemanticEntry): number | undefined {
@@ -55,24 +62,33 @@ export function preserveLocalCommandEntries(
   );
   const incomingUsers = incoming
     .filter((entry) => entry.message?.role === "user")
-    .map((entry) => ({ text: entryText(entry), time: entryTime(entry) }))
-    .filter(({ text }) => Boolean(text));
+    .map((entry) => ({
+      identity: entryContentIdentity(entry),
+      time: entryTime(entry),
+      consumed: false,
+    }))
+    .filter(
+      (candidate): candidate is typeof candidate & { identity: string } =>
+        candidate.identity !== undefined,
+    );
   const local = previous.filter((entry) => {
     if (isLocalCommandEntry(entry))
       return !entry.id || !incomingIds.has(entry.id);
     if (!isOptimisticPromptEntry(entry)) return false;
-    const text = entryText(entry);
+    const identity = entryContentIdentity(entry);
     const time = entryTime(entry);
-    return (
-      !text ||
-      !incomingUsers.some(
-        (candidate) =>
-          candidate.text === text &&
-          (time === undefined ||
-            candidate.time === undefined ||
-            candidate.time >= time),
-      )
+    if (!identity) return true;
+    const confirmation = incomingUsers.find(
+      (candidate) =>
+        !candidate.consumed &&
+        candidate.identity === identity &&
+        (time === undefined ||
+          candidate.time === undefined ||
+          candidate.time >= time),
     );
+    if (!confirmation) return true;
+    confirmation.consumed = true;
+    return false;
   });
   if (local.length === 0) return incoming;
   return [...incoming, ...local]
