@@ -1032,6 +1032,9 @@ details[open] > summary .semantic-tool-chevron {
     Menlo,
     monospace;
 }
+.semantic-context-progress-model {
+  display: none;
+}
 .semantic-composer-control {
   min-width: 0;
   overflow: hidden;
@@ -1039,15 +1042,20 @@ details[open] > summary .semantic-tool-chevron {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.semantic-composer-control > .semantic-model-selection,
-.semantic-composer-control > .semantic-turn-model {
+.semantic-composer-control > .semantic-model-selection {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.semantic-composer-control > .semantic-turn-model {
+.semantic-turn-model {
+  display: inline-block;
+  min-width: 0;
+  max-width: min(16rem, 28vw);
+  overflow: hidden;
   color: rgb(125 211 252);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .semantic-composer-menu button {
   display: flex;
@@ -1244,6 +1252,12 @@ details[open] > summary .semantic-tool-chevron {
 @media (max-width: 640px) {
   .semantic-token-inline {
     display: none;
+  }
+  .semantic-turn-model {
+    display: none;
+  }
+  .semantic-context-progress-model {
+    display: block;
   }
   .semantic-model-menu-sections {
     grid-template-columns: minmax(0, 1fr);
