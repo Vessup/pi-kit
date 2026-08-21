@@ -139,6 +139,7 @@ export function createClientMessages(options: {
               id: message.requestId,
               message: message.message,
             });
+            responseData = { queued: true };
           } else {
             if (message.streamingBehavior === "steer")
               throw new Error("/reload must be queued or run while Pi is idle");
@@ -157,6 +158,7 @@ export function createClientMessages(options: {
               id: message.requestId,
               message: message.message,
             });
+            responseData = { queued: true };
           } else {
             if (message.streamingBehavior === "steer")
               throw new Error(
@@ -196,7 +198,11 @@ export function createClientMessages(options: {
             id: message.requestId,
             message: message.message,
             images: message.images,
+            ...(record.modelSelectionTarget
+              ? { requiredModel: { ...record.modelSelectionTarget } }
+              : {}),
           });
+          responseData = { queued: true };
         } else {
           await routeCommand(record, {
             type: "prompt",

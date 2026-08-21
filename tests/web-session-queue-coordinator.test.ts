@@ -89,6 +89,27 @@ test("pending model selection blocks every queue flush path", async () => {
   coordinator.cancelWebQueueWork(target);
 });
 
+test("subscribers receive persistent model-selection failures", () => {
+  const target = record([{ id: "queued", message: "blocked" }]);
+  target.modelSelectionError = "No credentials for requested model";
+  const { coordinator } = setup(target);
+  const frames: Array<{ event?: { type?: string; message?: string } }> = [];
+  coordinator.sendSessionState(
+    {
+      send: (value: string) => frames.push(JSON.parse(value)),
+    } as never,
+    target,
+  );
+  expect(frames).toContainEqual({
+    type: "server.event",
+    sessionId: target.id,
+    event: {
+      type: "model_selection_error",
+      message: "No credentials for requested model",
+    },
+  });
+});
+
 test("uncertain deliveries block steering and all are reported on subscribe", async () => {
   const target = record(
     [

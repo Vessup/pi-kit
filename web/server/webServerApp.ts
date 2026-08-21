@@ -162,6 +162,7 @@ export function createWebServerApp() {
     git,
     compactionNotice,
     replacement,
+    router,
   });
   const discovery = createDiscoveryState({ config, state });
   const httpApi = createHttpApi({

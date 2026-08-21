@@ -11,7 +11,10 @@ import { hasActiveWebSubagents } from "../protocol.js";
 import { isWebReloadCommand } from "../reload-command.js";
 import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { CommandDeliveryUncertainError } from "./managed-rpc-session.js";
-import { modelSelectionBlocksPrompts } from "./model-selection-gate.js";
+import {
+  modelSelectionBlocksPrompts,
+  queuedModelDependencyBlocksDelivery,
+} from "./model-selection-gate.js";
 import {
   persistPreDeliveryTransition,
   queueDeliveryFailureDisposition,
@@ -57,7 +60,12 @@ export function createSessionQueueCoordinator(
     return {
       type: "server.event",
       sessionId: record.id,
-      event: { type: "web_queue_update", queue: record.queue },
+      event: {
+        type: "web_queue_update",
+        queue: record.queue.map(({ requiredModel: _requiredModel, ...item }) =>
+          item,
+        ),
+      },
     };
   }
 
@@ -65,6 +73,9 @@ export function createSessionQueueCoordinator(
     return queue.map((item) => ({
       ...item,
       images: item.images?.map((image) => ({ ...image })),
+      requiredModel: item.requiredModel
+        ? { ...item.requiredModel }
+        : undefined,
     }));
   }
 
@@ -256,6 +267,18 @@ export function createSessionQueueCoordinator(
         } satisfies ServerEventMessage),
       );
     }
+    if (record.modelSelectionError) {
+      socket.send(
+        JSON.stringify({
+          type: "server.event",
+          sessionId: record.id,
+          event: {
+            type: "model_selection_error",
+            message: record.modelSelectionError,
+          },
+        } satisfies ServerEventMessage),
+      );
+    }
   }
 
   async function flushWebQueue(record: SessionRecord): Promise<void> {
@@ -268,6 +291,7 @@ export function createSessionQueueCoordinator(
       record.queue.length === 0 ||
       record.queueDeliveryActive ||
       modelSelectionBlocksPrompts(record) ||
+      queuedModelDependencyBlocksDelivery(record) ||
       (record.status !== "idle" && record.status !== "error") ||
       hasActiveWebSubagents(record.subagents)
     )
@@ -625,6 +649,11 @@ export function createSessionQueueCoordinator(
             .filter((item) => item.deliveryState === "delivering")
             .map((item) => [item.id, item]),
         );
+        const requiredModelById = new Map(
+          record.queue.flatMap((item) =>
+            item.requiredModel ? [[item.id, item.requiredModel] as const] : [],
+          ),
+        );
         const seenIds = new Set<string>();
         for (const replacement of command.queue) {
           if (seenIds.has(replacement.id))
@@ -641,6 +670,11 @@ export function createSessionQueueCoordinator(
             throw new Error("/compact does not accept image attachments");
           seenIds.add(replacement.id);
           const uncertain = uncertainById.get(replacement.id);
+          if ("requiredModel" in replacement) {
+            throw new Error(
+              `Queue item ${replacement.id} cannot set a server-owned model dependency`,
+            );
+          }
           if (
             "deliveryState" in replacement &&
             replacement.deliveryState !== undefined &&
@@ -675,13 +709,19 @@ export function createSessionQueueCoordinator(
             queue.splice(
               0,
               queue.length,
-              ...command.queue.map((replacement) => ({
-                ...replacement,
-                images: replacement.images?.map((image) => ({ ...image })),
-                ...(uncertainById.has(replacement.id)
-                  ? { deliveryState: "delivering" as const }
-                  : {}),
-              })),
+              ...command.queue.map((replacement) => {
+                const requiredModel = requiredModelById.get(replacement.id);
+                return {
+                  ...replacement,
+                  images: replacement.images?.map((image) => ({ ...image })),
+                  ...(uncertainById.has(replacement.id)
+                    ? { deliveryState: "delivering" as const }
+                    : {}),
+                  ...(requiredModel
+                    ? { requiredModel: { ...requiredModel } }
+                    : {}),
+                };
+              }),
             );
           },
           persist: () => persistWebQueue(record),

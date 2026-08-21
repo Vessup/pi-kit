@@ -188,6 +188,17 @@ export function createManagedSessionLauncher(options: {
       managedWorktree: resumed?.session.managedWorktree,
       catalogReady: false,
     };
+    const queuedModelDependency = record.queue.find(
+      (item) => item.requiredModel,
+    )?.requiredModel;
+    if (
+      queuedModelDependency &&
+      (record.selectedModel ?? record.model) !==
+        `${queuedModelDependency.provider}/${queuedModelDependency.modelId}`
+    ) {
+      record.pendingModelSelection = { ...queuedModelDependency };
+      record.modelSelectionTarget = { ...queuedModelDependency };
+    }
     runtime.sessions.set(record.id, record);
     if (record.file)
       runtime.sessionsByFile.set(normalizePath(record.file), record);
@@ -442,6 +453,15 @@ export function createManagedSessionLauncher(options: {
         // Keep history-derived usage when stats are unavailable.
       }
       record.status = "idle";
+      let modelSelectionReady = true;
+      const restoredModelSelection = router.flushPendingModelSelection(record);
+      if (restoredModelSelection) {
+        try {
+          await restoredModelSelection;
+        } catch {
+          modelSelectionReady = false;
+        }
+      }
       record.catalogReady = true;
       broadcastSessionToAll(record);
       void hydrateGitMetadata(record);
@@ -450,7 +470,7 @@ export function createManagedSessionLauncher(options: {
         sendSessionState(socket, record);
         sendSessionHistory(socket, record);
       }
-      void flushWebQueue(record);
+      if (modelSelectionReady) void flushWebQueue(record);
       return record;
     } catch (error) {
       await managed.shutdown();

@@ -44,6 +44,9 @@ test("Staff Review Informant job uses trusted review resources", async () => {
     },
   ]);
   expect(job.command).toContain("runuser -u reviewer");
+  expect(job.command).toContain(
+    "--extension /opt/informant/extensions/scrub-auth.ts",
+  );
   expect(job.command).not.toContain("staff-review-findings.json");
   expect(job.container.trustedPrepareInputs).toBe(true);
   expect(job.container.prepareInputs).toEqual([
@@ -52,6 +55,13 @@ test("Staff Review Informant job uses trusted review resources", async () => {
     ".agents/skills/staff-review-verify/**",
     ".agents/skills/staff-comment/**",
   ]);
+  expect(job.command).toContain('rm -f "$review_agent_dir/auth.json"');
+  expect(job.command).toContain(
+    'find "$review_agent_dir" -type d -exec chmod 0550 {} +',
+  );
+  expect(job.container.prepare).toContain(
+    'throw new Error("provider credentials remained visible after startup")',
+  );
   expect(job.container.prepare).toContain("sha256sum -c -");
   expect(job.container.prepare).toContain(
     "sed -i 's#[.]agents/skills/#/opt/informant/skills/#g'",

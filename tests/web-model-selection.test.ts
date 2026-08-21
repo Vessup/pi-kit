@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { shouldDeferManagedModelSelection } from "../web/server/commandRouter";
-import { modelSelectionBlocksPrompts } from "../web/server/model-selection-gate";
+import {
+  modelSelectionBlocksPrompts,
+  queuedModelDependencyBlocksDelivery,
+} from "../web/server/model-selection-gate";
 
 const idle = {
   agentRunning: false,
@@ -12,6 +15,7 @@ const idle = {
 test("prompts wait while a model selection is pending or failed", () => {
   const available = {
     pendingModelSelection: undefined,
+    modelSelectionTarget: undefined,
     applyingModelSelection: false,
     modelSelectionFlush: undefined,
     modelSelectionError: undefined,
@@ -29,6 +33,30 @@ test("prompts wait while a model selection is pending or failed", () => {
       modelSelectionError: "No credentials",
     }),
   ).toBe(true);
+});
+
+test("durable queue dependencies block the wrong selected model", () => {
+  const queue = [
+    {
+      id: "queued",
+      message: "use next",
+      requiredModel: { provider: "test", modelId: "next" },
+    },
+  ];
+  expect(
+    queuedModelDependencyBlocksDelivery({
+      queue,
+      selectedModel: "test/current",
+      model: "test/current",
+    }),
+  ).toBe(true);
+  expect(
+    queuedModelDependencyBlocksDelivery({
+      queue,
+      selectedModel: "test/next",
+      model: "test/next",
+    }),
+  ).toBe(false);
 });
 
 test("managed model selection applies immediately only after settlement", () => {

@@ -115,6 +115,7 @@ export function createManagedSessionRefresh(options: {
     // generation from request time so its model snapshot cannot cancel the
     // newer turn's Auto tracking.
     const modelTurnGeneration = record.modelTurnGeneration ?? 0;
+    const activityGeneration = record.activityGeneration ?? 0;
     await runManagedRefresh(
       () =>
         serializeManagedRefresh(record, async () => {
@@ -275,6 +276,7 @@ export function createManagedSessionRefresh(options: {
               record,
               nextState,
               modelTurnGeneration,
+              activityGeneration,
             );
             try {
               replaceRecordHistory(

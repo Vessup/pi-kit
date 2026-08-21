@@ -183,6 +183,7 @@ export function App() {
   } | null>(null);
   const connectionGenerationRef = React.useRef(0);
   const optionsGenerationRef = React.useRef(0);
+  const optimisticWorkingSessionsRef = React.useRef(new Set<string>());
   const pendingRequestsRef = React.useRef(
     new Map<
       string,
@@ -227,7 +228,12 @@ export function App() {
     const generation = ++sessionsRequestGenerationRef.current;
     try {
       setLoading(true);
-      const snapshot = sortSessions(await listSessions());
+      const snapshot = sortSessions(await listSessions()).map((session) =>
+        optimisticWorkingSessionsRef.current.has(session.id) &&
+        session.status !== "working"
+          ? { ...session, status: "working" as const }
+          : session,
+      );
       if (generation !== sessionsRequestGenerationRef.current) return;
       setSessions((previous) => preserveSessionsTelemetry(previous, snapshot));
       setError(null);
@@ -348,7 +354,12 @@ export function App() {
         if (type === "server.snapshot") {
           const snapshot = message as { sessions?: WebSession[] };
           if (snapshot.sessions) {
-            const sessions = snapshot.sessions;
+            const sessions = snapshot.sessions.map((session) =>
+              optimisticWorkingSessionsRef.current.has(session.id) &&
+              session.status !== "working"
+                ? { ...session, status: "working" as const }
+                : session,
+            );
             setSessions((previous) =>
               preserveSessionsTelemetry(previous, sortSessions(sessions)),
             );
@@ -357,15 +368,20 @@ export function App() {
         }
         if (type === "server.session") {
           const payload = message as unknown as { session: WebSession };
-          if (payload.session.id === selectedIdRef.current) {
+          const incoming =
+            optimisticWorkingSessionsRef.current.has(payload.session.id) &&
+            payload.session.status !== "working"
+              ? { ...payload.session, status: "working" as const }
+              : payload.session;
+          if (incoming.id === selectedIdRef.current) {
             setCurrentSession((current) =>
-              preserveSessionTelemetry(current ?? undefined, payload.session),
+              preserveSessionTelemetry(current ?? undefined, incoming),
             );
           }
           setSessions((previous) => {
             const session = preserveSessionTelemetry(
-              previous.find((item) => item.id === payload.session.id),
-              payload.session,
+              previous.find((item) => item.id === incoming.id),
+              incoming,
             );
             return sortSessions([
               ...previous.filter((item) => item.id !== session.id),
@@ -471,6 +487,7 @@ export function App() {
           eventType === "agent_end" ||
           eventType === "agent_settled"
         ) {
+          optimisticWorkingSessionsRef.current.delete(payload.sessionId);
           const terminalNotice =
             eventType === "agent_end"
               ? agentEndTerminalNotice(event)
@@ -502,6 +519,22 @@ export function App() {
             setActiveTools([]);
         }
         if (eventType === "model_selection_error") {
+          const wasOptimistic =
+            optimisticWorkingSessionsRef.current.delete(payload.sessionId);
+          if (wasOptimistic) {
+            setCurrentSession((current) =>
+              current?.id === payload.sessionId
+                ? { ...current, status: "idle" }
+                : current,
+            );
+            setSessions((previous) =>
+              previous.map((session) =>
+                session.id === payload.sessionId
+                  ? { ...session, status: "idle" }
+                  : session,
+              ),
+            );
+          }
           setError(
             typeof event.message === "string"
               ? event.message
@@ -553,10 +586,15 @@ export function App() {
           const item = event.item as WebQueuedMessage;
           if (typeof item.id !== "string" || typeof item.message !== "string")
             return;
+          const immediateOptimisticId = `optimistic-${item.id}`;
           const optimisticId =
             parseWebCompactCommand(item.message) !== undefined
               ? localCommandEntryId(item.id)
-              : `optimistic-queued-${item.id}`;
+              : entriesRef.current.some(
+                    (entry) => entry.id === immediateOptimisticId,
+                  )
+                ? immediateOptimisticId
+                : `optimistic-queued-${item.id}`;
           if (event.phase === "started") {
             // Atomically move the follow-up out of the editable queue and into the
             // normal transcript before the server asks Pi to begin its turn.
@@ -1008,6 +1046,7 @@ export function App() {
         selectedSession?.status !== "working";
       const previousStatus = selectedSession?.status;
       if (optimisticallyWorking) {
+        optimisticWorkingSessionsRef.current.add(sessionId);
         setCurrentSession((current) =>
           current?.id === sessionId
             ? { ...current, status: "working" }
@@ -1022,7 +1061,7 @@ export function App() {
         );
       }
       const optimisticId =
-        compactCommand !== undefined && !queuedFollowUp
+        compactCommand !== undefined
           ? localCommandEntryId(requestId)
           : `optimistic-${requestId}`;
       const optimistic: SemanticEntry = {
@@ -1042,16 +1081,13 @@ export function App() {
           ],
         },
       };
-      if (!queuedFollowUp) {
-        const next = [...entriesRef.current, optimistic];
-        entriesRef.current = next;
-        setEntries(next);
-        // Let React commit and the browser paint the local user bubble before the
-        // native bridge receives the prompt and renders it in the TUI.
-        if (!controlCommand) await waitForVisibleBrowserPaint();
-      }
+      const next = [...entriesRef.current, optimistic];
+      entriesRef.current = next;
+      setEntries(next);
+      // Paint every submitted prompt immediately, including follow-ups that
+      // have not been handed to Pi yet. Queue delivery reconciles this same id.
+      if (!controlCommand) await waitForVisibleBrowserPaint();
       let responseData: unknown;
-      let promptFrameSent = false;
       try {
         responseData = await new Promise<unknown>((resolve, reject) => {
           pendingRequestsRef.current.set(requestId, {
@@ -1062,7 +1098,6 @@ export function App() {
           });
           try {
             socket.send(promptFrame);
-            promptFrameSent = true;
           } catch (cause) {
             pendingRequestsRef.current.delete(requestId);
             if (!queuedFollowUp) {
@@ -1076,7 +1111,11 @@ export function App() {
           }
         });
       } catch (cause) {
-        if (optimisticallyWorking && previousStatus && !promptFrameSent) {
+        const shouldRestoreStatus =
+          optimisticallyWorking &&
+          previousStatus &&
+          optimisticWorkingSessionsRef.current.delete(sessionId);
+        if (shouldRestoreStatus) {
           setCurrentSession((current) =>
             current?.id === sessionId
               ? { ...current, status: previousStatus }
@@ -1091,6 +1130,18 @@ export function App() {
           );
         }
         throw cause;
+      }
+      if (
+        responseData &&
+        typeof responseData === "object" &&
+        "queued" in responseData &&
+        responseData.queued === true
+      ) {
+        // The server had to queue this otherwise-immediate prompt (for example,
+        // while a requested model is still being applied). Keep the already
+        // rendered optimistic bubble and working state; queue delivery will
+        // reconcile this same request id instead of inserting a duplicate.
+        return;
       }
       if (isWebReloadCommand(message)) {
         const next = entriesRef.current.filter(

@@ -54,11 +54,25 @@ export PI_OFFLINE=1
 unset NODE_AUTH_TOKEN
 rm -f "$NPM_CONFIG_USERCONFIG"
 
+# Pi loads provider credentials during startup. Keep its agent directory
+# root-owned/read-only, then have a root scrubber remove auth.json before the
+# session_start hook returns and any model-controlled tool can execute.
+auth_loaded_marker="$review_home/auth-loaded"
+chown root:reviewer "$review_agent_dir"
+find "$review_agent_dir" -type d -exec chmod 0550 {} +
+find "$review_agent_dir" -type f -exec chmod 0440 {} +
+chown reviewer:reviewer "$review_home"
+mkdir -p "$review_home/.config" "$review_root/.staffreview"
+chown -R reviewer:reviewer "$review_home/.config" "$review_root/.staffreview"
+(
+  while [ ! -e "$auth_loaded_marker" ]; do sleep 0.05; done
+  rm -f "$review_agent_dir/auth.json"
+) &
+auth_scrubber_pid=$!
+
 # The review process runs as an unprivileged user. It cannot read the root job
 # shell's original GITHUB_TOKEN environment through /proc, and source files stay
 # read-only; only Staff Review's ignored local store is writable.
-mkdir -p "$review_root/.staffreview"
-chown -R reviewer:reviewer "$review_home" "$review_root/.staffreview"
 export INFORMANT_REVIEW_ROOT="$review_root"
 pi_kit_subagents="$review_agent_dir/npm/node_modules/@vessup/pi-kit/extensions/subagents.ts"
 test -f "$pi_kit_subagents"
@@ -68,11 +82,13 @@ runuser -u reviewer -- env \
   XDG_CONFIG_HOME="$review_home/.config" \
   PI_CODING_AGENT_DIR="$review_agent_dir" \
   PI_OFFLINE=1 \
+  INFORMANT_AUTH_LOADED_MARKER="$auth_loaded_marker" \
   INFORMANT_REVIEW_ROOT="$review_root" \
   pi --print \
     --no-session \
     --no-approve \
     --no-extensions \
+    --extension /opt/informant/extensions/scrub-auth.ts \
     --extension "$pi_kit_subagents" \
     --no-skills \
     --no-prompt-templates \
@@ -83,6 +99,8 @@ runuser -u reviewer -- env \
     --skill /opt/informant/skills/staff-review-verify/SKILL.md \
     --skill /opt/informant/skills/staff-comment/SKILL.md \
     "/skill:staff-review $slug $review_agents" > /tmp/staff-review-output.txt
+wait "$auth_scrubber_pid"
+test ! -e "$review_agent_dir/auth.json"
 
 # A long review must never publish findings for an obsolete PR head.
 current_head="$(curl -fsSL \
@@ -110,7 +128,30 @@ apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git jq ripgrep util-linux
 rm -rf /var/lib/apt/lists/*
 useradd --create-home --shell /bin/sh reviewer
-mkdir -p /opt/informant/skills
+mkdir -p /opt/informant/extensions /opt/informant/skills
+cat > /opt/informant/extensions/scrub-auth.ts <<'EOF'
+import { access, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+export default function scrubAuth(pi: any): void {
+  pi.on("session_start", async () => {
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    const marker = process.env.INFORMANT_AUTH_LOADED_MARKER;
+    if (!agentDir || !marker) throw new Error("auth scrubber is not configured");
+    await writeFile(marker, "", { mode: 0o600 });
+    const authPath = join(agentDir, "auth.json");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        await access(authPath);
+      } catch {
+        return;
+      }
+      await delay(20);
+    }
+    throw new Error("provider credentials remained visible after startup");
+  });
+}
+EOF
 cp -R /workspace/.agents/skills/staff-review /opt/informant/skills/
 cp -R /workspace/.agents/skills/staff-review-find /opt/informant/skills/
 cp -R /workspace/.agents/skills/staff-review-verify /opt/informant/skills/
@@ -119,7 +160,7 @@ cp -R /workspace/.agents/skills/staff-comment /opt/informant/skills/
 # the immutable prepare-input copies, never to pull-request-controlled skills.
 find /opt/informant/skills -type f -name '*.md' -exec \
   sed -i 's#[.]agents/skills/#/opt/informant/skills/#g' {} +
-chmod -R a-w /opt/informant/skills
+chmod -R a-w /opt/informant/extensions /opt/informant/skills
 rm -rf /workspace/* /workspace/.[!.]* /workspace/..?*
 runuser -u reviewer -- env \
   HOME=/home/reviewer \

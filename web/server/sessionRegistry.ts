@@ -157,6 +157,18 @@ export function createSessionRegistry(options: {
         record.managedWorktree);
     if (managedWorktreeScanned) record.managedWorktreeScanned = true;
     record.active = kind !== "saved";
+    if (!existing) {
+      const dependency = record.queue.find((item) => item.requiredModel)
+        ?.requiredModel;
+      if (
+        dependency &&
+        (record.selectedModel ?? record.model) !==
+          `${dependency.provider}/${dependency.modelId}`
+      ) {
+        record.pendingModelSelection = { ...dependency };
+        record.modelSelectionTarget = { ...dependency };
+      }
+    }
     return record;
   }
 

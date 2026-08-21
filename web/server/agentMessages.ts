@@ -19,8 +19,10 @@ import {
   type ServerEventMessage,
   type ServerHistoryMessage,
   type ServerSessionMessage,
+  type WebSession,
 } from "../protocol.js";
 import type { ClientBroadcast } from "./clientBroadcast.js";
+import type { CommandRouter } from "./commandRouter.js";
 import {
   type CompactionNotice,
   isSuccessfulCompactionEnd,
@@ -33,6 +35,7 @@ import type {
   SessionFileCatalog,
   SessionKind,
   SessionQueueCoordinator,
+  SessionRecord,
 } from "./server-types.js";
 import type { ServerRuntimeState } from "./serverRuntimeState.js";
 import { normalizeLegacySessionUpdate } from "./session-lifecycle.js";
@@ -53,6 +56,7 @@ export function createAgentMessages(options: {
   git: GitMetadata;
   compactionNotice: CompactionNotice;
   replacement: SessionReplacement;
+  router: CommandRouter;
 }) {
   const {
     state: runtime,
@@ -65,6 +69,7 @@ export function createAgentMessages(options: {
     git,
     compactionNotice,
     replacement,
+    router,
   } = options;
   const {
     normalizePath,
@@ -92,6 +97,24 @@ export function createAgentMessages(options: {
   const { hydrateGitMetadata } = git;
   const { broadcastCompactionNotice } = compactionNotice;
   const { completeExternalSessionReplacement } = replacement;
+
+  function reconcilePendingModelSelection(
+    record: SessionRecord,
+    session: Pick<WebSession, "selectedModel" | "model">,
+  ): boolean {
+    const pending = record.pendingModelSelection;
+    const incomingSelection = session.selectedModel ?? session.model;
+    if (
+      !pending ||
+      incomingSelection !== `${pending.provider}/${pending.modelId}`
+    )
+      return false;
+    const releasesBlockedQueue = Boolean(record.modelSelectionError);
+    record.pendingModelSelection = undefined;
+    record.modelSelectionTarget = undefined;
+    record.modelSelectionError = undefined;
+    return releasesBlockedQueue;
+  }
 
   async function handleAgentMessage(
     socket: Bun.ServerWebSocket<AgentSocketData>,
@@ -141,6 +164,16 @@ export function createAgentMessages(options: {
       record.status = hello.session.status;
       record.agentRunning = hello.session.status === "working";
       record.updatedAt = hello.session.updatedAt;
+      reconcilePendingModelSelection(record, hello.session);
+      const restoredModelSelection = record.pendingModelSelection;
+      if (restoredModelSelection && record.status !== "working") {
+        void router
+          .routeCommand(record, {
+            type: "set_model",
+            ...restoredModelSelection,
+          })
+          .catch(() => undefined);
+      }
       for (const uncertain of record.queue.filter(
         (item) => item.deliveryState === "delivering",
       )) {
@@ -370,19 +403,10 @@ export function createAgentMessages(options: {
       const update = message as AgentUpdateMessage;
       const existing = runtime.sessions.get(update.session.id);
       if (!existing || !existing.agentSockets.has(socket)) return;
-      const pendingModel = existing.pendingModelSelection;
-      const incomingSelection =
-        update.session.selectedModel ?? update.session.model;
-      const appliedPendingModel = Boolean(
-        pendingModel &&
-          incomingSelection === `${pendingModel.provider}/${pendingModel.modelId}`,
+      const releasesBlockedQueue = reconcilePendingModelSelection(
+        existing,
+        update.session,
       );
-      const releasesBlockedQueue =
-        appliedPendingModel && Boolean(existing.modelSelectionError);
-      if (appliedPendingModel) {
-        existing.pendingModelSelection = undefined;
-        existing.modelSelectionError = undefined;
-      }
       // Older bridge runtimes reported `working` again immediately after their
       // authoritative agent_end event. Preserve the lifecycle event until a new
       // agent_start arrives so completed runs cannot get stuck visually working.

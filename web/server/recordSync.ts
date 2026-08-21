@@ -57,12 +57,16 @@ export function createRecordSync(options: {
     record: SessionRecord,
     state: unknown,
     expectedModelTurnGeneration?: number,
+    expectedActivityGeneration?: number,
   ): void {
     const s = state as Record<string, unknown> | undefined;
     if (!s) return;
     const modelStateIsCurrent =
       expectedModelTurnGeneration === undefined ||
       (record.modelTurnGeneration ?? 0) === expectedModelTurnGeneration;
+    const lifecycleStateIsCurrent =
+      expectedActivityGeneration === undefined ||
+      (record.activityGeneration ?? 0) === expectedActivityGeneration;
     const model = s.model as Record<string, unknown> | null | undefined;
     let metadataScan: ReturnType<typeof parseSessionMetadataFile> | undefined;
     if (modelStateIsCurrent && model && typeof model.id === "string") {
@@ -139,12 +143,24 @@ export function createRecordSync(options: {
         : undefined;
     if (typeof s.messageCount === "number")
       record.messageCount = s.messageCount;
-    if (modelStateIsCurrent && s.isCompacting === true) {
+    if (
+      modelStateIsCurrent &&
+      lifecycleStateIsCurrent &&
+      s.isCompacting === true
+    ) {
       record.compaction ??= { reason: "threshold", startedAt: Date.now() };
       record.status = "working";
-    } else if (modelStateIsCurrent && s.isCompacting === false) {
+    } else if (
+      modelStateIsCurrent &&
+      lifecycleStateIsCurrent &&
+      s.isCompacting === false
+    ) {
       record.compaction = undefined;
-      if (s.isStreaming === false && record.status !== "error")
+      if (
+        s.isStreaming === false &&
+        record.agentRunning !== true &&
+        record.status !== "error"
+      )
         record.status = "idle";
     }
     record.updatedAt = Date.now();
