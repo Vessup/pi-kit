@@ -934,7 +934,7 @@ details[open] > summary .semantic-tool-chevron {
   width: clamp(12rem, 35vw, 25rem);
   margin-left: 0;
   overflow: hidden;
-  color: rgb(82 82 91);
+  color: rgb(161 161 170);
   font:
     12px ui-monospace,
     SFMono-Regular,

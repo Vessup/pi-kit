@@ -3460,7 +3460,10 @@ export function SemanticSession({
                   disabled={controlBusy || !connected}
                   title={`Selected ${modelLabel}${effortLabel ? ` ${effortLabel}` : ""}`}
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => setModelMenuOpen((open) => !open)}
+                  onClick={() => {
+                    setEffortMenuOpen(false);
+                    setModelMenuOpen((open) => !open);
+                  }}
                 >
                   <span className="semantic-model-selection">{modelLabel}</span>
                   {autoSelected && <span>{effortLabel}</span>}
@@ -3518,7 +3521,10 @@ export function SemanticSession({
                       disabled={controlBusy || !connected}
                       title={`Thinking effort: ${effortLabel || "off"}`}
                       onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => setEffortMenuOpen((open) => !open)}
+                      onClick={() => {
+                        setModelMenuOpen(false);
+                        setEffortMenuOpen((open) => !open);
+                      }}
                     >
                       <span>{effortLabel || "off"}</span>
                       <ChevronDown className="h-3.5 w-3.5" />
