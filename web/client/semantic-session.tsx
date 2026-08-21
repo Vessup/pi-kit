@@ -725,7 +725,6 @@ function CompactionStatus({ session }: { session: WebSession }) {
         : "Compacting context…";
   return (
     <output className="semantic-compaction-status">
-      <ContextProgressCircle session={session} interactive={false} />
       <div>
         <strong>{title}</strong>
         <small>
@@ -786,9 +785,11 @@ const ContextProgressCircle = React.memo(
   function ContextProgressCircle({
     session,
     interactive = true,
+    routedModel,
   }: {
     session: WebSession | null;
     interactive?: boolean;
+    routedModel?: string;
   }) {
     const [open, setOpen] = React.useState(false);
     const context = session?.contextUsage;
@@ -813,6 +814,9 @@ const ContextProgressCircle = React.memo(
     const label = compacting
       ? `Compacting context, ${contextText}`
       : `Context usage ${contextText}`;
+    const labeledContext = routedModel
+      ? `${label}; using ${routedModel}`
+      : label;
     const className = cn(
       "semantic-context-progress",
       !interactive && "is-decorative",
@@ -850,7 +854,7 @@ const ContextProgressCircle = React.memo(
             <button
               type="button"
               className={className}
-              aria-label={label}
+              aria-label={labeledContext}
               onClick={() => setOpen((value) => !value)}
             >
               {ring}
@@ -861,6 +865,11 @@ const ContextProgressCircle = React.memo(
               <strong>{compacting ? "Compacting context…" : "Context"}</strong>
               {session && <TokenDetails session={session} includeContext={false} />}
               <span>{contextText}</span>
+              {routedModel && (
+                <span className="semantic-context-progress-model">
+                  Using {routedModel}
+                </span>
+              )}
             </div>
           </TooltipContent>
         </Tooltip>
@@ -869,6 +878,7 @@ const ContextProgressCircle = React.memo(
   },
   (previous, next) =>
     previous.interactive === next.interactive &&
+    previous.routedModel === next.routedModel &&
     sameTokenTelemetry(previous.session, next.session) &&
     previous.session?.compaction?.reason === next.session?.compaction?.reason,
 );
@@ -3442,11 +3452,7 @@ export function SemanticSession({
                   variant="ghost"
                   size="sm"
                   disabled={controlBusy || !connected}
-                  title={
-                    turnModelSummary
-                      ? `Selected ${modelLabel}${effortLabel ? ` ${effortLabel}` : ""}; using ${turnModelSummary}`
-                      : undefined
-                  }
+                  title={`Selected ${modelLabel}${effortLabel ? ` ${effortLabel}` : ""}`}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => setModelMenuOpen((open) => !open)}
                 >
@@ -3461,16 +3467,16 @@ export function SemanticSession({
                       </>
                     )
                   )}
-                  {turnModelSummary && (
-                    <>
-                      <span className="text-zinc-600">→</span>
-                      <span className="semantic-turn-model">
-                        {turnModelSummary}
-                      </span>
-                    </>
-                  )}
                   <ChevronDown className="h-3.5 w-3.5" />
                 </Button>
+                {turnModelSummary && (
+                  <span
+                    className="semantic-turn-model"
+                    title={`Using ${turnModelSummary}`}
+                  >
+                    {turnModelSummary}
+                  </span>
+                )}
                 <AnchoredPopover
                   open={modelMenuOpen}
                   onOpenChange={setModelMenuOpen}
@@ -3529,7 +3535,10 @@ export function SemanticSession({
                     )}
                   </div>
                 </AnchoredPopover>
-                <ContextProgressCircle session={session} />
+                <ContextProgressCircle
+                  session={session}
+                  routedModel={turnModelSummary}
+                />
                 <ComposerTokenInfo session={session} />
               </div>
               <div className="flex items-center gap-2">

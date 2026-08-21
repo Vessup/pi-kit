@@ -1,6 +1,9 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { anchoredPopoverPosition } from "../anchored-position";
+import {
+  anchoredPopoverBelowPosition,
+  anchoredPopoverPosition,
+} from "../anchored-position";
 import { cn } from "../lib/utils";
 
 type AnchoredPopoverProps = {
@@ -16,9 +19,7 @@ type AnchoredPopoverProps = {
   matchAnchorWidth?: boolean;
 };
 
-const MIN_PANEL_HEIGHT = 96;
-const POPUP_GAP = 6;
-const POPUP_MARGIN = 8;
+const MOBILE_REPOSITION_WINDOW_MS = 1200;
 
 function panelMaxHeightCap(panel: HTMLElement | null): number | undefined {
   if (!panel) return undefined;
@@ -45,6 +46,7 @@ export function AnchoredPopover({
   const [maxHeight, setMaxHeight] = React.useState<number | undefined>(
     undefined,
   );
+  const [hasRoom, setHasRoom] = React.useState(true);
   // Computed maxHeight reflects our inline override once applied, so remember
   // the stylesheet cap (e.g. max-h-64) separately to avoid ratcheting down.
   const classMaxHeightRef = React.useRef<number | undefined>(undefined);
@@ -52,6 +54,11 @@ export function AnchoredPopover({
 
   React.useLayoutEffect(() => {
     if (!open) return;
+    classMaxHeightRef.current = undefined;
+    appliedMaxHeightRef.current = undefined;
+    panelRef.current?.style.removeProperty("max-height");
+    setMaxHeight(undefined);
+    setHasRoom(true);
     let frame: number | undefined;
     const update = () => {
       const anchor = anchorRef.current;
@@ -75,13 +82,6 @@ export function AnchoredPopover({
         // Prefer the conventional position under the field, but with the
         // mobile keyboard open there may be no room: cap the panel height to
         // the available space and flip above rather than covering the input.
-        const viewportBottom = viewportBox.offsetTop + viewportBox.height;
-        const roomBelow =
-          viewportBottom - POPUP_MARGIN - (rect.bottom + POPUP_GAP);
-        const roomAbove =
-          rect.top - POPUP_GAP - (viewportBox.offsetTop + POPUP_MARGIN);
-        const below = roomBelow >= MIN_PANEL_HEIGHT || roomBelow >= roomAbove;
-        const room = below ? roomBelow : roomAbove;
         const computedCap = panelMaxHeightCap(panel);
         if (
           computedCap !== undefined &&
@@ -89,33 +89,20 @@ export function AnchoredPopover({
         ) {
           classMaxHeightRef.current = computedCap;
         }
-        const cssCap = classMaxHeightRef.current;
-        const capped = Math.max(
-          Math.min(MIN_PANEL_HEIGHT, room),
-          Math.min(room, cssCap ?? Number.POSITIVE_INFINITY),
+        const next = anchoredPopoverBelowPosition({
+          anchor: rect,
+          panelWidth,
+          viewport: viewportBox,
+          align,
+          panelMaxHeight: classMaxHeightRef.current,
+        });
+        setHasRoom((current) =>
+          current === next.visible ? current : next.visible,
         );
-        appliedMaxHeightRef.current = capped;
-        setMaxHeight((current) => (current === capped ? current : capped));
-        const desiredLeft =
-          align === "start" ? rect.left : rect.right - panelWidth;
-        const next = {
-          left: Math.max(
-            viewportBox.offsetLeft + POPUP_MARGIN,
-            Math.min(
-              viewportBox.offsetLeft +
-                viewportBox.width -
-                panelWidth -
-                POPUP_MARGIN,
-              desiredLeft,
-            ),
-          ),
-          top: below
-            ? rect.bottom + POPUP_GAP
-            : Math.max(
-                viewportBox.offsetTop + POPUP_MARGIN,
-                rect.top - POPUP_GAP - capped,
-              ),
-        };
+        appliedMaxHeightRef.current = next.maxHeight;
+        setMaxHeight((current) =>
+          current === next.maxHeight ? current : next.maxHeight,
+        );
         setPosition((current) =>
           current.left === next.left && current.top === next.top
             ? current
@@ -142,23 +129,46 @@ export function AnchoredPopover({
       });
     };
 
+    // iOS can change the visual viewport while the keyboard opens or pans
+    // without dispatching a resize/scroll event. Poll briefly for the keyboard
+    // transition; the normal event listeners keep the menu updated after that
+    // without forcing layout on every frame for the rest of its lifetime.
+    let pollFrame: number | undefined;
+    let pollDeadline = 0;
+    const poll = (timestamp: number) => {
+      pollFrame = undefined;
+      update();
+      if (timestamp < pollDeadline)
+        pollFrame = requestAnimationFrame(poll);
+    };
+    const startPolling = () => {
+      if (placement !== "below") return;
+      pollDeadline = performance.now() + MOBILE_REPOSITION_WINDOW_MS;
+      if (pollFrame === undefined) pollFrame = requestAnimationFrame(poll);
+    };
+    const scheduleUpdateWithPolling = () => {
+      scheduleUpdate();
+      startPolling();
+    };
     update();
-    window.addEventListener("resize", scheduleUpdate);
-    window.addEventListener("scroll", scheduleUpdate, true);
+    startPolling();
+    window.addEventListener("resize", scheduleUpdateWithPolling);
+    window.addEventListener("scroll", scheduleUpdateWithPolling, true);
     const viewport = window.visualViewport;
-    viewport?.addEventListener("resize", scheduleUpdate);
-    viewport?.addEventListener("scroll", scheduleUpdate);
+    viewport?.addEventListener("resize", scheduleUpdateWithPolling);
+    viewport?.addEventListener("scroll", scheduleUpdateWithPolling);
     const observer = new ResizeObserver(scheduleUpdate);
     if (anchorRef.current) observer.observe(anchorRef.current);
     if (panelRef.current) observer.observe(panelRef.current);
 
     return () => {
       if (frame !== undefined) cancelAnimationFrame(frame);
+      if (pollFrame !== undefined) cancelAnimationFrame(pollFrame);
       observer.disconnect();
-      window.removeEventListener("resize", scheduleUpdate);
-      window.removeEventListener("scroll", scheduleUpdate, true);
-      viewport?.removeEventListener("resize", scheduleUpdate);
-      viewport?.removeEventListener("scroll", scheduleUpdate);
+      window.removeEventListener("resize", scheduleUpdateWithPolling);
+      window.removeEventListener("scroll", scheduleUpdateWithPolling, true);
+      viewport?.removeEventListener("resize", scheduleUpdateWithPolling);
+      viewport?.removeEventListener("scroll", scheduleUpdateWithPolling);
     };
   }, [align, anchorRef, matchAnchorWidth, open, placement]);
 
@@ -199,6 +209,9 @@ export function AnchoredPopover({
           : {}),
         ...(placement === "below" && maxHeight !== undefined
           ? { maxHeight }
+          : {}),
+        ...(placement === "below" && !hasRoom
+          ? { pointerEvents: "none", visibility: "hidden" }
           : {}),
       }}
     >

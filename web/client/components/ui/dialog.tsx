@@ -315,6 +315,7 @@ export function DialogClose({
   const ctx = React.useContext(DialogContext);
   return (
     <Button
+      type="button"
       variant="ghost"
       className={cn("text-zinc-400", className)}
       onClick={() => ctx?.setOpen(false)}
