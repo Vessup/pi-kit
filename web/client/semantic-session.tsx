@@ -1009,7 +1009,7 @@ function ImageLightboxDialog({
   const title = image?.name ?? "Attachment preview";
   return (
     <Dialog open={image !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl border-zinc-700 bg-zinc-950/95 p-0">
+      <DialogContent className="semantic-image-lightbox-dialog border-zinc-700 bg-zinc-950/95 p-0">
         <DialogHeader className="relative border-b-0 px-4 py-3 pr-16 sm:px-5">
           <DialogTitle className="truncate text-sm">{title}</DialogTitle>
           <DialogDescription className="sr-only">
@@ -1026,7 +1026,7 @@ function ImageLightboxDialog({
             <X className="h-4 w-4" aria-hidden="true" />
           </Button>
         </DialogHeader>
-        <DialogBody className="flex max-h-[calc(100dvh-6rem)] min-h-0 items-center justify-center overflow-auto bg-black/20 p-3 sm:p-5">
+        <DialogBody className="semantic-image-lightbox-body flex min-h-0 items-center justify-center overflow-auto bg-black/20 p-3 sm:p-5">
           {image && (
             <img
               className="semantic-image-lightbox"
@@ -3535,13 +3535,15 @@ export function SemanticSession({
                     )}
                   </div>
                 </AnchoredPopover>
-                <ContextProgressCircle
-                  session={session}
-                  routedModel={turnModelSummary}
-                />
-                <ComposerTokenInfo session={session} />
               </div>
-              <div className="flex items-center gap-2">
+              <div className="ml-auto flex min-w-0 items-center gap-2">
+                <div className="semantic-composer-metrics">
+                  <ComposerTokenInfo session={session} />
+                  <ContextProgressCircle
+                    session={session}
+                    routedModel={turnModelSummary}
+                  />
+                </div>
                 {editingQueueId && (
                   <Button
                     className="h-9 px-3"

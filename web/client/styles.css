@@ -922,19 +922,28 @@ details[open] > summary .semantic-tool-chevron {
     padding-bottom: 0.75rem;
   }
 }
+.semantic-composer-metrics {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
 .semantic-token-inline {
   display: inline-block;
   width: clamp(12rem, 35vw, 25rem);
-  margin-left: 0.3rem;
+  margin-left: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   color: rgb(82 82 91);
   font:
-    0.68rem ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
   font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  text-align: right;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .semantic-token-details {
@@ -1039,21 +1048,33 @@ details[open] > summary .semantic-tool-chevron {
   min-width: 0;
   overflow: hidden;
   color: rgb(161 161 170);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .semantic-composer-control > .semantic-model-selection {
   min-width: 0;
   overflow: hidden;
+  color: rgb(161 161 170);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.semantic-composer-control > span:not(.semantic-model-selection),
+.semantic-composer-control > svg {
+  color: rgb(161 161 170);
+  font-size: 12px;
+}
+.semantic-composer-control > .text-zinc-600 {
+  color: rgb(82 82 91);
 }
 .semantic-turn-model {
   display: inline-block;
   min-width: 0;
   max-width: min(16rem, 28vw);
   overflow: hidden;
-  color: rgb(125 211 252);
+  color: rgb(113 113 122);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1143,12 +1164,21 @@ details[open] > summary .semantic-tool-chevron {
   font-size: 0.85rem;
   font-weight: 600;
 }
+.semantic-image-lightbox-dialog {
+  width: min(96vw, calc(100vw - 2rem));
+  max-width: min(96vw, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+}
+.semantic-image-lightbox-body {
+  height: calc(100dvh - 6rem);
+  max-height: calc(100dvh - 6rem);
+}
 .semantic-image-lightbox {
   display: block;
-  width: auto;
-  max-width: 100%;
-  height: auto;
-  max-height: calc(100dvh - 8rem);
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
   object-fit: contain;
 }
 .semantic-queue {
