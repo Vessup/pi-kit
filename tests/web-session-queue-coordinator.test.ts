@@ -74,6 +74,21 @@ test("settle fallback advances queues when agent activity is initially unknown",
   coordinator.cancelWebQueueWork(target);
 });
 
+test("pending model selection blocks every queue flush path", async () => {
+  const target = record([{ id: "queued", message: "use the new model" }]);
+  target.pendingModelSelection = { provider: "test", modelId: "next" };
+  const { coordinator, deliveries } = setup(target);
+
+  coordinator.scheduleQueueSettleFallback(target);
+  await settleTimers();
+  expect(deliveries).toEqual([]);
+
+  target.pendingModelSelection = undefined;
+  await coordinator.flushWebQueue(target);
+  expect(deliveries).toHaveLength(1);
+  coordinator.cancelWebQueueWork(target);
+});
+
 test("uncertain deliveries block steering and all are reported on subscribe", async () => {
   const target = record(
     [

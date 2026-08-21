@@ -1,5 +1,25 @@
 import { expect, test } from "bun:test";
-import { shouldDefaultToQueueFollowUp } from "../web/client/composer-send";
+import {
+  restoreFailedDraft,
+  restoreFailedImages,
+  shouldDefaultToQueueFollowUp,
+} from "../web/client/composer-send";
+
+test("concurrent failed submissions are both restored", () => {
+  const first = restoreFailedDraft("", "first failed prompt");
+  expect(restoreFailedDraft(first, "second failed prompt")).toBe(
+    "second failed prompt\n\nfirst failed prompt",
+  );
+  expect(
+    restoreFailedImages(
+      [{ data: "current", mimeType: "image/png" }],
+      [{ data: "failed", mimeType: "image/jpeg" }],
+    ),
+  ).toEqual([
+    { data: "failed", mimeType: "image/jpeg" },
+    { data: "current", mimeType: "image/png" },
+  ]);
+});
 
 test("compaction makes queue follow-up the default composer action", () => {
   expect(

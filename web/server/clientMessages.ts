@@ -12,6 +12,7 @@ import {
 import type { ClientBroadcast } from "./clientBroadcast.js";
 import type { CommandRouter } from "./commandRouter.js";
 import type { ManagedSessionRefresh } from "./managedSessionRefresh.js";
+import { modelSelectionBlocksPrompts } from "./model-selection-gate.js";
 import type {
   ClientSocketData,
   SessionFileCatalog,
@@ -187,8 +188,9 @@ export function createClientMessages(options: {
                 },
           );
         } else if (
-          message.streamingBehavior === "followUp" &&
-          record.status === "working"
+          modelSelectionBlocksPrompts(record) ||
+          (message.streamingBehavior === "followUp" &&
+            record.status === "working")
         ) {
           await enqueueWebFollowUp(record, {
             id: message.requestId,

@@ -19,6 +19,7 @@ import {
   isUncertainRpcDeliveryCommand,
 } from "./managed-rpc-session.js";
 import type { ManagedSessionRefresh } from "./managedSessionRefresh.js";
+import { modelSelectionBlocksPrompts } from "./model-selection-gate.js";
 import {
   filterModelsByScopePatterns,
   readEnabledModelPatterns,
@@ -86,6 +87,7 @@ export function createCommandRouter(options: {
   const { sessionsDir } = options.config;
   const {
     routeQueueCommand,
+    flushWebQueue,
     markAgentActivity,
     cancelQueueSettleFallback,
     scheduleQueueSettleFallback,
@@ -115,7 +117,16 @@ export function createCommandRouter(options: {
     record.autoTurnActive = false;
     record.autoTurnSettling = false;
     record.lastModel = undefined;
-    await refreshManagedSession(record);
+    record.modelSelectionError = undefined;
+    try {
+      await refreshManagedSession(record);
+    } catch (error) {
+      // setModel already succeeded. A transient metadata refresh must not keep
+      // prompts blocked as if the requested model had failed to apply.
+      console.error(
+        `Could not refresh ${record.id} after model selection: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   function flushPendingModelSelection(
@@ -134,6 +145,7 @@ export function createCommandRouter(options: {
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error);
+            record.modelSelectionError = message;
             console.error(
               `Could not apply deferred model selection for ${record.id}: ${message}`,
             );
@@ -144,15 +156,18 @@ export function createCommandRouter(options: {
             } satisfies ServerEventMessage);
           }
         }
+        if (record.modelSelectionError)
+          throw new Error(record.modelSelectionError);
       } finally {
         record.applyingModelSelection = false;
       }
     })();
     record.modelSelectionFlush = operation;
-    void operation.finally(() => {
+    const clearOperation = () => {
       if (record.modelSelectionFlush === operation)
         record.modelSelectionFlush = undefined;
-    });
+    };
+    void operation.then(clearOperation, clearOperation);
     return operation;
   }
 
@@ -556,7 +571,12 @@ export function createCommandRouter(options: {
           // A browser model change is explicit user selection, not the Auto
           // router's transient runtime swap. Only invalidate Auto tracking
           // after the runtime accepts the new model.
-          await applyManagedModelSelection(record, command);
+          {
+            const releasesBlockedQueue = Boolean(record.modelSelectionError);
+            await applyManagedModelSelection(record, command);
+            if (releasesBlockedQueue && record.status !== "working")
+              void flushWebQueue(record);
+          }
           return;
         case "set_thinking_level":
           await record.managed.setThinkingLevel(command.level);
@@ -696,6 +716,20 @@ export function createCommandRouter(options: {
           );
         }
       });
+      if (command.type === "set_model") {
+        if (isRecord(data) && data.deferred === true) {
+          record.pendingModelSelection = {
+            provider: command.provider,
+            modelId: command.modelId,
+          };
+        } else {
+          const releasesBlockedQueue = modelSelectionBlocksPrompts(record);
+          record.pendingModelSelection = undefined;
+          record.modelSelectionError = undefined;
+          if (releasesBlockedQueue && record.status !== "working")
+            void flushWebQueue(record);
+        }
+      }
       if (command.type === "get_session_options") {
         const options = isRecord(data) ? data : {};
         if (Array.isArray(options.commands)) return options;

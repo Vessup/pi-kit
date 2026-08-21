@@ -267,6 +267,12 @@ export function createAgentMessages(options: {
         record,
         event.event,
       );
+      if (event.event.type === "model_selection_error") {
+        record.modelSelectionError =
+          typeof event.event.message === "string"
+            ? event.event.message
+            : "Could not switch models";
+      }
       let sessionMetadataChanged = false;
       if (event.event.type === "session_info_changed") {
         record.name =
@@ -364,6 +370,19 @@ export function createAgentMessages(options: {
       const update = message as AgentUpdateMessage;
       const existing = runtime.sessions.get(update.session.id);
       if (!existing || !existing.agentSockets.has(socket)) return;
+      const pendingModel = existing.pendingModelSelection;
+      const incomingSelection =
+        update.session.selectedModel ?? update.session.model;
+      const appliedPendingModel = Boolean(
+        pendingModel &&
+          incomingSelection === `${pendingModel.provider}/${pendingModel.modelId}`,
+      );
+      const releasesBlockedQueue =
+        appliedPendingModel && Boolean(existing.modelSelectionError);
+      if (appliedPendingModel) {
+        existing.pendingModelSelection = undefined;
+        existing.modelSelectionError = undefined;
+      }
       // Older bridge runtimes reported `working` again immediately after their
       // authoritative agent_end event. Preserve the lifecycle event until a new
       // agent_start arrives so completed runs cannot get stuck visually working.
@@ -392,6 +411,12 @@ export function createAgentMessages(options: {
           type: "server.session",
           session: sessionToClientPayload(record),
         } satisfies ServerSessionMessage);
+      if (
+        releasesBlockedQueue &&
+        record.status !== "working" &&
+        record.queue.length > 0
+      )
+        void flushWebQueue(record);
       if (gitContextChanged) void hydrateGitMetadata(record);
       return;
     }

@@ -115,7 +115,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "./components/ui/tooltip";
-import { shouldDefaultToQueueFollowUp } from "./composer-send";
+import {
+  restoreFailedDraft,
+  restoreFailedImages,
+  shouldDefaultToQueueFollowUp,
+} from "./composer-send";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
 import {
@@ -2792,7 +2796,7 @@ export function SemanticSession({
     messageOverride?: string,
   ) => {
     const message = (messageOverride ?? draft).trim();
-    if (!session || (!message && images.length === 0)) return;
+    if (!session || controlBusy || (!message && images.length === 0)) return;
     const queuesFollowUp =
       behavior === "followUp" && session.status === "working";
     if (queuesFollowUp ? queueingFollowUp : sending || queueingFollowUp) return;
@@ -2844,10 +2848,11 @@ export function SemanticSession({
         try {
           await onSend(message, submittedImages, behavior);
         } catch (cause) {
-          setDraft((current) => current || message);
-          setImages((current) =>
-            current.length > 0 ? current : submittedImages,
-          );
+          // Immediate and queued submissions may overlap. Restore each failed
+          // payload alongside any other failed or newly typed draft instead of
+          // letting whichever rejection arrives first hide the other one.
+          setDraft((current) => restoreFailedDraft(current, message));
+          setImages((current) => restoreFailedImages(current, submittedImages));
           throw cause;
         }
       }
@@ -3610,7 +3615,8 @@ export function SemanticSession({
                     disabled={
                       stopAction
                         ? aborting || !session
-                        : (queueFollowUpByDefault
+                        : controlBusy ||
+                          (queueFollowUpByDefault
                             ? queueingFollowUp
                             : sending || queueingFollowUp) ||
                           !connected ||
@@ -3647,7 +3653,9 @@ export function SemanticSession({
                         className="h-9 w-7 rounded-l-none rounded-r-xl border-l border-zinc-300/25 p-0"
                         title="Send options"
                         size="icon"
-                        disabled={queueingFollowUp || !connected}
+                        disabled={
+                          controlBusy || queueingFollowUp || !connected
+                        }
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => setSendMenuOpen((open) => !open)}
                       >
@@ -3664,7 +3672,9 @@ export function SemanticSession({
                   <button
                     type="button"
                     disabled={
-                      queueingFollowUp || (!draft.trim() && images.length === 0)
+                      controlBusy ||
+                      queueingFollowUp ||
+                      (!draft.trim() && images.length === 0)
                     }
                     onClick={() => {
                       setSendMenuOpen(false);

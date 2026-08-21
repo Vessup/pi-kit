@@ -77,6 +77,8 @@ export type SessionRecord = {
   /** Prevents a new browser choice from racing a deferred model application. */
   applyingModelSelection?: boolean;
   modelSelectionFlush?: Promise<void>;
+  /** Keeps prompts queued after a deferred model switch fails. */
+  modelSelectionError?: string;
   agentStartGeneration?: number;
   activityGeneration?: number;
   settlingGeneration?: number;

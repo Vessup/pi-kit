@@ -299,10 +299,17 @@ export function createManagedSessionLauncher(options: {
           const deferredModelSelection =
             router.flushPendingModelSelection(record);
           if (deferredModelSelection) {
-            void deferredModelSelection.finally(() => {
-              void refreshManagedSession(record, true);
-              void flushWebQueue(record);
-            });
+            void deferredModelSelection.then(
+              () => {
+                void refreshManagedSession(record, true);
+                void flushWebQueue(record);
+              },
+              () => {
+                // The queued prompts were submitted for the requested model.
+                // Keep them blocked until a later model selection succeeds.
+                void refreshManagedSession(record, true);
+              },
+            );
           } else {
             void refreshManagedSession(record, true);
             void flushWebQueue(record);

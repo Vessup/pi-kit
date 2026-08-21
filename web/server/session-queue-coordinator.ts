@@ -11,6 +11,7 @@ import { hasActiveWebSubagents } from "../protocol.js";
 import { isWebReloadCommand } from "../reload-command.js";
 import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { CommandDeliveryUncertainError } from "./managed-rpc-session.js";
+import { modelSelectionBlocksPrompts } from "./model-selection-gate.js";
 import {
   persistPreDeliveryTransition,
   queueDeliveryFailureDisposition,
@@ -266,6 +267,7 @@ export function createSessionQueueCoordinator(
     if (
       record.queue.length === 0 ||
       record.queueDeliveryActive ||
+      modelSelectionBlocksPrompts(record) ||
       (record.status !== "idle" && record.status !== "error") ||
       hasActiveWebSubagents(record.subagents)
     )

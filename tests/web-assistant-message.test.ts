@@ -45,6 +45,18 @@ test("a Stop that surfaces as an error with an abort message is not a failure", 
     title: "Stopped",
     detail: "The operation was aborted before Pi could finish.",
   });
+  expect(
+    assistantTerminalNotice({
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+      errorMessage: "Request aborted after provider timeout",
+    }),
+  ).toEqual({
+    kind: "error",
+    title: "Run failed",
+    detail: "Request aborted after provider timeout",
+  });
 });
 
 test("failed agent ends are distinguishable from successful idle settlement", () => {

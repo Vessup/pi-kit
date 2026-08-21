@@ -19,11 +19,13 @@ export function assistantTerminalNotice(
     typeof message.errorMessage === "string" && message.errorMessage.trim()
       ? message.errorMessage.trim()
       : undefined;
-  // A user-initiated Stop often surfaces as stopReason "error" with an abort
-  // message (e.g. "This operation was aborted"). That is a deliberate stop,
-  // not a failed run, so it must never render like an error.
+  // Pi's user-initiated Stop can surface as stopReason "error" with one of
+  // these exact runtime messages. Do not infer cancellation from arbitrary
+  // provider prose containing "abort", which could hide a genuine failure.
   const aborted =
-    stopReason === "aborted" || /\babort(?:ed)?\b/i.test(rawDetail ?? "");
+    stopReason === "aborted" ||
+    rawDetail === "This operation was aborted" ||
+    rawDetail === "Request was aborted";
   const detail =
     rawDetail ??
     (aborted
