@@ -15,14 +15,22 @@ export function assistantTerminalNotice(
   const stopReason =
     typeof message.stopReason === "string" ? message.stopReason : undefined;
   if (stopReason !== "error" && stopReason !== "aborted") return undefined;
-  const detail =
+  const rawDetail =
     typeof message.errorMessage === "string" && message.errorMessage.trim()
       ? message.errorMessage.trim()
-      : stopReason === "aborted"
-        ? "The operation was aborted before Pi could finish."
-        : "Pi stopped before completing the response.";
-  return stopReason === "aborted"
-    ? { kind: "stopped", title: "Run stopped", detail }
+      : undefined;
+  // A user-initiated Stop often surfaces as stopReason "error" with an abort
+  // message (e.g. "This operation was aborted"). That is a deliberate stop,
+  // not a failed run, so it must never render like an error.
+  const aborted =
+    stopReason === "aborted" || /\babort(?:ed)?\b/i.test(rawDetail ?? "");
+  const detail =
+    rawDetail ??
+    (aborted
+      ? "The operation was aborted before Pi could finish."
+      : "Pi stopped before completing the response.");
+  return aborted
+    ? { kind: "stopped", title: "Stopped", detail }
     : { kind: "error", title: "Run failed", detail };
 }
 
