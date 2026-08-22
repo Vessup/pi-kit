@@ -74,6 +74,61 @@ test("settle fallback advances queues when agent activity is initially unknown",
   coordinator.cancelWebQueueWork(target);
 });
 
+test("pending model selection blocks every queue flush path", async () => {
+  const target = record([{ id: "queued", message: "use the new model" }]);
+  target.pendingModelSelection = { provider: "test", modelId: "next" };
+  const { coordinator, deliveries } = setup(target);
+
+  coordinator.scheduleQueueSettleFallback(target);
+  await settleTimers();
+  expect(deliveries).toEqual([]);
+
+  target.pendingModelSelection = undefined;
+  await coordinator.flushWebQueue(target);
+  expect(deliveries).toHaveLength(1);
+  coordinator.cancelWebQueueWork(target);
+});
+
+test("a queued prompt reapplies its required model before delivery", async () => {
+  const target = record([
+    {
+      id: "queued",
+      message: "use model A",
+      requiredModel: { provider: "test", modelId: "model-a" },
+    },
+  ]);
+  target.selectedModel = "test/model-b";
+  const { coordinator, deliveries } = setup(target);
+
+  await coordinator.flushWebQueue(target);
+  expect(deliveries).toEqual([
+    { type: "set_model", provider: "test", modelId: "model-a" },
+  ]);
+  expect(target.queue).toHaveLength(1);
+  coordinator.cancelWebQueueWork(target);
+});
+
+test("subscribers receive persistent model-selection failures", () => {
+  const target = record([{ id: "queued", message: "blocked" }]);
+  target.modelSelectionError = "No credentials for requested model";
+  const { coordinator } = setup(target);
+  const frames: Array<{ event?: { type?: string; message?: string } }> = [];
+  coordinator.sendSessionState(
+    {
+      send: (value: string) => frames.push(JSON.parse(value)),
+    } as never,
+    target,
+  );
+  expect(frames).toContainEqual({
+    type: "server.event",
+    sessionId: target.id,
+    event: {
+      type: "model_selection_error",
+      message: "No credentials for requested model",
+    },
+  });
+});
+
 test("uncertain deliveries block steering and all are reported on subscribe", async () => {
   const target = record(
     [
@@ -132,6 +187,30 @@ test("reordering an uncertain delivery behind an ordinary item still blocks flus
   expect(target.queue[1]?.deliveryState).toBe("delivering");
   expect(deliveries).toEqual([]);
   coordinator.cancelWebQueueWork(target);
+});
+
+test("queued prompts cannot steer before their required model is active", async () => {
+  const target = record(
+    [
+      {
+        id: "model-dependent",
+        message: "continue on model B",
+        requiredModel: { provider: "test", modelId: "model-b" },
+      },
+    ],
+    "working",
+  );
+  target.selectedModel = "test/model-a";
+  const { coordinator, deliveries } = setup(target);
+
+  await expect(
+    coordinator.routeQueueCommand(target, {
+      type: "steer_queue_item",
+      itemId: "model-dependent",
+    }),
+  ).rejects.toThrow("required model");
+  expect(deliveries).toEqual([]);
+  expect(target.queue[0]?.deliveryState).toBeUndefined();
 });
 
 test("queued control commands cannot be converted into steering prompts", async () => {

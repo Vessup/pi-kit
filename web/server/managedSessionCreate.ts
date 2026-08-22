@@ -11,6 +11,7 @@ import type {
   ServerSessionMessage,
 } from "../protocol.js";
 import type { ClientBroadcast } from "./clientBroadcast.js";
+import type { CommandRouter } from "./commandRouter.js";
 import {
   type CompactionNotice,
   isSuccessfulCompactionEnd,
@@ -51,6 +52,7 @@ export function createManagedSessionLauncher(options: {
   git: GitMetadata;
   compactionNotice: CompactionNotice;
   rpcSessions: RpcSessionFactory;
+  router: CommandRouter;
 }) {
   const {
     state: runtime,
@@ -65,6 +67,7 @@ export function createManagedSessionLauncher(options: {
     git,
     compactionNotice,
     rpcSessions,
+    router,
   } = options;
   const {
     normalizePath,
@@ -185,6 +188,17 @@ export function createManagedSessionLauncher(options: {
       managedWorktree: resumed?.session.managedWorktree,
       catalogReady: false,
     };
+    const queuedModelDependency = record.queue.find(
+      (item) => item.requiredModel,
+    )?.requiredModel;
+    if (
+      queuedModelDependency &&
+      (record.selectedModel ?? record.model) !==
+        `${queuedModelDependency.provider}/${queuedModelDependency.modelId}`
+    ) {
+      record.pendingModelSelection = { ...queuedModelDependency };
+      record.modelSelectionTarget = { ...queuedModelDependency };
+    }
     runtime.sessions.set(record.id, record);
     if (record.file)
       runtime.sessionsByFile.set(normalizePath(record.file), record);
@@ -293,8 +307,24 @@ export function createManagedSessionLauncher(options: {
           // overflow compaction last advertised willRetry=true.
           if (record.status !== "error") record.status = "idle";
           record.agentRunning = false;
-          void refreshManagedSession(record, true);
-          void flushWebQueue(record);
+          const deferredModelSelection =
+            router.flushPendingModelSelection(record);
+          if (deferredModelSelection) {
+            void deferredModelSelection.then(
+              () => {
+                void refreshManagedSession(record, true);
+                void flushWebQueue(record);
+              },
+              () => {
+                // The queued prompts were submitted for the requested model.
+                // Keep them blocked until a later model selection succeeds.
+                void refreshManagedSession(record, true);
+              },
+            );
+          } else {
+            void refreshManagedSession(record, true);
+            void flushWebQueue(record);
+          }
         }
 
         if (event.type === "message_end" && isRecord(event.message)) {
@@ -423,6 +453,15 @@ export function createManagedSessionLauncher(options: {
         // Keep history-derived usage when stats are unavailable.
       }
       record.status = "idle";
+      let modelSelectionReady = true;
+      const restoredModelSelection = router.flushPendingModelSelection(record);
+      if (restoredModelSelection) {
+        try {
+          await restoredModelSelection;
+        } catch {
+          modelSelectionReady = false;
+        }
+      }
       record.catalogReady = true;
       broadcastSessionToAll(record);
       void hydrateGitMetadata(record);
@@ -431,7 +470,7 @@ export function createManagedSessionLauncher(options: {
         sendSessionState(socket, record);
         sendSessionHistory(socket, record);
       }
-      void flushWebQueue(record);
+      if (modelSelectionReady) void flushWebQueue(record);
       return record;
     } catch (error) {
       await managed.shutdown();

@@ -82,11 +82,16 @@ hljs.registerLanguage("yaml", yamlLanguage);
 import { renderTerminalOutput } from "../../terminal-output";
 import { assistantTerminalNotice } from "../assistant-message";
 import {
+  autoTierFromReference,
+  isAutoModelReference,
+  selectedModelReference,
+} from "../model-status";
+import {
   moveWebQueuedMessage,
   type SemanticImage,
+  type WebModelOption,
   type WebQueuedMessage,
   type WebQueueReplacement,
-  type WebModelOption,
   type WebSession,
   type WebSessionOptions,
   type WebSlashCommand,
@@ -111,10 +116,11 @@ import {
   TooltipTrigger,
 } from "./components/ui/tooltip";
 import {
-  autoTierFromReference,
-  isAutoModelReference,
-  selectedModelReference,
-} from "../model-status";
+  followUpSubmissionBlocked,
+  restoreFailedDraft,
+  restoreFailedImages,
+  shouldDefaultToQueueFollowUp,
+} from "./composer-send";
 import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
 import {
@@ -131,6 +137,8 @@ export type SemanticEntry = {
   type?: string;
   timestamp?: string;
   message?: Record<string, unknown>;
+  /** Authoritative semantic identities visible when this prompt was submitted. */
+  localHistoryBaselineIdentities?: string[];
 };
 
 export type ActiveTool = {
@@ -175,6 +183,7 @@ type SemanticSessionProps = {
     message: string,
     images: SemanticImage[],
     behavior?: "steer" | "followUp",
+    onDispatched?: () => void,
   ) => Promise<void>;
   onReplaceQueue: (queue: WebQueueReplacement[]) => Promise<void>;
   onSteerQueuedMessage: (itemId: string) => Promise<void>;
@@ -1408,11 +1417,10 @@ function ArgumentDetails({
       </div>
     );
   }
-  const hidden = new Set(["path", "command", "content", "edits", "name", "id"]);
-  const rest = Object.fromEntries(
-    Object.entries(args).filter(([key]) => !hidden.has(key)),
-  );
-  return Object.keys(rest).length > 0 ? <DataValue value={rest} /> : null;
+  // Tool metadata already has a concise summary in the card header. Rendering
+  // the remaining argument JSON as a key/value grid adds redundant visual
+  // noise above the actual tool output.
+  return null;
 }
 
 function ToolCallCard({
@@ -1946,6 +1954,9 @@ export function SemanticSession({
   );
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
+  const [immediateSendDispatched, setImmediateSendDispatched] =
+    React.useState(false);
+  const [queueingFollowUp, setQueueingFollowUp] = React.useState(false);
   const [aborting, setAborting] = React.useState(false);
   const [draggingAttachments, setDraggingAttachments] = React.useState(false);
   const [editingQueueId, setEditingQueueId] = React.useState<string | null>(
@@ -2767,6 +2778,21 @@ export function SemanticSession({
     Boolean(session && hasActiveSessionWork(session)) &&
     !draft.trim() &&
     images.length === 0;
+  const queueFollowUpByDefault =
+    !editingQueueId &&
+    shouldDefaultToQueueFollowUp(
+      session,
+      sending,
+      immediateSendDispatched,
+    );
+  const followUpBlocked = followUpSubmissionBlocked(
+    sending,
+    immediateSendDispatched,
+    queueingFollowUp,
+  );
+  React.useEffect(() => {
+    if (queueFollowUpByDefault) setSendMenuOpen(false);
+  }, [queueFollowUpByDefault]);
 
   const requestAbort = async () => {
     if (!session || aborting) return;
@@ -2785,7 +2811,10 @@ export function SemanticSession({
     messageOverride?: string,
   ) => {
     const message = (messageOverride ?? draft).trim();
-    if ((!message && images.length === 0) || sending || !session) return;
+    if (!session || controlBusy || (!message && images.length === 0)) return;
+    const queuesFollowUp =
+      behavior === "followUp" && session.status === "working";
+    if (queuesFollowUp ? followUpBlocked : sending || queueingFollowUp) return;
     try {
       assertClientPromptPayloadFits({
         type: "client.prompt",
@@ -2799,7 +2828,11 @@ export function SemanticSession({
       reportActionError(cause);
       return;
     }
-    setSending(true);
+    if (queuesFollowUp) setQueueingFollowUp(true);
+    else {
+      setImmediateSendDispatched(false);
+      setSending(true);
+    }
     try {
       if (editingQueueId) {
         await onReplaceQueue(
@@ -2809,8 +2842,6 @@ export function SemanticSession({
         );
         finishQueueEditing();
       } else {
-        const queuesFollowUp =
-          behavior === "followUp" && session.status === "working";
         if (!queuesFollowUp) {
           // Sending is an explicit navigation intent: reveal the local bubble
           // immediately even if passive transcript updates were left unpinned.
@@ -2833,12 +2864,15 @@ export function SemanticSession({
         setDraft("");
         setImages([]);
         try {
-          await onSend(message, submittedImages, behavior);
+          await onSend(message, submittedImages, behavior, () => {
+            setImmediateSendDispatched(true);
+          });
         } catch (cause) {
-          setDraft((current) => current || message);
-          setImages((current) =>
-            current.length > 0 ? current : submittedImages,
-          );
+          // Immediate and queued submissions may overlap. Restore each failed
+          // payload alongside any other failed or newly typed draft instead of
+          // letting whichever rejection arrives first hide the other one.
+          setDraft((current) => restoreFailedDraft(current, message));
+          setImages((current) => restoreFailedImages(current, submittedImages));
           throw cause;
         }
       }
@@ -2846,7 +2880,11 @@ export function SemanticSession({
     } catch (cause) {
       reportActionError(cause);
     } finally {
-      setSending(false);
+      if (queuesFollowUp) setQueueingFollowUp(false);
+      else {
+        setSending(false);
+        setImmediateSendDispatched(false);
+      }
     }
   };
 
@@ -3383,7 +3421,7 @@ export function SemanticSession({
                     event.preventDefault();
                     setSlashMenuDismissed(true);
                     void submit(
-                      event.altKey
+                      event.altKey || queueFollowUpByDefault
                         ? "followUp"
                         : session?.status === "working"
                           ? "steer"
@@ -3396,7 +3434,7 @@ export function SemanticSession({
                 if (event.key !== "Enter" || event.shiftKey) return;
                 event.preventDefault();
                 void submit(
-                  event.altKey
+                  event.altKey || queueFollowUpByDefault
                     ? "followUp"
                     : session?.status === "working"
                       ? "steer"
@@ -3418,9 +3456,11 @@ export function SemanticSession({
               placeholder={
                 editingQueueId
                   ? "Edit queued follow-up…"
-                  : session?.status === "working"
-                    ? "Steer Pi… (Option+Enter queues a follow-up)"
-                    : "Message Pi…"
+                  : queueFollowUpByDefault
+                    ? "Queue a follow-up…"
+                    : session?.status === "working"
+                      ? "Steer Pi… (Option+Enter queues a follow-up)"
+                      : "Message Pi…"
               }
               disabled={!session || !connected}
             />
@@ -3580,6 +3620,7 @@ export function SemanticSession({
                       "h-9 w-9 rounded-xl",
                       !editingQueueId &&
                         session?.status === "working" &&
+                        !queueFollowUpByDefault &&
                         "rounded-r-none",
                     )}
                     title={
@@ -3589,13 +3630,18 @@ export function SemanticSession({
                           ? aborting
                             ? "Stopping"
                             : "Stop"
-                          : "Send"
+                          : queueFollowUpByDefault
+                            ? "Queue follow-up"
+                            : "Send"
                     }
                     size="icon"
                     disabled={
                       stopAction
                         ? aborting || !session
-                        : sending ||
+                        : controlBusy ||
+                          (queueFollowUpByDefault
+                            ? queueingFollowUp
+                            : sending || queueingFollowUp) ||
                           !connected ||
                           (!editingQueueId &&
                             session?.status !== "working" &&
@@ -3608,9 +3654,11 @@ export function SemanticSession({
                         void submit(
                           editingQueueId
                             ? undefined
-                            : session?.status === "working"
-                              ? "steer"
-                              : undefined,
+                            : queueFollowUpByDefault
+                              ? "followUp"
+                              : session?.status === "working"
+                                ? "steer"
+                                : undefined,
                         );
                     }}
                   >
@@ -3620,19 +3668,21 @@ export function SemanticSession({
                       <Send className="h-4 w-4" />
                     )}
                   </Button>
-                  {!editingQueueId && session?.status === "working" && (
-                    <Button
-                      ref={sendMenuButtonRef}
-                      className="h-9 w-7 rounded-l-none rounded-r-xl border-l border-zinc-300/25 p-0"
-                      title="Send options"
-                      size="icon"
-                      disabled={sending || !connected}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => setSendMenuOpen((open) => !open)}
-                    >
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
+                  {!editingQueueId &&
+                    session?.status === "working" &&
+                    !queueFollowUpByDefault && (
+                      <Button
+                        ref={sendMenuButtonRef}
+                        className="h-9 w-7 rounded-l-none rounded-r-xl border-l border-zinc-300/25 p-0"
+                        title="Send options"
+                        size="icon"
+                        disabled={controlBusy || followUpBlocked || !connected}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => setSendMenuOpen((open) => !open)}
+                      >
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                 </div>
                 <AnchoredPopover
                   open={sendMenuOpen}
@@ -3642,7 +3692,11 @@ export function SemanticSession({
                 >
                   <button
                     type="button"
-                    disabled={!draft.trim() && images.length === 0}
+                    disabled={
+                      controlBusy ||
+                      followUpBlocked ||
+                      (!draft.trim() && images.length === 0)
+                    }
                     onClick={() => {
                       setSendMenuOpen(false);
                       void submit("followUp");

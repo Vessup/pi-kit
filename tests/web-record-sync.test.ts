@@ -57,6 +57,34 @@ test("model refresh payloads preserve the authoritative session name", () => {
   expect(record.name).toBeUndefined();
 });
 
+test("a stale idle refresh cannot erase newer optimistic activity", () => {
+  const sync = recordSync();
+  const record = {
+    id: "session-1",
+    status: "working",
+    agentRunning: true,
+    activityGeneration: 2,
+    modelTurnGeneration: 1,
+  } as unknown as SessionRecord;
+
+  sync.updateRecordFromState(
+    record,
+    { isCompacting: false, isStreaming: false },
+    1,
+    1,
+  );
+  expect(record.status).toBe("working");
+
+  record.agentRunning = false;
+  sync.updateRecordFromState(
+    record,
+    { isCompacting: false, isStreaming: false },
+    1,
+    2,
+  );
+  expect(record.status).toBe("idle");
+});
+
 test("catalog comparisons normalize explicit last-model clears", () => {
   const sync = recordSync();
   const previous = {

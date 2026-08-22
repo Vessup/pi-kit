@@ -66,6 +66,10 @@ import {
 } from "./app-preferences";
 import { NewSessionDialog } from "./components/new-session-dialog";
 import {
+  isQueuedFollowUpResponse,
+  shouldShowOptimisticPrompt,
+} from "./composer-send";
+import {
   DeleteSessionDialog,
   ForkSessionDialog,
   RenameSessionDialog,
@@ -80,7 +84,9 @@ import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
 import {
   localCommandEntryId,
+  localHistoryBaselineIdentities,
   preserveLocalCommandEntries,
+  reconcileOptimisticQueueEntries,
 } from "./local-command";
 import {
   mergeSemanticHistory,
@@ -167,6 +173,10 @@ export function App() {
   const [queuedMessages, setQueuedMessages] = React.useState<
     WebQueuedMessage[]
   >([]);
+  const queuedMessagesRef = React.useRef<WebQueuedMessage[]>([]);
+  React.useEffect(() => {
+    queuedMessagesRef.current = queuedMessages;
+  }, [queuedMessages]);
   const [sessionOptions, setSessionOptions] = React.useState<WebSessionOptions>(
     { models: [], thinkingLevels: [], commands: [] },
   );
@@ -183,6 +193,9 @@ export function App() {
   } | null>(null);
   const connectionGenerationRef = React.useRef(0);
   const optionsGenerationRef = React.useRef(0);
+  const optimisticWorkingSessionsRef = React.useRef(
+    new Map<string, WebSession["status"]>(),
+  );
   const pendingRequestsRef = React.useRef(
     new Map<
       string,
@@ -227,7 +240,12 @@ export function App() {
     const generation = ++sessionsRequestGenerationRef.current;
     try {
       setLoading(true);
-      const snapshot = sortSessions(await listSessions());
+      const snapshot = sortSessions(await listSessions()).map((session) =>
+        optimisticWorkingSessionsRef.current.has(session.id) &&
+        session.status !== "working"
+          ? { ...session, status: "working" as const }
+          : session,
+      );
       if (generation !== sessionsRequestGenerationRef.current) return;
       setSessions((previous) => preserveSessionsTelemetry(previous, snapshot));
       setError(null);
@@ -312,7 +330,10 @@ export function App() {
         window.clearTimeout(queueSyncRef.current.timer);
         queueSyncRef.current = null;
       }
-      const switchingSessions = activeSessionIdRef.current !== sessionId;
+      const previousSessionId = activeSessionIdRef.current;
+      const switchingSessions = previousSessionId !== sessionId;
+      if (switchingSessions && previousSessionId)
+        optimisticWorkingSessionsRef.current.delete(previousSessionId);
       const previousSocket = socketRef.current;
       socketRef.current = null;
       if (previousSocket) {
@@ -348,7 +369,12 @@ export function App() {
         if (type === "server.snapshot") {
           const snapshot = message as { sessions?: WebSession[] };
           if (snapshot.sessions) {
-            const sessions = snapshot.sessions;
+            const sessions = snapshot.sessions.map((session) =>
+              optimisticWorkingSessionsRef.current.has(session.id) &&
+              session.status !== "working"
+                ? { ...session, status: "working" as const }
+                : session,
+            );
             setSessions((previous) =>
               preserveSessionsTelemetry(previous, sortSessions(sessions)),
             );
@@ -357,15 +383,20 @@ export function App() {
         }
         if (type === "server.session") {
           const payload = message as unknown as { session: WebSession };
-          if (payload.session.id === selectedIdRef.current) {
+          const incoming =
+            optimisticWorkingSessionsRef.current.has(payload.session.id) &&
+            payload.session.status !== "working"
+              ? { ...payload.session, status: "working" as const }
+              : payload.session;
+          if (incoming.id === selectedIdRef.current) {
             setCurrentSession((current) =>
-              preserveSessionTelemetry(current ?? undefined, payload.session),
+              preserveSessionTelemetry(current ?? undefined, incoming),
             );
           }
           setSessions((previous) => {
             const session = preserveSessionTelemetry(
-              previous.find((item) => item.id === payload.session.id),
-              payload.session,
+              previous.find((item) => item.id === incoming.id),
+              incoming,
             );
             return sortSessions([
               ...previous.filter((item) => item.id !== session.id),
@@ -471,6 +502,7 @@ export function App() {
           eventType === "agent_end" ||
           eventType === "agent_settled"
         ) {
+          optimisticWorkingSessionsRef.current.delete(payload.sessionId);
           const terminalNotice =
             eventType === "agent_end"
               ? agentEndTerminalNotice(event)
@@ -500,6 +532,30 @@ export function App() {
           );
           if (eventType === "agent_end" || eventType === "agent_settled")
             setActiveTools([]);
+        }
+        if (eventType === "model_selection_error") {
+          const previousOptimisticStatus =
+            optimisticWorkingSessionsRef.current.get(payload.sessionId);
+          optimisticWorkingSessionsRef.current.delete(payload.sessionId);
+          if (previousOptimisticStatus) {
+            setCurrentSession((current) =>
+              current?.id === payload.sessionId
+                ? { ...current, status: previousOptimisticStatus }
+                : current,
+            );
+            setSessions((previous) =>
+              previous.map((session) =>
+                session.id === payload.sessionId
+                  ? { ...session, status: previousOptimisticStatus }
+                  : session,
+              ),
+            );
+          }
+          setError(
+            typeof event.message === "string"
+              ? event.message
+              : "Could not switch models",
+          );
         }
         if (eventType === "subagents_update") {
           const updates = Array.isArray(event.agents)
@@ -546,10 +602,15 @@ export function App() {
           const item = event.item as WebQueuedMessage;
           if (typeof item.id !== "string" || typeof item.message !== "string")
             return;
+          const immediateOptimisticId = `optimistic-${item.id}`;
           const optimisticId =
             parseWebCompactCommand(item.message) !== undefined
               ? localCommandEntryId(item.id)
-              : `optimistic-queued-${item.id}`;
+              : entriesRef.current.some(
+                    (entry) => entry.id === immediateOptimisticId,
+                  )
+                ? immediateOptimisticId
+                : `optimistic-queued-${item.id}`;
           if (event.phase === "started") {
             // Atomically move the follow-up out of the editable queue and into the
             // normal transcript before the server asks Pi to begin its turn.
@@ -565,6 +626,8 @@ export function App() {
                   id: optimisticId,
                   type: "message" as const,
                   timestamp: new Date().toISOString(),
+                  localHistoryBaselineIdentities:
+                    localHistoryBaselineIdentities(entriesRef.current),
                   message: {
                     role: "user",
                     timestamp: Date.now(),
@@ -835,6 +898,8 @@ export function App() {
     currentSession?.id === selectedId
       ? currentSession
       : (sessions.find((session) => session.id === selectedId) ?? null);
+  const selectedModelOptionKey =
+    selectedSession?.selectedModel ?? selectedSession?.model;
 
   const loadSessionOptions = React.useCallback(
     async (sessionId: string, generation = optionsGenerationRef.current) => {
@@ -911,11 +976,10 @@ export function App() {
     [],
   );
 
-  // Refire when the session identity or status changes, not on every agent
-  // update (which churns the selectedSession reference). Refiring on every
-  // reference races the in-flight RPC call against its successor; the
-  // failure of the latest generation would clear models and leave the picker
-  // stuck on the synthetic single-model fallback.
+  // Refire when the session identity, status, or explicit model selection
+  // changes, not on every agent update (which churns the selectedSession
+  // reference). The model key refreshes thinking levels after a deferred
+  // mid-turn selection is finally applied.
   React.useEffect(() => {
     const sessionId = selectedSession?.id;
     const status = selectedSession?.status;
@@ -924,10 +988,18 @@ export function App() {
       setSessionOptions({ models: [], thinkingLevels: [], commands: [] });
       return;
     }
+    // Reading the explicit selection makes this effect refresh the supported
+    // effort list when a deferred model change is finally applied.
+    void selectedModelOptionKey;
     // get_session_options already includes commands; avoid a second connection
     // and native get_commands process spawn on every session selection.
     void loadSessionOptions(sessionId, generation);
-  }, [loadSessionOptions, selectedSession?.id, selectedSession?.status]);
+  }, [
+    loadSessionOptions,
+    selectedModelOptionKey,
+    selectedSession?.id,
+    selectedSession?.status,
+  ]);
 
   const selectModel = React.useCallback(
     async (provider: string, modelId: string) => {
@@ -938,9 +1010,8 @@ export function App() {
         provider,
         modelId,
       });
-      await loadSessionOptions(sessionId);
     },
-    [loadSessionOptions],
+    [],
   );
 
   const selectThinkingLevel = React.useCallback(async (level: string) => {
@@ -964,6 +1035,7 @@ export function App() {
       message: string,
       images: SemanticImage[],
       streamingBehavior?: "steer" | "followUp",
+      onDispatched?: () => void,
     ) => {
       const sessionId = selectedIdRef.current;
       const socket = socketRef.current;
@@ -978,9 +1050,11 @@ export function App() {
         streamingBehavior,
       } satisfies ClientPromptMessage;
       assertClientPromptPayloadFits(promptFrame);
-      const queuedFollowUp =
-        streamingBehavior === "followUp" &&
-        selectedSession?.status === "working";
+      const showOptimisticPrompt = shouldShowOptimisticPrompt(
+        streamingBehavior,
+        selectedSession?.status,
+      );
+      const queuedFollowUp = !showOptimisticPrompt;
       const worktreeCommand = /^\/worktree(?:\s|$)/.test(message.trim());
       const compactCommand = parseWebCompactCommand(message);
       const controlCommand =
@@ -993,6 +1067,10 @@ export function App() {
         selectedSession?.status !== "working";
       const previousStatus = selectedSession?.status;
       if (optimisticallyWorking) {
+        optimisticWorkingSessionsRef.current.set(
+          sessionId,
+          previousStatus ?? "idle",
+        );
         setCurrentSession((current) =>
           current?.id === sessionId
             ? { ...current, status: "working" }
@@ -1007,13 +1085,16 @@ export function App() {
         );
       }
       const optimisticId =
-        compactCommand !== undefined && !queuedFollowUp
+        compactCommand !== undefined
           ? localCommandEntryId(requestId)
           : `optimistic-${requestId}`;
       const optimistic: SemanticEntry = {
         id: optimisticId,
         type: "message",
         timestamp: new Date().toISOString(),
+        localHistoryBaselineIdentities: localHistoryBaselineIdentities(
+          entriesRef.current,
+        ),
         message: {
           role: "user",
           timestamp: Date.now(),
@@ -1027,16 +1108,15 @@ export function App() {
           ],
         },
       };
-      if (!queuedFollowUp) {
+      if (showOptimisticPrompt) {
         const next = [...entriesRef.current, optimistic];
         entriesRef.current = next;
         setEntries(next);
-        // Let React commit and the browser paint the local user bubble before the
-        // native bridge receives the prompt and renders it in the TUI.
+        // Immediate prompts paint before routing starts. Explicit follow-ups
+        // remain only in the queue until delivery actually begins.
         if (!controlCommand) await waitForVisibleBrowserPaint();
       }
       let responseData: unknown;
-      let promptFrameSent = false;
       try {
         responseData = await new Promise<unknown>((resolve, reject) => {
           pendingRequestsRef.current.set(requestId, {
@@ -1047,21 +1127,23 @@ export function App() {
           });
           try {
             socket.send(promptFrame);
-            promptFrameSent = true;
+            onDispatched?.();
           } catch (cause) {
             pendingRequestsRef.current.delete(requestId);
-            if (!queuedFollowUp) {
-              const next = entriesRef.current.filter(
-                (entry) => entry.id !== optimisticId,
-              );
-              entriesRef.current = next;
-              setEntries(next);
-            }
+            const next = entriesRef.current.filter(
+              (entry) => entry.id !== optimisticId,
+            );
+            entriesRef.current = next;
+            setEntries(next);
             reject(cause instanceof Error ? cause : new Error(String(cause)));
           }
         });
       } catch (cause) {
-        if (optimisticallyWorking && previousStatus && !promptFrameSent) {
+        const shouldRestoreStatus =
+          optimisticallyWorking &&
+          previousStatus &&
+          optimisticWorkingSessionsRef.current.delete(sessionId);
+        if (shouldRestoreStatus) {
           setCurrentSession((current) =>
             current?.id === sessionId
               ? { ...current, status: previousStatus }
@@ -1076,6 +1158,42 @@ export function App() {
           );
         }
         throw cause;
+      }
+      if (
+        responseData &&
+        typeof responseData === "object" &&
+        "queued" in responseData &&
+        responseData.queued === true
+      ) {
+        if (isQueuedFollowUpResponse(responseData)) {
+          const next = entriesRef.current.filter(
+            (entry) => entry.id !== optimisticId,
+          );
+          entriesRef.current = next;
+          setEntries(next);
+          if (
+            optimisticallyWorking &&
+            previousStatus &&
+            optimisticWorkingSessionsRef.current.delete(sessionId)
+          ) {
+            setCurrentSession((current) =>
+              current?.id === sessionId
+                ? { ...current, status: previousStatus }
+                : current,
+            );
+            setSessions((previous) =>
+              previous.map((session) =>
+                session.id === sessionId
+                  ? { ...session, status: previousStatus }
+                  : session,
+              ),
+            );
+          }
+        }
+        // A model-selection gate represents an immediate prompt still being
+        // routed, so its bubble remains optimistic. Explicit follow-ups stay
+        // exclusively in the queue until web_queue_delivery starts.
+        return;
       }
       if (isWebReloadCommand(message)) {
         const next = entriesRef.current.filter(
@@ -1106,9 +1224,19 @@ export function App() {
     async (queue: WebQueueReplacement[]) => {
       const sessionId = selectedIdRef.current;
       if (!sessionId) throw new Error("No session selected");
+      const previousQueue = queuedMessagesRef.current;
       // Keep the visible queue authoritative: the subscribed socket applies the
       // server's web_queue_update only after replace_queue has been accepted.
       await sendSessionCommand(sessionId, { type: "replace_queue", queue });
+      const next = reconcileOptimisticQueueEntries(
+        entriesRef.current,
+        previousQueue,
+        queue,
+      );
+      if (next !== entriesRef.current) {
+        entriesRef.current = next;
+        setEntries(next);
+      }
     },
     [],
   );

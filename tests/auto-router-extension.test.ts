@@ -78,13 +78,19 @@ type FakePi = {
   setModelCalls: Model<Api>[];
   thinkingLevelCalls: string[];
   appendedEntries: Array<{ type: string; data: unknown }>;
+  sentMessages: Array<{
+    message: unknown;
+    options: unknown;
+  }>;
   footerEvents: unknown[];
   currentModel: ModelRef;
 };
 
 function createFakePi(
   options: {
-    setModelResult?: boolean | ((model: Model<Api>, call: number) => boolean);
+    setModelResult?:
+      | boolean
+      | ((model: Model<Api>, call: number) => boolean | Promise<boolean>);
   } = {},
 ): FakePi {
   const handlers = new Map<string, FakeHandler>();
@@ -92,6 +98,7 @@ function createFakePi(
   const setModelCalls: Model<Api>[] = [];
   const thinkingLevelCalls: string[] = [];
   const appendedEntries: Array<{ type: string; data: unknown }> = [];
+  const sentMessages: Array<{ message: unknown; options: unknown }> = [];
   const footerEvents: unknown[] = [];
   const eventHandlers = new Map<string, (value: unknown) => void>();
   const currentModel: ModelRef = { value: undefined };
@@ -113,6 +120,9 @@ function createFakePi(
     appendEntry: (type: string, data: unknown) => {
       appendedEntries.push({ type, data });
     },
+    sendMessage: (message: unknown, options: unknown) => {
+      sentMessages.push({ message, options });
+    },
     events: {
       emit: emitEvent,
       on: (event: string, handler: (value: unknown) => void) => {
@@ -124,7 +134,7 @@ function createFakePi(
       setModelCalls.push(m);
       const success =
         typeof options.setModelResult === "function"
-          ? options.setModelResult(m, setModelCalls.length)
+          ? await options.setModelResult(m, setModelCalls.length)
           : options.setModelResult !== false;
       if (success) currentModel.value = m;
       return success;
@@ -150,6 +160,7 @@ function createFakePi(
     setModelCalls,
     thinkingLevelCalls,
     appendedEntries,
+    sentMessages,
     footerEvents,
     currentModel,
   };
@@ -207,6 +218,8 @@ function fakeCtx(options: {
   return {
     hasUI: true,
     mode: "rpc",
+    isIdle: () => true,
+    hasPendingMessages: () => false,
     get model() {
       return modelRef.value;
     },
@@ -1142,6 +1155,215 @@ test("an aborted (user-cancelled) message does not count as a provider failure",
 
   await fake.fire("before_agent_start", { prompt: "anything" }, ctx);
   expect(fake.setModelCalls).toEqual([a]);
+});
+
+test("error-shaped user cancellation never triggers runtime fallback", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  for (const errorMessage of [
+    "This operation was aborted",
+    "Request was aborted",
+  ]) {
+    const fake = createFakePi();
+    await autoRouter(fake.pi);
+    const ctx = fakeCtx({
+      modelRegistry: fakeModelRegistry({ models: [a, b] }),
+      currentModel: fake.currentModel,
+    });
+    await fake.fire("session_start", {}, ctx);
+    await selectAuto(fake, ctx);
+    await fake.fire("before_agent_start", { prompt: "do the work" }, ctx);
+    await fake.fire(
+      "message_end",
+      {
+        message: { role: "assistant", stopReason: "error", errorMessage },
+      },
+      ctx,
+    );
+    await fake.fire("agent_settled", {}, ctx);
+    expect(fake.sentMessages).toEqual([]);
+    expect(fake.currentModel.value?.provider).toBe("auto");
+  }
+});
+
+test("Auto continues a failed request on the next configured model after core retries settle", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a, b] }),
+    currentModel: fake.currentModel,
+  });
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "do the work" }, ctx);
+
+  await fake.fire(
+    "message_end",
+    {
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "503: Endpoint is unavailable",
+      },
+    },
+    ctx,
+  );
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(fake.currentModel.value).toBe(b);
+  expect(fake.sentMessages).toHaveLength(1);
+  expect(fake.sentMessages[0]?.message).toMatchObject({
+    customType: "vessup:auto-router:fallback",
+    display: false,
+    details: {
+      failedModel: "prov/model-a",
+      fallbackModel: "prov/model-b",
+    },
+  });
+  expect(fake.sentMessages[0]?.options).toEqual({
+    triggerTurn: true,
+    deliverAs: "followUp",
+  });
+
+  // The fallback must not consume the preflight route for the next real user
+  // prompt. (Custom continuations do not emit before_agent_start.)
+  fake.setModelCalls.length = 0;
+  await fake.fire("before_agent_start", { prompt: "next real prompt" }, ctx);
+  expect(fake.setModelCalls).toEqual([b]);
+});
+
+test("an explicit model selection wins while runtime fallback is applying", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  const manual = model("prov", "manual");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  let releaseFallback!: (success: boolean) => void;
+  const fallbackBlocked = new Promise<boolean>((resolve) => {
+    releaseFallback = resolve;
+  });
+  const fake = createFakePi({
+    setModelResult: (selected) =>
+      selected.id === "model-b" ? fallbackBlocked : true,
+  });
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a, b, manual] }),
+    currentModel: fake.currentModel,
+  });
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "do the work" }, ctx);
+  await fake.fire(
+    "message_end",
+    {
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "503: Endpoint is unavailable",
+      },
+    },
+    ctx,
+  );
+
+  const settling = fake.fire("agent_settled", {}, ctx);
+  while (!fake.setModelCalls.includes(b)) await Bun.sleep(0);
+  fake.currentModel.value = manual;
+  await fake.fire(
+    "model_select",
+    { model: manual, previousModel: a, source: "set" },
+    ctx,
+  );
+  releaseFallback(true);
+  await settling;
+
+  expect(fake.currentModel.value).toBe(manual);
+  expect(fake.setModelCalls.at(-1)).toBe(manual);
+  expect(fake.sentMessages).toEqual([]);
+});
+
+test("Auto does not fallback when Pi's built-in retry eventually succeeds", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  const fake = createFakePi();
+  await autoRouter(fake.pi);
+  const ctx = fakeCtx({
+    modelRegistry: fakeModelRegistry({ models: [a, b] }),
+    currentModel: fake.currentModel,
+  });
+  await fake.fire("session_start", {}, ctx);
+  await selectAuto(fake, ctx);
+  await fake.fire("before_agent_start", { prompt: "do the work" }, ctx);
+  await fake.fire(
+    "message_end",
+    {
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "503: Endpoint is unavailable",
+      },
+    },
+    ctx,
+  );
+  await fake.fire(
+    "message_end",
+    {
+      message: {
+        role: "assistant",
+        stopReason: "stop",
+        usage: { input: 1, output: 1 },
+      },
+    },
+    ctx,
+  );
+  await fake.fire("agent_settled", {}, ctx);
+
+  expect(fake.sentMessages).toEqual([]);
+  expect(fake.currentModel.value?.provider).toBe("auto");
 });
 
 test("router-observed usage is tracked for a manually-selected configured model, not just ones Auto routed to", async () => {

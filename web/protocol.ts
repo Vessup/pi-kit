@@ -359,6 +359,8 @@ export type WebQueueReplacement = {
 export type WebQueuedMessage = WebQueueReplacement & {
   /** Server-owned durable crash-recovery state. A delivering item requires explicit user reconciliation. */
   deliveryState?: "delivering";
+  /** Server-owned model dependency for prompts queued during a model change. */
+  requiredModel?: { provider: string; modelId: string };
 };
 
 /** Reorder an editable follow-up into an explicit insertion slot. */

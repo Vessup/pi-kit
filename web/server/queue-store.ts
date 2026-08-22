@@ -43,6 +43,21 @@ function parseQueuedMessage(value: unknown): WebQueuedMessage | undefined {
       });
     }
   }
+  let requiredModel: WebQueuedMessage["requiredModel"];
+  if (value.requiredModel !== undefined) {
+    if (
+      !isRecord(value.requiredModel) ||
+      typeof value.requiredModel.provider !== "string" ||
+      !value.requiredModel.provider ||
+      typeof value.requiredModel.modelId !== "string" ||
+      !value.requiredModel.modelId
+    )
+      return undefined;
+    requiredModel = {
+      provider: value.requiredModel.provider,
+      modelId: value.requiredModel.modelId,
+    };
+  }
   return {
     id: value.id,
     message: value.message,
@@ -50,6 +65,7 @@ function parseQueuedMessage(value: unknown): WebQueuedMessage | undefined {
     ...(value.deliveryState === "delivering"
       ? { deliveryState: "delivering" as const }
       : {}),
+    ...(requiredModel ? { requiredModel } : {}),
   };
 }
 
@@ -114,6 +130,9 @@ function cloneQueues(
       queue.map((item) => ({
         ...item,
         images: item.images?.map((image) => ({ ...image })),
+        requiredModel: item.requiredModel
+          ? { ...item.requiredModel }
+          : undefined,
       })),
     ]),
   );

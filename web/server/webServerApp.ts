@@ -139,6 +139,7 @@ export function createWebServerApp() {
     git,
     compactionNotice,
     rpcSessions,
+    router,
   });
   const clientMessages = createClientMessages({
     state,
@@ -161,6 +162,7 @@ export function createWebServerApp() {
     git,
     compactionNotice,
     replacement,
+    router,
   });
   const discovery = createDiscoveryState({ config, state });
   const httpApi = createHttpApi({

@@ -12,6 +12,7 @@ import {
 import type { ClientBroadcast } from "./clientBroadcast.js";
 import type { CommandRouter } from "./commandRouter.js";
 import type { ManagedSessionRefresh } from "./managedSessionRefresh.js";
+import { modelSelectionBlocksPrompts } from "./model-selection-gate.js";
 import type {
   ClientSocketData,
   SessionFileCatalog,
@@ -138,6 +139,7 @@ export function createClientMessages(options: {
               id: message.requestId,
               message: message.message,
             });
+            responseData = { queued: true, reason: "followUp" };
           } else {
             if (message.streamingBehavior === "steer")
               throw new Error("/reload must be queued or run while Pi is idle");
@@ -156,6 +158,7 @@ export function createClientMessages(options: {
               id: message.requestId,
               message: message.message,
             });
+            responseData = { queued: true, reason: "followUp" };
           } else {
             if (message.streamingBehavior === "steer")
               throw new Error(
@@ -187,14 +190,23 @@ export function createClientMessages(options: {
                 },
           );
         } else if (
-          message.streamingBehavior === "followUp" &&
-          record.status === "working"
+          modelSelectionBlocksPrompts(record) ||
+          (message.streamingBehavior === "followUp" &&
+            record.status === "working")
         ) {
+          const queueReason =
+            message.streamingBehavior === "followUp"
+              ? "followUp"
+              : "modelSelection";
           await enqueueWebFollowUp(record, {
             id: message.requestId,
             message: message.message,
             images: message.images,
+            ...(record.modelSelectionTarget
+              ? { requiredModel: { ...record.modelSelectionTarget } }
+              : {}),
           });
+          responseData = { queued: true, reason: queueReason };
         } else {
           await routeCommand(record, {
             type: "prompt",

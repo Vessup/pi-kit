@@ -72,6 +72,17 @@ export type SessionRecord = {
   autoTurnActive?: boolean;
   /** True until the settlement refresh observes Auto's restored placeholder. */
   autoTurnSettling?: boolean;
+  /** Latest browser model choice waiting for the active turn to settle. */
+  pendingModelSelection?: { provider: string; modelId: string };
+  /** Model requested by the active/deferred selection, retained on failure. */
+  modelSelectionTarget?: { provider: string; modelId: string };
+  /** Prevents a new browser choice from racing a deferred model application. */
+  applyingModelSelection?: boolean;
+  modelSelectionFlush?: Promise<void>;
+  /** Serializes model changes forwarded to an external/native bridge. */
+  modelSelectionOperation?: Promise<unknown>;
+  /** Keeps prompts queued after a deferred model switch fails. */
+  modelSelectionError?: string;
   agentStartGeneration?: number;
   activityGeneration?: number;
   settlingGeneration?: number;

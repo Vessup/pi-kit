@@ -12,6 +12,10 @@ import { isWebReloadCommand } from "../reload-command.js";
 import { DirtySnapshotRetryWorker } from "./dirty-snapshot-worker.js";
 import { CommandDeliveryUncertainError } from "./managed-rpc-session.js";
 import {
+  modelSelectionBlocksPrompts,
+  queuedModelRequiredSelection,
+} from "./model-selection-gate.js";
+import {
   persistPreDeliveryTransition,
   queueDeliveryFailureDisposition,
 } from "./queue-delivery.js";
@@ -56,7 +60,12 @@ export function createSessionQueueCoordinator(
     return {
       type: "server.event",
       sessionId: record.id,
-      event: { type: "web_queue_update", queue: record.queue },
+      event: {
+        type: "web_queue_update",
+        queue: record.queue.map(({ requiredModel: _requiredModel, ...item }) =>
+          item,
+        ),
+      },
     };
   }
 
@@ -64,6 +73,9 @@ export function createSessionQueueCoordinator(
     return queue.map((item) => ({
       ...item,
       images: item.images?.map((image) => ({ ...image })),
+      requiredModel: item.requiredModel
+        ? { ...item.requiredModel }
+        : undefined,
     }));
   }
 
@@ -255,6 +267,18 @@ export function createSessionQueueCoordinator(
         } satisfies ServerEventMessage),
       );
     }
+    if (record.modelSelectionError) {
+      socket.send(
+        JSON.stringify({
+          type: "server.event",
+          sessionId: record.id,
+          event: {
+            type: "model_selection_error",
+            message: record.modelSelectionError,
+          },
+        } satisfies ServerEventMessage),
+      );
+    }
   }
 
   async function flushWebQueue(record: SessionRecord): Promise<void> {
@@ -266,10 +290,32 @@ export function createSessionQueueCoordinator(
     if (
       record.queue.length === 0 ||
       record.queueDeliveryActive ||
+      modelSelectionBlocksPrompts(record) ||
       (record.status !== "idle" && record.status !== "error") ||
       hasActiveWebSubagents(record.subagents)
     )
       return;
+    const requiredModel = queuedModelRequiredSelection(record);
+    if (requiredModel) {
+      try {
+        await deliverCommand(record, {
+          type: "set_model",
+          provider: requiredModel.provider,
+          modelId: requiredModel.modelId,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        record.modelSelectionError = message;
+        broadcast(record.id, {
+          type: "server.event",
+          sessionId: record.id,
+          event: { type: "model_selection_error", message },
+        } satisfies ServerEventMessage);
+      }
+      // Model selection schedules another serialized flush after it succeeds.
+      // Never deliver the head item in the same pass that changed its model.
+      return;
+    }
     // Any uncertain delivery blocks the whole queue. replace_queue may move an
     // uncertain item behind an ordinary one, but that must never authorize a new
     // delivery until the uncertain item is explicitly reconciled.
@@ -508,6 +554,17 @@ export function createSessionQueueCoordinator(
           );
         if (record.queue.some((item) => item.deliveryState === "delivering"))
           throw new Error("Another queued message has uncertain delivery");
+        const activeModel = record.selectedModel ?? record.model;
+        if (
+          modelSelectionBlocksPrompts(record) ||
+          (queued.requiredModel &&
+            activeModel !==
+              `${queued.requiredModel.provider}/${queued.requiredModel.modelId}`)
+        ) {
+          throw new Error(
+            "This queued message must wait for its required model to be applied",
+          );
+        }
         if (
           isWebReloadCommand(queued.message) ||
           parseWebCompactCommand(queued.message)
@@ -623,6 +680,11 @@ export function createSessionQueueCoordinator(
             .filter((item) => item.deliveryState === "delivering")
             .map((item) => [item.id, item]),
         );
+        const requiredModelById = new Map(
+          record.queue.flatMap((item) =>
+            item.requiredModel ? [[item.id, item.requiredModel] as const] : [],
+          ),
+        );
         const seenIds = new Set<string>();
         for (const replacement of command.queue) {
           if (seenIds.has(replacement.id))
@@ -639,6 +701,11 @@ export function createSessionQueueCoordinator(
             throw new Error("/compact does not accept image attachments");
           seenIds.add(replacement.id);
           const uncertain = uncertainById.get(replacement.id);
+          if ("requiredModel" in replacement) {
+            throw new Error(
+              `Queue item ${replacement.id} cannot set a server-owned model dependency`,
+            );
+          }
           if (
             "deliveryState" in replacement &&
             replacement.deliveryState !== undefined &&
@@ -673,13 +740,19 @@ export function createSessionQueueCoordinator(
             queue.splice(
               0,
               queue.length,
-              ...command.queue.map((replacement) => ({
-                ...replacement,
-                images: replacement.images?.map((image) => ({ ...image })),
-                ...(uncertainById.has(replacement.id)
-                  ? { deliveryState: "delivering" as const }
-                  : {}),
-              })),
+              ...command.queue.map((replacement) => {
+                const requiredModel = requiredModelById.get(replacement.id);
+                return {
+                  ...replacement,
+                  images: replacement.images?.map((image) => ({ ...image })),
+                  ...(uncertainById.has(replacement.id)
+                    ? { deliveryState: "delivering" as const }
+                    : {}),
+                  ...(requiredModel
+                    ? { requiredModel: { ...requiredModel } }
+                    : {}),
+                };
+              }),
             );
           },
           persist: () => persistWebQueue(record),

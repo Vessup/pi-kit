@@ -19,8 +19,10 @@ import {
   type ServerEventMessage,
   type ServerHistoryMessage,
   type ServerSessionMessage,
+  type WebSession,
 } from "../protocol.js";
 import type { ClientBroadcast } from "./clientBroadcast.js";
+import type { CommandRouter } from "./commandRouter.js";
 import {
   type CompactionNotice,
   isSuccessfulCompactionEnd,
@@ -33,6 +35,7 @@ import type {
   SessionFileCatalog,
   SessionKind,
   SessionQueueCoordinator,
+  SessionRecord,
 } from "./server-types.js";
 import type { ServerRuntimeState } from "./serverRuntimeState.js";
 import { normalizeLegacySessionUpdate } from "./session-lifecycle.js";
@@ -53,6 +56,7 @@ export function createAgentMessages(options: {
   git: GitMetadata;
   compactionNotice: CompactionNotice;
   replacement: SessionReplacement;
+  router: CommandRouter;
 }) {
   const {
     state: runtime,
@@ -65,6 +69,7 @@ export function createAgentMessages(options: {
     git,
     compactionNotice,
     replacement,
+    router,
   } = options;
   const {
     normalizePath,
@@ -92,6 +97,23 @@ export function createAgentMessages(options: {
   const { hydrateGitMetadata } = git;
   const { broadcastCompactionNotice } = compactionNotice;
   const { completeExternalSessionReplacement } = replacement;
+
+  function reconcilePendingModelSelection(
+    record: SessionRecord,
+    session: Pick<WebSession, "selectedModel" | "model">,
+  ): boolean {
+    const pending = record.pendingModelSelection;
+    const incomingSelection = session.selectedModel ?? session.model;
+    if (
+      !pending ||
+      incomingSelection !== `${pending.provider}/${pending.modelId}`
+    )
+      return false;
+    record.pendingModelSelection = undefined;
+    record.modelSelectionTarget = undefined;
+    record.modelSelectionError = undefined;
+    return true;
+  }
 
   async function handleAgentMessage(
     socket: Bun.ServerWebSocket<AgentSocketData>,
@@ -141,6 +163,16 @@ export function createAgentMessages(options: {
       record.status = hello.session.status;
       record.agentRunning = hello.session.status === "working";
       record.updatedAt = hello.session.updatedAt;
+      reconcilePendingModelSelection(record, hello.session);
+      const restoredModelSelection = record.pendingModelSelection;
+      if (restoredModelSelection && record.status !== "working") {
+        void router
+          .routeCommand(record, {
+            type: "set_model",
+            ...restoredModelSelection,
+          })
+          .catch(() => undefined);
+      }
       for (const uncertain of record.queue.filter(
         (item) => item.deliveryState === "delivering",
       )) {
@@ -267,6 +299,12 @@ export function createAgentMessages(options: {
         record,
         event.event,
       );
+      if (event.event.type === "model_selection_error") {
+        record.modelSelectionError =
+          typeof event.event.message === "string"
+            ? event.event.message
+            : "Could not switch models";
+      }
       let sessionMetadataChanged = false;
       if (event.event.type === "session_info_changed") {
         record.name =
@@ -364,6 +402,10 @@ export function createAgentMessages(options: {
       const update = message as AgentUpdateMessage;
       const existing = runtime.sessions.get(update.session.id);
       if (!existing || !existing.agentSockets.has(socket)) return;
+      const releasesBlockedQueue = reconcilePendingModelSelection(
+        existing,
+        update.session,
+      );
       // Older bridge runtimes reported `working` again immediately after their
       // authoritative agent_end event. Preserve the lifecycle event until a new
       // agent_start arrives so completed runs cannot get stuck visually working.
@@ -392,6 +434,12 @@ export function createAgentMessages(options: {
           type: "server.session",
           session: sessionToClientPayload(record),
         } satisfies ServerSessionMessage);
+      if (
+        releasesBlockedQueue &&
+        record.status !== "working" &&
+        record.queue.length > 0
+      )
+        void flushWebQueue(record);
       if (gitContextChanged) void hydrateGitMetadata(record);
       return;
     }

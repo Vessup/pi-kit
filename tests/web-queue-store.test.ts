@@ -58,6 +58,29 @@ test("web follow-up queues survive daemon restarts with attachments", async () =
   expect(JSON.parse((await readFile(path)).toString()).version).toBe(2);
 });
 
+test("model dependencies survive daemon restarts with queued prompts", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queue-model-test-"));
+  const path = join(tempDir, "queues.json");
+  const queues = new Map([
+    [
+      "session",
+      [
+        {
+          id: "queued-for-model",
+          message: "use the requested model",
+          requiredModel: { provider: "test", modelId: "next" },
+        },
+      ],
+    ],
+  ]);
+
+  await writeQueueStore(path, queues);
+  expect(readQueueStore(path).get("session")?.[0]?.requiredModel).toEqual({
+    provider: "test",
+    modelId: "next",
+  });
+});
+
 test("daemon restart preserves an in-flight item as blocked instead of redelivering or erasing it", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "pi-kit-queue-store-"));
   const path = join(tempDir, "queues.json");

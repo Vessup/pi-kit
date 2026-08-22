@@ -147,7 +147,20 @@ export function AutocompleteInput({
                     : "text-zinc-300"
                 }`}
                 onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => accept(suggestion)}
+                onPointerDown={(event) => {
+                  if (event.button !== 0 || event.pointerType !== "mouse")
+                    return;
+                  // Mouse selection must run before focus/portal changes can
+                  // cancel click. Touch waits for click so a swipe can scroll
+                  // the suggestion list without accepting its first item.
+                  event.preventDefault();
+                  accept(suggestion);
+                }}
+                onClick={() => {
+                  // Touch, keyboard, and assistive-technology activation. A
+                  // mouse click after pointer acceptance is idempotent.
+                  accept(suggestion);
+                }}
               >
                 <span className="truncate">{suggestion.value}</span>
                 {suggestion.label ? (
