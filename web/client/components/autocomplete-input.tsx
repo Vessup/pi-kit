@@ -148,17 +148,18 @@ export function AutocompleteInput({
                 }`}
                 onMouseEnter={() => setActiveIndex(index)}
                 onPointerDown={(event) => {
-                  if (event.button !== 0) return;
-                  // Accept before focus/portal changes can cancel the later
-                  // click. This is especially important inside the modal,
-                  // where the branch menu is rendered through a body portal.
+                  if (event.button !== 0 || event.pointerType !== "mouse")
+                    return;
+                  // Mouse selection must run before focus/portal changes can
+                  // cancel click. Touch waits for click so a swipe can scroll
+                  // the suggestion list without accepting its first item.
                   event.preventDefault();
                   accept(suggestion);
                 }}
-                onClick={(event) => {
-                  // Preserve keyboard and assistive-technology activation.
-                  // Pointer activation was already handled above.
-                  if (event.detail === 0) accept(suggestion);
+                onClick={() => {
+                  // Touch, keyboard, and assistive-technology activation. A
+                  // mouse click after pointer acceptance is idempotent.
+                  accept(suggestion);
                 }}
               >
                 <span className="truncate">{suggestion.value}</span>

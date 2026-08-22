@@ -1,3 +1,4 @@
+import type { WebQueueReplacement } from "../protocol";
 import type { SemanticEntry } from "./semantic-session";
 
 const LOCAL_COMMAND_PREFIX = "local-command-";
@@ -8,6 +9,39 @@ export function localCommandEntryId(requestId: string): string {
 
 export function isLocalCommandEntry(entry: SemanticEntry): boolean {
   return Boolean(entry.id?.startsWith(LOCAL_COMMAND_PREFIX));
+}
+
+/** Keep model-gated optimistic bubbles synchronized with accepted queue edits. */
+export function reconcileOptimisticQueueEntries(
+  entries: SemanticEntry[],
+  previousQueue: readonly WebQueueReplacement[],
+  nextQueue: readonly WebQueueReplacement[],
+): SemanticEntry[] {
+  const optimisticIds = new Map(
+    previousQueue.map((item) => [`optimistic-${item.id}`, item.id]),
+  );
+  const replacements = new Map(nextQueue.map((item) => [item.id, item]));
+  return entries.flatMap((entry) => {
+    const queueId = entry.id ? optimisticIds.get(entry.id) : undefined;
+    if (!queueId) return [entry];
+    const replacement = replacements.get(queueId);
+    if (!replacement) return [];
+    return [
+      {
+        ...entry,
+        message: {
+          ...entry.message,
+          role: "user" as const,
+          content: [
+            ...(replacement.message
+              ? [{ type: "text" as const, text: replacement.message }]
+              : []),
+            ...(replacement.images ?? []).map((image) => ({ ...image })),
+          ],
+        },
+      },
+    ];
+  });
 }
 
 function isOptimisticPromptEntry(entry: SemanticEntry): boolean {

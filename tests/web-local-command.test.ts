@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   localCommandEntryId,
   preserveLocalCommandEntries,
+  reconcileOptimisticQueueEntries,
 } from "../web/client/local-command";
 import type { SemanticEntry } from "../web/client/semantic-session";
 
@@ -95,6 +96,24 @@ test("image-only optimistic prompts reconcile by image content", () => {
       (item) => item.id,
     ),
   ).toEqual(["different-image", "optimistic-image"]);
+});
+
+test("accepted queue edits update or remove model-gated optimistic prompts", () => {
+  const optimistic = entry("optimistic-request-1", 200, "original");
+  expect(
+    reconcileOptimisticQueueEntries(
+      [optimistic],
+      [{ id: "request-1", message: "original" }],
+      [{ id: "request-1", message: "edited" }],
+    )[0]?.message?.content,
+  ).toEqual([{ type: "text", text: "edited" }]);
+  expect(
+    reconcileOptimisticQueueEntries(
+      [optimistic],
+      [{ id: "request-1", message: "original" }],
+      [],
+    ),
+  ).toEqual([]);
 });
 
 test("local command reconciliation does not duplicate an incoming command", () => {

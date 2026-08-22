@@ -85,6 +85,7 @@ import { cn } from "./lib/utils";
 import {
   localCommandEntryId,
   preserveLocalCommandEntries,
+  reconcileOptimisticQueueEntries,
 } from "./local-command";
 import {
   mergeSemanticHistory,
@@ -171,6 +172,10 @@ export function App() {
   const [queuedMessages, setQueuedMessages] = React.useState<
     WebQueuedMessage[]
   >([]);
+  const queuedMessagesRef = React.useRef<WebQueuedMessage[]>([]);
+  React.useEffect(() => {
+    queuedMessagesRef.current = queuedMessages;
+  }, [queuedMessages]);
   const [sessionOptions, setSessionOptions] = React.useState<WebSessionOptions>(
     { models: [], thinkingLevels: [], commands: [] },
   );
@@ -187,7 +192,9 @@ export function App() {
   } | null>(null);
   const connectionGenerationRef = React.useRef(0);
   const optionsGenerationRef = React.useRef(0);
-  const optimisticWorkingSessionsRef = React.useRef(new Set<string>());
+  const optimisticWorkingSessionsRef = React.useRef(
+    new Map<string, WebSession["status"]>(),
+  );
   const pendingRequestsRef = React.useRef(
     new Map<
       string,
@@ -526,18 +533,19 @@ export function App() {
             setActiveTools([]);
         }
         if (eventType === "model_selection_error") {
-          const wasOptimistic =
-            optimisticWorkingSessionsRef.current.delete(payload.sessionId);
-          if (wasOptimistic) {
+          const previousOptimisticStatus =
+            optimisticWorkingSessionsRef.current.get(payload.sessionId);
+          optimisticWorkingSessionsRef.current.delete(payload.sessionId);
+          if (previousOptimisticStatus) {
             setCurrentSession((current) =>
               current?.id === payload.sessionId
-                ? { ...current, status: "idle" }
+                ? { ...current, status: previousOptimisticStatus }
                 : current,
             );
             setSessions((previous) =>
               previous.map((session) =>
                 session.id === payload.sessionId
-                  ? { ...session, status: "idle" }
+                  ? { ...session, status: previousOptimisticStatus }
                   : session,
               ),
             );
@@ -1055,7 +1063,10 @@ export function App() {
         selectedSession?.status !== "working";
       const previousStatus = selectedSession?.status;
       if (optimisticallyWorking) {
-        optimisticWorkingSessionsRef.current.add(sessionId);
+        optimisticWorkingSessionsRef.current.set(
+          sessionId,
+          previousStatus ?? "idle",
+        );
         setCurrentSession((current) =>
           current?.id === sessionId
             ? { ...current, status: "working" }
@@ -1205,9 +1216,19 @@ export function App() {
     async (queue: WebQueueReplacement[]) => {
       const sessionId = selectedIdRef.current;
       if (!sessionId) throw new Error("No session selected");
+      const previousQueue = queuedMessagesRef.current;
       // Keep the visible queue authoritative: the subscribed socket applies the
       // server's web_queue_update only after replace_queue has been accepted.
       await sendSessionCommand(sessionId, { type: "replace_queue", queue });
+      const next = reconcileOptimisticQueueEntries(
+        entriesRef.current,
+        previousQueue,
+        queue,
+      );
+      if (next !== entriesRef.current) {
+        entriesRef.current = next;
+        setEntries(next);
+      }
     },
     [],
   );

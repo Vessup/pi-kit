@@ -845,6 +845,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
       const settings = await readAutoRouterSettings();
       if (
         generation !== runtimeGeneration ||
+        !autoActive ||
         !ctx.isIdle() ||
         ctx.hasPendingMessages()
       )
