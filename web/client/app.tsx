@@ -84,6 +84,7 @@ import { assertClientPromptPayloadFits } from "./image-payload";
 import { cn } from "./lib/utils";
 import {
   localCommandEntryId,
+  localHistoryBaselineIdentities,
   preserveLocalCommandEntries,
   reconcileOptimisticQueueEntries,
 } from "./local-command";
@@ -625,6 +626,8 @@ export function App() {
                   id: optimisticId,
                   type: "message" as const,
                   timestamp: new Date().toISOString(),
+                  localHistoryBaselineIdentities:
+                    localHistoryBaselineIdentities(entriesRef.current),
                   message: {
                     role: "user",
                     timestamp: Date.now(),
@@ -1032,6 +1035,7 @@ export function App() {
       message: string,
       images: SemanticImage[],
       streamingBehavior?: "steer" | "followUp",
+      onDispatched?: () => void,
     ) => {
       const sessionId = selectedIdRef.current;
       const socket = socketRef.current;
@@ -1088,6 +1092,9 @@ export function App() {
         id: optimisticId,
         type: "message",
         timestamp: new Date().toISOString(),
+        localHistoryBaselineIdentities: localHistoryBaselineIdentities(
+          entriesRef.current,
+        ),
         message: {
           role: "user",
           timestamp: Date.now(),
@@ -1120,6 +1127,7 @@ export function App() {
           });
           try {
             socket.send(promptFrame);
+            onDispatched?.();
           } catch (cause) {
             pendingRequestsRef.current.delete(requestId);
             const next = entriesRef.current.filter(

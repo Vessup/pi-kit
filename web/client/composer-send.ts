@@ -38,12 +38,24 @@ export function isQueuedFollowUpResponse(value: unknown): boolean {
   );
 }
 
+export function followUpSubmissionBlocked(
+  immediateSendPending: boolean,
+  immediateSendDispatched: boolean,
+  followUpPending: boolean,
+): boolean {
+  return (
+    followUpPending || (immediateSendPending && !immediateSendDispatched)
+  );
+}
+
 export function shouldDefaultToQueueFollowUp(
   session: Pick<WebSession, "status" | "compaction"> | null | undefined,
   immediateSendPending: boolean,
+  immediateSendDispatched: boolean,
 ): boolean {
   return Boolean(
     session?.status === "working" &&
-      (session.compaction || immediateSendPending),
+      (session.compaction ||
+        (immediateSendPending && immediateSendDispatched)),
   );
 }

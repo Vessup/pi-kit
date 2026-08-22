@@ -1,4 +1,5 @@
 import type { WebQueueReplacement } from "../protocol";
+import { semanticEntryIdentity } from "./semantic-history";
 import type { SemanticEntry } from "./semantic-session";
 
 const LOCAL_COMMAND_PREFIX = "local-command-";
@@ -71,19 +72,117 @@ function entryContentIdentity(entry: SemanticEntry): string | undefined {
   return parts.length > 0 ? JSON.stringify(parts) : undefined;
 }
 
-function entryTime(entry: SemanticEntry): number | undefined {
-  if (entry.timestamp) {
-    const parsed = Date.parse(entry.timestamp);
-    if (Number.isFinite(parsed)) return parsed;
+function isBrowserLocalEntry(entry: SemanticEntry): boolean {
+  return isLocalCommandEntry(entry) || isOptimisticPromptEntry(entry);
+}
+
+export function localHistoryBaselineIdentities(
+  entries: readonly SemanticEntry[],
+): string[] {
+  return entries.flatMap((entry) => {
+    if (isBrowserLocalEntry(entry)) return [];
+    const identity = semanticEntryIdentity(entry);
+    return identity ? [identity] : [];
+  });
+}
+
+function mergeLocalEntriesByHistoryOrder(
+  previous: SemanticEntry[],
+  incoming: SemanticEntry[],
+  local: SemanticEntry[],
+  confirmationIdentities: ReadonlyMap<SemanticEntry, string>,
+): SemanticEntry[] {
+  const result = [...incoming];
+  const incomingIdentities = new Set(
+    incoming
+      .map(semanticEntryIdentity)
+      .filter((identity): identity is string => Boolean(identity)),
+  );
+  const inserted = new Set<SemanticEntry>();
+  const previousIndexes = new Map(
+    previous.map((entry, index) => [entry, index]),
+  );
+
+  // Insert in reverse so multiple local entries after one authoritative anchor
+  // retain their original order without consulting either machine's clock.
+  for (let localIndex = local.length - 1; localIndex >= 0; localIndex -= 1) {
+    const entry = local[localIndex];
+    if (!entry) continue;
+    const previousIndex = previousIndexes.get(entry) ?? previous.length;
+    let priorAnchorIdentity: string | undefined;
+    for (let index = previousIndex - 1; index >= 0; index -= 1) {
+      const candidate = previous[index];
+      const confirmationIdentity = candidate
+        ? confirmationIdentities.get(candidate)
+        : undefined;
+      if (confirmationIdentity) {
+        priorAnchorIdentity = confirmationIdentity;
+        break;
+      }
+      const candidateIdentity = candidate
+        ? semanticEntryIdentity(candidate)
+        : undefined;
+      if (
+        candidate &&
+        candidateIdentity &&
+        !isBrowserLocalEntry(candidate) &&
+        incomingIdentities.has(candidateIdentity)
+      ) {
+        priorAnchorIdentity = candidateIdentity;
+        break;
+      }
+    }
+    if (priorAnchorIdentity) {
+      const anchorIndex = result.findIndex(
+        (candidate) =>
+          semanticEntryIdentity(candidate) === priorAnchorIdentity,
+      );
+      result.splice(anchorIndex + 1, 0, entry);
+      inserted.add(entry);
+      continue;
+    }
+
+    let nextAnchorIdentity: string | undefined;
+    for (let index = previousIndex + 1; index < previous.length; index += 1) {
+      const candidate = previous[index];
+      const confirmationIdentity = candidate
+        ? confirmationIdentities.get(candidate)
+        : undefined;
+      if (confirmationIdentity) {
+        nextAnchorIdentity = confirmationIdentity;
+        break;
+      }
+      const candidateIdentity = candidate
+        ? semanticEntryIdentity(candidate)
+        : undefined;
+      if (
+        candidate &&
+        candidateIdentity &&
+        !isBrowserLocalEntry(candidate) &&
+        incomingIdentities.has(candidateIdentity)
+      ) {
+        nextAnchorIdentity = candidateIdentity;
+        break;
+      }
+    }
+    if (nextAnchorIdentity) {
+      let anchorIndex = result.findIndex(
+        (candidate) =>
+          semanticEntryIdentity(candidate) === nextAnchorIdentity,
+      );
+      while (
+        anchorIndex > 0 &&
+        result[anchorIndex - 1] &&
+        inserted.has(result[anchorIndex - 1])
+      )
+        anchorIndex -= 1;
+      result.splice(anchorIndex, 0, entry);
+    } else {
+      result.unshift(entry);
+    }
+    inserted.add(entry);
   }
-  const timestamp = entry.message?.timestamp;
-  if (typeof timestamp === "number" && Number.isFinite(timestamp))
-    return timestamp;
-  if (typeof timestamp === "string") {
-    const parsed = Date.parse(timestamp);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
+  return result;
 }
 
 /** Keep submitted browser work visible until authoritative history includes it. */
@@ -94,47 +193,52 @@ export function preserveLocalCommandEntries(
   const incomingIds = new Set(
     incoming.map((entry) => entry.id).filter((id): id is string => Boolean(id)),
   );
+  const previousAuthoritativeIdentities =
+    localHistoryBaselineIdentities(previous);
   const incomingUsers = incoming
     .filter((entry) => entry.message?.role === "user")
     .map((entry) => ({
-      identity: entryContentIdentity(entry),
-      time: entryTime(entry),
+      historyIdentity: semanticEntryIdentity(entry),
+      contentIdentity: entryContentIdentity(entry),
       consumed: false,
     }))
     .filter(
-      (candidate): candidate is typeof candidate & { identity: string } =>
-        candidate.identity !== undefined,
+      (
+        candidate,
+      ): candidate is typeof candidate & {
+        historyIdentity: string;
+        contentIdentity: string;
+      } =>
+        candidate.historyIdentity !== undefined &&
+        candidate.contentIdentity !== undefined,
     );
+  const confirmationIdentities = new Map<SemanticEntry, string>();
   const local = previous.filter((entry) => {
     if (isLocalCommandEntry(entry))
       return !entry.id || !incomingIds.has(entry.id);
     if (!isOptimisticPromptEntry(entry)) return false;
     const identity = entryContentIdentity(entry);
-    const time = entryTime(entry);
     if (!identity) return true;
+    const baseline = new Set(
+      entry.localHistoryBaselineIdentities ??
+        previousAuthoritativeIdentities,
+    );
     const confirmation = incomingUsers.find(
       (candidate) =>
         !candidate.consumed &&
-        candidate.identity === identity &&
-        (time === undefined ||
-          candidate.time === undefined ||
-          candidate.time >= time),
+        candidate.contentIdentity === identity &&
+        !baseline.has(candidate.historyIdentity),
     );
     if (!confirmation) return true;
     confirmation.consumed = true;
+    confirmationIdentities.set(entry, confirmation.historyIdentity);
     return false;
   });
   if (local.length === 0) return incoming;
-  return [...incoming, ...local]
-    .map((entry, index) => ({ entry, index, time: entryTime(entry) }))
-    .sort((left, right) => {
-      if (
-        left.time === undefined ||
-        right.time === undefined ||
-        left.time === right.time
-      )
-        return left.index - right.index;
-      return left.time - right.time;
-    })
-    .map(({ entry }) => entry);
+  return mergeLocalEntriesByHistoryOrder(
+    previous,
+    incoming,
+    local,
+    confirmationIdentities,
+  );
 }

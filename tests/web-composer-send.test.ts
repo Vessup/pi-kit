@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  followUpSubmissionBlocked,
   isQueuedFollowUpResponse,
   restoreFailedDraft,
   restoreFailedImages,
@@ -52,23 +53,25 @@ test("compaction makes queue follow-up the default composer action", () => {
         compaction: { reason: "manual", startedAt: Date.now() },
       },
       false,
+      false,
     ),
   ).toBe(true);
 });
 
-test("an in-flight send falls back to queueing while the session is working", () => {
-  expect(
-    shouldDefaultToQueueFollowUp(
-      { status: "working", compaction: undefined },
-      true,
-    ),
-  ).toBe(true);
+test("an in-flight send enables follow-ups only after its frame is dispatched", () => {
+  const session = { status: "working" as const, compaction: undefined };
+  expect(shouldDefaultToQueueFollowUp(session, true, false)).toBe(false);
+  expect(followUpSubmissionBlocked(true, false, false)).toBe(true);
+  expect(shouldDefaultToQueueFollowUp(session, true, true)).toBe(true);
+  expect(followUpSubmissionBlocked(true, true, false)).toBe(false);
+  expect(followUpSubmissionBlocked(true, true, true)).toBe(true);
 });
 
 test("ordinary working sessions still default to steering", () => {
   expect(
     shouldDefaultToQueueFollowUp(
       { status: "working", compaction: undefined },
+      false,
       false,
     ),
   ).toBe(false);
@@ -78,6 +81,7 @@ test("idle sessions still wait for immediate sending to become available", () =>
   expect(
     shouldDefaultToQueueFollowUp(
       { status: "idle", compaction: undefined },
+      true,
       true,
     ),
   ).toBe(false);

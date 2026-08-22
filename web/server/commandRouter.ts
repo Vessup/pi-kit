@@ -98,6 +98,17 @@ export function createCommandRouter(options: {
   const { hydrateGitMetadata } = git;
   const { createRpcSession } = rpcSessions;
 
+  function broadcastModelSelectionError(
+    record: SessionRecord,
+    message: string,
+  ): void {
+    broadcastToSessionClients(record.id, {
+      type: "server.event",
+      sessionId: record.id,
+      event: { type: "model_selection_error", message },
+    } satisfies ServerEventMessage);
+  }
+
   const slashCommands = new SlashCommandService(normalizePath, (cwd) =>
     createRpcSession({
       cwd,
@@ -159,11 +170,7 @@ export function createCommandRouter(options: {
         console.error(
           `Could not apply deferred model selection for ${record.id}: ${message}`,
         );
-        broadcastToSessionClients(record.id, {
-          type: "server.event",
-          sessionId: record.id,
-          event: { type: "model_selection_error", message },
-        } satisfies ServerEventMessage);
+        broadcastModelSelectionError(record, message);
       },
     ).finally(() => {
       record.applyingModelSelection = false;
@@ -288,9 +295,12 @@ export function createCommandRouter(options: {
         succeeded = true;
         return result;
       } catch (error) {
-        if (record.modelSelectionOperation === operation)
-          record.modelSelectionError =
+        if (record.modelSelectionOperation === operation) {
+          const message =
             error instanceof Error ? error.message : String(error);
+          record.modelSelectionError = message;
+          broadcastModelSelectionError(record, message);
+        }
         throw error;
       } finally {
         if (record.modelSelectionOperation === operation) {
@@ -638,8 +648,10 @@ export function createCommandRouter(options: {
           } catch (error) {
             selectionFailed = true;
             selectionError = error;
-            record.modelSelectionError =
+            const message =
               error instanceof Error ? error.message : String(error);
+            record.modelSelectionError = message;
+            broadcastModelSelectionError(record, message);
           } finally {
             record.applyingModelSelection = false;
           }
