@@ -189,6 +189,31 @@ test("reordering an uncertain delivery behind an ordinary item still blocks flus
   coordinator.cancelWebQueueWork(target);
 });
 
+test("queued prompts cannot steer before their required model is active", async () => {
+  const target = record(
+    [
+      {
+        id: "model-dependent",
+        message: "continue on model B",
+        requiredModel: { provider: "test", modelId: "model-b" },
+      },
+    ],
+    "working",
+  );
+  target.selectedModel = "test/model-a";
+  target.pendingModelSelection = { provider: "test", modelId: "model-b" };
+  const { coordinator, deliveries } = setup(target);
+
+  await expect(
+    coordinator.routeQueueCommand(target, {
+      type: "steer_queue_item",
+      itemId: "model-dependent",
+    }),
+  ).rejects.toThrow("required model");
+  expect(deliveries).toEqual([]);
+  expect(target.queue[0]?.deliveryState).toBeUndefined();
+});
+
 test("queued control commands cannot be converted into steering prompts", async () => {
   const target = record(
     [{ id: "compact", message: "/compact preserve names" }],

@@ -554,6 +554,17 @@ export function createSessionQueueCoordinator(
           );
         if (record.queue.some((item) => item.deliveryState === "delivering"))
           throw new Error("Another queued message has uncertain delivery");
+        const activeModel = record.selectedModel ?? record.model;
+        if (
+          modelSelectionBlocksPrompts(record) ||
+          (queued.requiredModel &&
+            activeModel !==
+              `${queued.requiredModel.provider}/${queued.requiredModel.modelId}`)
+        ) {
+          throw new Error(
+            "This queued message must wait for its required model to be applied",
+          );
+        }
         if (
           isWebReloadCommand(queued.message) ||
           parseWebCompactCommand(queued.message)

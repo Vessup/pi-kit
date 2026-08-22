@@ -63,6 +63,12 @@ test("Staff Review Informant job uses trusted review resources", async () => {
   expect(job.container.prepare).toContain(
     'throw new Error("provider credentials remained visible after startup")',
   );
+  expect(job.container.prepare).toContain(
+    "releases/download/v1.10.4/staff-linux-arm64",
+  );
+  expect(job.container.prepare).toContain(
+    "12a927f5297cc8d32c29a5d68a7d7f9491d08e070db2a1da2362ca2acd315cdb",
+  );
   expect(job.container.prepare).toContain("sha256sum -c -");
   expect(job.container.prepare).toContain(
     "sed -i 's#[.]agents/skills/#/opt/informant/skills/#g'",

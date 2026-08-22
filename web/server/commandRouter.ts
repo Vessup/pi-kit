@@ -113,6 +113,12 @@ export function createCommandRouter(options: {
   ): Promise<void> {
     if (!record.managed) throw new Error(`Session ${record.id} is not managed`);
     await record.managed.setModel(selection.provider, selection.modelId);
+    const selectedModel = `${selection.provider}/${selection.modelId}`;
+    // The runtime accepted this model even if the metadata refresh below is
+    // temporarily unavailable. Satisfy durable queue dependencies immediately
+    // instead of repeatedly issuing the same set_model operation.
+    record.selectedModel = selectedModel;
+    record.model = selectedModel;
     record.modelTurnGeneration = (record.modelTurnGeneration ?? 0) + 1;
     record.autoTurnActive = false;
     record.autoTurnSettling = false;
@@ -625,12 +631,15 @@ export function createCommandRouter(options: {
           // router's transient runtime swap. Only invalidate Auto tracking
           // after the runtime accepts the new model.
           record.applyingModelSelection = true;
+          let selectionFailed = false;
+          let selectionError: unknown;
           try {
             await applyManagedModelSelection(record, command);
           } catch (error) {
+            selectionFailed = true;
+            selectionError = error;
             record.modelSelectionError =
               error instanceof Error ? error.message : String(error);
-            throw error;
           } finally {
             record.applyingModelSelection = false;
           }
@@ -645,6 +654,7 @@ export function createCommandRouter(options: {
           } else if (record.status !== "working") {
             void flushWebQueue(record);
           }
+          if (selectionFailed) throw selectionError;
           return;
         }
         case "set_thinking_level":

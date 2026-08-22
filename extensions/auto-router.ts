@@ -14,6 +14,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+import { assistantTerminalNotice } from "../web/assistant-message.js";
 import {
   AUTO_ROUTER_ACTIVE_ENTRY,
   lastAutoRoutedModelFromEntries,
@@ -1014,7 +1015,7 @@ export default async function autoRouter(pi: ExtensionAPI): Promise<void> {
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const message = event.message;
-    if (message.stopReason === "aborted") {
+    if (assistantTerminalNotice(message)?.kind === "stopped") {
       pendingRuntimeFailure = undefined;
       runtimeFallbackTried.clear();
       return; // user-cancelled, not a provider health signal or fallback trigger

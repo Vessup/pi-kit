@@ -1157,6 +1157,46 @@ test("an aborted (user-cancelled) message does not count as a provider failure",
   expect(fake.setModelCalls).toEqual([a]);
 });
 
+test("error-shaped user cancellation never triggers runtime fallback", async () => {
+  const a = model("prov", "model-a");
+  const b = model("prov", "model-b");
+  await writeConfig({
+    efforts: {
+      medium: {
+        models: [
+          { provider: "prov", id: "model-a" },
+          { provider: "prov", id: "model-b" },
+        ],
+      },
+    },
+  });
+
+  for (const errorMessage of [
+    "This operation was aborted",
+    "Request was aborted",
+  ]) {
+    const fake = createFakePi();
+    await autoRouter(fake.pi);
+    const ctx = fakeCtx({
+      modelRegistry: fakeModelRegistry({ models: [a, b] }),
+      currentModel: fake.currentModel,
+    });
+    await fake.fire("session_start", {}, ctx);
+    await selectAuto(fake, ctx);
+    await fake.fire("before_agent_start", { prompt: "do the work" }, ctx);
+    await fake.fire(
+      "message_end",
+      {
+        message: { role: "assistant", stopReason: "error", errorMessage },
+      },
+      ctx,
+    );
+    await fake.fire("agent_settled", {}, ctx);
+    expect(fake.sentMessages).toEqual([]);
+    expect(fake.currentModel.value?.provider).toBe("auto");
+  }
+});
+
 test("Auto continues a failed request on the next configured model after core retries settle", async () => {
   const a = model("prov", "model-a");
   const b = model("prov", "model-b");
