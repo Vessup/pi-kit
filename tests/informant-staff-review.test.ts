@@ -58,6 +58,9 @@ test("Staff Review Informant job uses trusted review resources", async () => {
   ]);
   expect(job.command).toContain('rm -f "$review_agent_dir/auth.json"');
   expect(job.command).toContain(
+    'chown -R root:reviewer "$review_agent_dir"',
+  );
+  expect(job.command).toContain(
     'find "$review_agent_dir" -type d -exec chmod 0550 {} +',
   );
   expect(job.container.prepare).toContain(

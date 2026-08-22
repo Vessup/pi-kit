@@ -58,7 +58,7 @@ rm -f "$NPM_CONFIG_USERCONFIG"
 # root-owned/read-only, then have a root scrubber remove auth.json before the
 # session_start hook returns and any model-controlled tool can execute.
 auth_loaded_marker="$review_home/auth-loaded"
-chown root:reviewer "$review_agent_dir"
+chown -R root:reviewer "$review_agent_dir"
 find "$review_agent_dir" -type d -exec chmod 0550 {} +
 find "$review_agent_dir" -type f -exec chmod 0440 {} +
 chown reviewer:reviewer "$review_home"

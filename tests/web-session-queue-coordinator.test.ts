@@ -201,7 +201,6 @@ test("queued prompts cannot steer before their required model is active", async 
     "working",
   );
   target.selectedModel = "test/model-a";
-  target.pendingModelSelection = { provider: "test", modelId: "model-b" };
   const { coordinator, deliveries } = setup(target);
 
   await expect(
