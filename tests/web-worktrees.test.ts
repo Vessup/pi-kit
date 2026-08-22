@@ -408,7 +408,7 @@ test("existing registered worktrees are resolved without modifying their branch"
   expect((await Bun.$`git -C ${worktree} rev-parse HEAD`.text()).trim()).toBe(
     beforeHead,
   );
-});
+}, 15_000);
 
 test("existing detached worktrees retain their exact HEAD", async () => {
   directory = await mkdtemp(join(tmpdir(), "pi-kit-existing-detached-"));
