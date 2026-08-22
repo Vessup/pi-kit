@@ -1535,7 +1535,7 @@ export function App() {
                 <PanelLeftClose className="h-4 w-4" />
               </Button>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="-mr-4 min-h-0 flex-1 overflow-y-auto pr-4">
               {filteredSessions.length > 0 ? (
                 <SessionSidebarList
                   sessions={filteredSessions}

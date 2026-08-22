@@ -3115,7 +3115,7 @@ export function SemanticSession({
         <div ref={scrollSpacerRef} aria-hidden="true" className="shrink-0" />
       </div>
       {showScrollToBottom && (
-        <div className="relative z-30 h-0">
+        <div className="relative z-10 h-0">
           <button
             type="button"
             className="semantic-scroll-bottom"
